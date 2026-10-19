@@ -38,13 +38,13 @@ impl Mcp {
                 .or_else(|| asked.country.clone()),
             ..asked.clone()
         };
-        let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        let mut results = self.lookup_name(name, 1 + ALTERNATIVES, options)?;
         // A country's name can end a place's own: New Mexico is not "new"
         // in Mexico, nor New South Wales "new south" in Wales.
         let whole = identity::Intent::whole(name);
         let options = if intent.country.is_some() && whole.is_known_name(&results) {
             intent = whole;
-            results = self.lookup(name, 1 + ALTERNATIVES, asked)?;
+            results = self.lookup_name(name, 1 + ALTERNATIVES, asked)?;
             asked
         } else {
             options
@@ -784,7 +784,7 @@ impl Mcp {
                 && word.bytes().all(|b| b.is_ascii_uppercase())
                 && !WANTED_WORDS.contains(&word.to_ascii_lowercase().as_str())
         })?;
-        let found = self.lookup(abbreviation, 1, options).ok()?;
+        let found = self.lookup_name(abbreviation, 1, options).ok()?;
         let top = found.hits.into_iter().next()?;
         (top.named && letters(&domain_label(&top.domain)) == abbreviation.to_ascii_lowercase())
             .then_some(top)

@@ -23,10 +23,11 @@
 //! * Crawl sharing: [`NetHandle::publish`] signs a batch of crawl results,
 //!   keeps it and announces its header on the gossip topic. A node that
 //!   hears of a batch it lacks fetches it from the node that passed the
-//!   header on (or the crawler), checks it, keeps it, and hands the records
+//!   header on (or the crawler), checks it, keeps it, and hands the sites
 //!   it accepts ([`accept_batch`](crate::batch::accept_batch)) to the
-//!   [`Agreement`] step, which hands a record to the receiver returned by
-//!   [`start`] only once two crawlers agree on it (see [`crate::agree`]).
+//!   [`Agreement`] step, which hands a site to the receiver returned by
+//!   [`start`] only once two crawlers agree on it (see [`crate::agree`]),
+//!   each as its stored item, held as its line ([`RecordDelivery`]).
 //!   On meeting a node, it asks for the batches of the last
 //!   [`CATCH_UP_EPOCHS`] epochs it missed, and every [`RELIST_MINUTES`]
 //!   asks the nodes it is connected to again for recent ones.
@@ -74,7 +75,8 @@ use libp2p::{
     Multiaddr, PeerId, Swarm,
 };
 use plumb_core::locks::Locked;
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::sites::SiteList;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -186,7 +188,7 @@ const MAX_ESTABLISHED_INCOMING: u32 = 1024;
 /// Connections with one node at once (TCP, QUIC, through relays).
 const MAX_ESTABLISHED_PER_PEER: u32 = 8;
 
-/// Largest answer taken on `/plumb/batch/1`: a batch of at most
+/// Largest answer taken on `/plumb/batch/2`: a batch of at most
 /// [`crate::batch::MAX_BATCH_BYTES`] of records, or
 /// [`MAX_LISTED_BATCHES`] headers of a few hundred bytes each.
 const MAX_BATCH_RESPONSE: u64 = crate::batch::MAX_BATCH_BYTES as u64 + 4 * 1024 * 1024;
@@ -511,7 +513,7 @@ type ProfileReply = oneshot::Sender<Result<ProfileResponse>>;
 
 enum Command {
     Publish {
-        records: Vec<SiteRecord>,
+        sites: SiteList,
         reply: oneshot::Sender<Result<Option<Hash>>>,
     },
     Peers(Serving, oneshot::Sender<Vec<BucketPeer>>),
@@ -944,19 +946,20 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
         let Ok((signed, _)) = proof.verify_trusted(now) else {
             continue;
         };
-        if signed.domain != site.record.domain {
+        if signed.id != site.site.domain() {
             continue;
         }
-        let record = &mut site.record;
-        record.url = signed.url.clone();
-        record.title = signed.title.clone();
-        record.description = signed.description.clone();
-        record.headings = signed.headings.clone();
-        record.body_text = signed.body_text.clone();
-        record.terms = signed.terms.clone();
-        record.key_pages = signed.key_pages.clone();
-        record.links_to = signed.links_to.clone();
-        record.crawled_at = signed.crawled_at;
+        site.site.update(|shown| {
+            shown.url = signed.url.clone();
+            shown.title = signed.title.clone();
+            shown.about = signed.about.clone();
+            plumb_core::site::set_headings(shown, plumb_core::site::headings(&signed));
+            shown.text = signed.text.clone();
+            plumb_core::site::set_terms(shown, plumb_core::site::terms(&signed));
+            plumb_core::site::set_key_pages(shown, plumb_core::site::key_pages(&signed));
+            plumb_core::site::set_links_to(shown, plumb_core::site::links_to(&signed));
+            plumb_core::site::set_crawled(shown, plumb_core::site::crawled(&signed));
+        });
         if !site.verified {
             site.verified = true;
             site.crawler = Some(crawler.to_string());
@@ -964,7 +967,7 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
                 site.crawlers.insert(0, crawler.to_string());
             }
         }
-        site.shared = Some(signed);
+        site.shared = Some(signed.into());
         site.trusted = true;
     }
 }
@@ -1054,8 +1057,8 @@ enum Answer {
         from: PeerId,
         made: u64,
         lines: usize,
-        accepted: Vec<SiteRecord>,
-        news: Vec<SiteRecord>,
+        accepted: SiteList,
+        news: SiteList,
         permit: Option<mpsc::OwnedPermit<RecordDelivery>>,
         saved: Result<(bool, Option<Reservation>)>,
     },
@@ -1071,7 +1074,7 @@ enum Answer {
     Sealed(Reply, ObliviousResponse),
 }
 
-/// Whoever waits for an answer on `/plumb/oblivious/1`: a remote node, or
+/// Whoever waits for an answer on `/plumb/oblivious/2`: a remote node, or
 /// this node's own [`NetHandle`].
 enum Reply {
     Remote(ResponseChannel<ObliviousResponse>),

@@ -205,7 +205,7 @@ impl PageSearcher {
     /// The page held at the address `query` is, or else the one whose
     /// address is the longest start of its path. Found among the pages on
     /// its host named or worded like parts of its path.
-    fn page_at(&self, query: &str) -> Result<Option<PageHit>> {
+    pub(super) fn page_at(&self, query: &str) -> Result<Option<PageHit>> {
         let Some(typed) = typed_address(query) else {
             return Ok(None);
         };
@@ -271,13 +271,9 @@ impl PageSearcher {
             &TopDocs::with_limit(ADDRESS_CANDIDATES).order_by_score(),
         )? {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             let Some(at) = address_key(&page.url) else {
                 continue;
             };
@@ -307,6 +303,7 @@ impl PageSearcher {
                 popularity,
                 whole: true,
                 learned: None,
+                meant: false,
             };
             best = Some((at.len(), hit));
         }
@@ -389,13 +386,9 @@ impl PageSearcher {
                 &TopDocs::with_limit(NAMED_SITE_CANDIDATES).order_by_score(),
             )? {
                 let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
+                let Some(mut page) = self.read_page(&document)? else {
                     continue;
                 };
-                let mut page: Page = serde_json::from_str(stored)?;
                 let share = self.named_share(&page, named, naming);
                 if !page.is_site_page()
                     || share == 0.0
@@ -424,6 +417,7 @@ impl PageSearcher {
                     popularity,
                     whole: false,
                     learned: None,
+                    meant: false,
                 };
                 // One placing would leave out is no use: one in another
                 // language, or a drug offered without a prescription.

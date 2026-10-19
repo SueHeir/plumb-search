@@ -1247,6 +1247,12 @@ pub(super) fn add_pages(
             {
                 warn!("searching pages in the other number: {err:#}");
             }
+            let meant = searcher
+                .add_meant(&results.meant, &mut found)
+                .unwrap_or_else(|err| {
+                    warn!("adding the page nearest in meaning: {err:#}");
+                    None
+                });
             if let Some(wanted) = &wanted {
                 add_wanted(wanted, query, &mut found);
             }
@@ -1322,14 +1328,14 @@ pub(super) fn add_pages(
                 }
             }
             results.pages = place_pages(query, &results.hits, found);
-            if inner.rank.learned {
-                plumb_index::learned::reorder(
-                    plumb_index::learned::Model::builtin(),
-                    query,
-                    &mut results.hits,
-                    &mut results.pages,
-                );
-            }
+            plumb_index::learned::reorder_results(
+                &inner.rank,
+                query,
+                results.sites_ordered,
+                meant.as_deref(),
+                &mut results.hits,
+                &mut results.pages,
+            );
             after_learned_order(inner, &searcher, query, options, results);
         }
         Err(err) => warn!("searching pages: {err:#}"),

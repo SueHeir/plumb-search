@@ -1,29 +1,32 @@
 //! What a node keeps of each site during a crawl round: the little that
 //! choosing homepages and saving crawl marks need, about a tenth of a whole
-//! record. A round used to hold every record ([`plumb_core::RecordSet`]),
+//! site. A round used to hold every site whole, as records,
 //! well over a gigabyte for two million sites, next to everything else a
 //! node holds; the crawl results go to the records' journal as before, and
-//! the index is built from the file a record at a time
+//! the index is built from the file a site at a time
 //! ([`super::worker::build_from_file`]).
 //!
 //! The sites are read from the records file once its journal is folded in
-//! ([`crate::outline`]). Changes made during the round keep each site's
-//! crawl marks up to date and add the sites a crawl finds; the rest of a
-//! site (its score, its name) is as it was when the round read it, which
-//! is all a round reads: it picks its homepages when it starts, and the
-//! next part of the round reads the file again.
+//! ([`crate::outline`]), each as its stored item ([`plumb_core::site`]),
+//! which is what a round reads its crawl marks, score and flags off.
+//! Changes made during the round keep each site's crawl marks up to date
+//! and add the sites a crawl finds; the rest of a site (its score, its
+//! name) is as it was when the round read it, which is all a round reads:
+//! it picks its homepages when it starts, and the next part of the round
+//! reads the file again.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use plumb_core::{canonical_domain, now_unix, SiteRecord};
+use plumb_core::{canonical_domain, now_unix, site};
+use plumb_format::{Item, Ref};
 use tracing::info;
 
 use crate::about::Topics;
 use crate::crawl::{CrawlSet, CrawlSite};
 use crate::outline::Folded;
-use crate::records::{load_records, Change, RecordStore};
+use crate::records::{load_sites, Change, RecordStore};
 
 use super::trim::Keep;
 
@@ -42,7 +45,7 @@ pub(super) struct RoundSite {
     flags: u8,
 }
 
-/// The site has key pages ([`SiteRecord::key_pages`]).
+/// The site has key pages ([`site::key_pages`]).
 const HAS_KEY_PAGES: u8 = 1;
 /// The site is about one of the node's focus topics.
 const FOCUSED: u8 = 2;
@@ -52,6 +55,9 @@ const FOCUSED: u8 = 2;
 const KEPT: u8 = 4;
 /// The site has a homepage title.
 const TITLED: u8 = 8;
+/// The site's title or description has a `�` or an escape byte: its page
+/// was read in the wrong charset ([`plumb_crawl::CHARSETS_READ_SINCE`]).
+const MISREAD: u8 = 16;
 
 fn seconds(at: Option<u64>) -> u32 {
     at.map_or(0, |at| u32::try_from(at).unwrap_or(u32::MAX).max(1))
@@ -61,33 +67,51 @@ fn at(seconds: u32) -> Option<u64> {
     (seconds > 0).then_some(u64::from(seconds))
 }
 
+/// Whether the site has key pages ([`site::key_pages`]), without copying
+/// them.
+fn has_key_pages(site: &Item) -> bool {
+    site.edges
+        .iter()
+        .any(|edge| edge.rel == "key_page" && edge.text.is_some() && matches!(edge.to, Ref::Url(_)))
+}
+
 impl RoundSite {
-    pub(super) fn of(record: &SiteRecord, focus: &Topics, keep: &Keep) -> RoundSite {
+    /// What a round keeps of `site`, its stored item.
+    pub(super) fn of(site: &Item, focus: &Topics, keep: &Keep) -> RoundSite {
+        let marks = site::crawl_marks(site);
+        let crawled_at = site::crawled(site);
         let mut flags = 0;
         for (flag, set) in [
-            (HAS_KEY_PAGES, !record.key_pages.is_empty()),
-            (FOCUSED, focus.matches(record)),
+            (HAS_KEY_PAGES, has_key_pages(site)),
+            (FOCUSED, focus.matches_site(site)),
             // Only ever asked of sites that look dead; matching topics
             // against every site would take a while.
             (
                 KEPT,
-                crate::dead::looks_dead(record, now_unix()) && keep.keeps(record),
+                crate::dead::looks_dead(site, now_unix()) && keep.keeps(site),
             ),
-            (TITLED, record.title.is_some()),
+            (TITLED, site.title.is_some()),
+            (
+                MISREAD,
+                [&site.title, &site.about]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| text.contains(['\u{FFFD}', '\u{1B}'])),
+            ),
         ] {
             if set {
                 flags |= flag;
             }
         }
         RoundSite {
-            domain: record.domain.as_str().into(),
-            url: record.url.as_deref().map(Into::into),
-            score: record.link_score(),
-            crawled_at: seconds(record.crawled_at),
-            crawl_attempted_at: seconds(record.crawl_attempted_at),
-            gone_at: seconds(record.gone_at),
-            crawl_failures: record.crawl_failures,
-            crawl_version: record.crawl_version,
+            domain: site.id.as_str().into(),
+            url: site.url.as_deref().map(Into::into),
+            score: site::link_score(site),
+            crawled_at: seconds(crawled_at),
+            crawl_attempted_at: seconds(marks.tried),
+            gone_at: seconds(marks.gone),
+            crawl_failures: marks.failures,
+            crawl_version: site::crawl_version(site),
             flags,
         }
     }
@@ -116,28 +140,30 @@ impl RoundSite {
         self.has(TITLED)
     }
 
+    pub(super) fn misread(&self) -> bool {
+        self.has(MISREAD)
+    }
+
     pub(super) fn crawl_version(&self) -> u32 {
         self.crawl_version
     }
 
-    /// Takes in a crawl of the site merged into its record: its new crawl
-    /// marks, and whether it has key pages and a title now.
-    fn merge(&mut self, record: &SiteRecord) {
-        if record
-            .crawled_at
-            .is_some_and(|at| at > u64::from(self.crawled_at))
-        {
-            self.crawled_at = seconds(record.crawled_at);
-            self.crawl_version = record.crawl_version;
+    /// Takes in a crawl of the site merged into it: its new crawl marks,
+    /// and whether it has key pages and a title now.
+    fn merge(&mut self, site: &Item) {
+        let crawled_at = site::crawled(site);
+        if crawled_at.is_some_and(|at| at > u64::from(self.crawled_at)) {
+            self.crawled_at = seconds(crawled_at);
+            self.crawl_version = site::crawl_version(site);
             self.gone_at = 0;
-            if record.url.is_some() {
-                self.url = record.url.as_deref().map(Into::into);
+            if site.url.is_some() {
+                self.url = site.url.as_deref().map(Into::into);
             }
         }
-        if !record.key_pages.is_empty() {
+        if has_key_pages(site) {
             self.flags |= HAS_KEY_PAGES;
         }
-        if record.title.is_some() {
+        if site.title.is_some() {
             self.flags |= TITLED;
         }
     }
@@ -221,8 +247,7 @@ impl RoundSites {
                 "{} holds a site more than once: reading it whole to merge them",
                 path.display()
             );
-            let set = load_records(path)?;
-            store.compact(&set)?;
+            store.compact(&load_sites(path)?)?;
         }
         let mut sites = RoundSites {
             focus,
@@ -230,10 +255,10 @@ impl RoundSites {
             ..RoundSites::default()
         };
         let mut merged = false;
-        crate::outline::for_each_record(path, |record| {
-            merged |= canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str())
-                || sites.position(&record.domain).is_some();
-            sites.add(&record);
+        crate::outline::for_each_site(path, |site| {
+            merged |= canonical_domain(&site.id).as_deref() != Some(site.id.as_str())
+                || sites.position(&site.id).is_some();
+            sites.add(&site);
         })?;
         if merged {
             // Only loading merges a site the file holds twice, or under
@@ -242,9 +267,7 @@ impl RoundSites {
                 "{} holds a site more than once: reading it whole to merge them",
                 path.display()
             );
-            let set = load_records(path)?;
-            store.compact(&set)?;
-            drop(set);
+            store.compact(&load_sites(path)?)?;
             let RoundSites { focus, keep, .. } = sites;
             return Self::load_with_budget(path, focus, keep, budget);
         }
@@ -252,23 +275,23 @@ impl RoundSites {
         Ok(sites)
     }
 
-    /// The sites of `records`, for tests.
+    /// A round of `sites`, for tests.
     #[cfg(test)]
-    pub(super) fn of(records: impl IntoIterator<Item = SiteRecord>) -> RoundSites {
-        let mut sites = RoundSites::default();
-        for record in records {
-            sites.add(&record);
+    pub(super) fn of(sites: impl IntoIterator<Item = Item>) -> RoundSites {
+        let mut round = RoundSites::default();
+        for site in sites {
+            round.add(&site);
         }
-        sites
+        round
     }
 
-    /// Adds `record`, or takes it into the site already held.
-    fn add(&mut self, record: &SiteRecord) {
-        if let Some(i) = self.position(&record.domain) {
-            self.sites[i].merge(record);
+    /// Adds `site`, or takes it into the one already held.
+    fn add(&mut self, site: &Item) {
+        if let Some(i) = self.position(&site.id) {
+            self.sites[i].merge(site);
             return;
         }
-        let site = RoundSite::of(record, &self.focus, &self.keep);
+        let site = RoundSite::of(site, &self.focus, &self.keep);
         let i = u32::try_from(self.sites.len()).expect("fewer than 4 billion sites");
         match self.by_hash.entry(hash(&site.domain)) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -328,20 +351,18 @@ impl CrawlSet for RoundSites {
 
     fn apply(&mut self, change: Change) {
         match change {
-            Change::Merge { record }
-            | Change::MergeShared { record }
-            | Change::SubdomainSite { record } => {
-                if let Some(domain) = canonical_domain(&record.domain) {
-                    let mut record = record;
-                    record.domain = domain;
-                    self.add(&record);
+            Change::Merge { mut site }
+            | Change::MergeShared { mut site }
+            | Change::SubdomainSite { mut site } => {
+                if let Some(domain) = canonical_domain(&site.id) {
+                    site.id = domain;
+                    self.add(&site);
                 }
             }
-            Change::RefreshShared { mut record } => {
-                if let Some(domain) = canonical_domain(&record.domain) {
-                    record.domain = domain;
-                    if let Some(site) = self.get_mut(&record.domain) {
-                        site.merge(&record);
+            Change::RefreshShared { site } => {
+                if let Some(domain) = canonical_domain(&site.id) {
+                    if let Some(held) = self.get_mut(&domain) {
+                        held.merge(&site);
                     }
                 }
             }
@@ -385,14 +406,15 @@ impl CrawlSet for RoundSites {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::write_jsonl;
-
     use super::*;
     use crate::records::journal_path;
+    use crate::test_lines::write_old_lines;
 
-    fn record(domain: &str, tranco: u32) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+    fn record(domain: &str, tranco: u32) -> Item {
+        let mut r = site::new(domain);
+        let mut signals = site::signals(&r);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut r, &signals);
         r
     }
 
@@ -400,7 +422,7 @@ mod tests {
     fn a_round_holding_back_new_sites_takes_only_the_ones_it_holds() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        write_jsonl(&path, &[record("held.com", 5)]).unwrap();
+        write_old_lines(&path, &[record("held.com", 5)]);
         let mut sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert!(sites.takes("new.com"), "takes any site by default");
         sites.hold_new_sites(true);
@@ -414,16 +436,18 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let mut bank = record("usbank.com", 5);
         bank.title = Some("U.S. Bank".into());
-        bank.description = Some("A bank in Minneapolis".into());
+        bank.about = Some("A bank in Minneapolis".into());
         bank.url = Some("https://www.usbank.com/".into());
-        bank.crawled_at = Some(1_000);
-        bank.signals.official_site = true;
-        write_jsonl(&path, &[bank, record("quiet.net", 900)]).unwrap();
+        site::set_crawled(&mut bank, Some(1_000));
+        let mut signals = site::signals(&bank);
+        signals.official_site = true;
+        site::set_signals(&mut bank, &signals);
+        write_old_lines(&path, &[bank, record("quiet.net", 900)]);
         let mut found = record("Found.ORG", 50);
-        found.crawled_at = Some(2_000);
+        site::set_crawled(&mut found, Some(2_000));
         RecordStore::open(&path)
             .save(&[
-                Change::Merge { record: found },
+                Change::Merge { site: found },
                 Change::Mark {
                     domain: "quiet.net".into(),
                     attempted_at: Some(1_500),
@@ -443,8 +467,10 @@ mod tests {
         assert_eq!(bank.url(), Some("https://www.usbank.com/"));
         assert_eq!(bank.crawled_at(), Some(1_000));
         let mut official = record("usbank.com", 5);
-        official.signals.official_site = true;
-        assert_eq!(bank.link_score(), official.link_score());
+        let mut signals = site::signals(&official);
+        signals.official_site = true;
+        site::set_signals(&mut official, &signals);
+        assert_eq!(bank.link_score(), site::link_score(&official));
         assert_eq!(sites.marks("quiet.net"), (Some(1_500), 3));
         assert_eq!(sites.get("found.org").unwrap().crawled_at(), Some(2_000));
         assert!(!sites.get("quiet.net").unwrap().kept());
@@ -456,11 +482,11 @@ mod tests {
             failures: 4,
         });
         assert_eq!(sites.marks("quiet.net"), (Some(3_000), 4));
-        let mut fresh = SiteRecord::new("new.com");
-        fresh.crawled_at = Some(3_100);
-        sites.apply(Change::Merge { record: fresh });
+        let mut fresh = site::new("new.com");
+        site::set_crawled(&mut fresh, Some(3_100));
+        sites.apply(Change::Merge { site: fresh });
         sites.apply(Change::RefreshShared {
-            record: SiteRecord::new("unheld.com"),
+            site: site::new("unheld.com"),
         });
         assert_eq!(sites.len(), 4);
         sites.apply(Change::Gone {
@@ -482,16 +508,19 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let dead = |domain: &str, official: bool| {
             let mut r = record(domain, 1_000);
-            r.crawl_failures = crate::dead::DEAD_AFTER_FAILURES;
-            r.crawl_attempted_at = Some(now_unix());
-            r.signals.official_site = official;
+            let mut marks = site::crawl_marks(&r);
+            marks.failures = crate::dead::DEAD_AFTER_FAILURES;
+            marks.tried = Some(now_unix());
+            site::set_crawl_marks(&mut r, marks);
+            let mut signals = site::signals(&r);
+            signals.official_site = official;
+            site::set_signals(&mut r, &signals);
             r
         };
-        write_jsonl(
+        write_old_lines(
             &path,
             &[dead("official.org", true), dead("gone.com", false)],
-        )
-        .unwrap();
+        );
         let sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert!(sites.get("official.org").unwrap().kept());
         assert!(!sites.get("gone.com").unwrap().kept());
@@ -503,11 +532,11 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let mut titled = record("WWW.Example.com", 9);
         titled.title = Some("Example".into());
-        write_jsonl(&path, &[record("example.com", 3), titled]).unwrap();
+        write_old_lines(&path, &[record("example.com", 3), titled]);
         let sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert_eq!(sites.len(), 1);
         assert!(sites.get("example.com").unwrap().titled());
-        assert_eq!(load_records(&path).unwrap().len(), 1);
+        assert_eq!(load_sites(&path).unwrap().len(), 1);
         let lines = std::fs::read_to_string(&path).unwrap();
         assert_eq!(lines.lines().count(), 1, "rewritten once");
     }

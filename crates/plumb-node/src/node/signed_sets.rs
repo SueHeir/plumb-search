@@ -20,10 +20,10 @@
 //! The project's page sets come the same way, as item sets (`plumb/<id>`,
 //! read by [`crate::pages::HeldPageSet`]), each as far as the node keeps
 //! pages of it: the first parts that hold that many, or all of them. With
-//! `--set-updates` leaving a set out, the node takes it only when it has
-//! no file of it. A node that holds as many pages of a set this way takes
-//! no file of it over `/plumb/pages/1`; one that finds no node with the
-//! set goes on taking files as before.
+//! `--set-updates` leaving a set out, the node takes none of it, as for
+//! files, and keeps what it has as it is. A node that holds as many pages
+//! of a set this way takes no file of it over `/plumb/pages/1`; one that
+//! finds no node with the set goes on taking files as before.
 //!
 //! Crawling only ([`NodeConfig::crawl_only`]), the node takes the
 //! denylist and the site rules alone, which its crawls keep to: no adult
@@ -575,10 +575,10 @@ async fn look_page_set(
     let data = &inner.paths.data;
     let name = format!("plumb/{}", set.id);
     let held = HeldPageSet::find(data, set, &inner.config.set_publishers);
-    // As for files: with `--set-updates` leaving the set out, a node that
-    // has its pages one way or the other keeps them as they are.
-    let has_file = set.file(data).is_file();
-    if inner.config.set_updates.allows(set.id).is_none() && (has_file || held.is_some()) {
+    // As for files: with `--set-updates` leaving the set out, a node keeps
+    // the pages it has as they are, and takes none of a set it has none
+    // of, since indexing them takes memory nobody asked for.
+    if inner.config.set_updates.allows(set.id).is_none() {
         return Ok(Looked::Current);
     }
     let held_generation = held.as_ref().map(|held| held.generation);

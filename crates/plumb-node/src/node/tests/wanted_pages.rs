@@ -47,13 +47,10 @@ async fn a_search_sends_the_node_through_a_site_s_links_and_shows_what_it_found(
     let requested = Arc::new(Mutex::new(Vec::new()));
     let site = health_site(Arc::clone(&requested)).await;
     let dir = tempfile::tempdir().unwrap();
-    let record = SiteRecord {
-        domain: "healthexample.org".into(),
-        url: Some("http://healthexample.org/".into()),
-        title: Some("Health Example".into()),
-        ..SiteRecord::default()
-    };
-    write_jsonl(&dir.path().join("records.jsonl"), &[record]).unwrap();
+    let mut record = site::new("healthexample.org");
+    record.url = Some("http://healthexample.org/".into());
+    record.title = Some("Health Example".into());
+    write_old_lines(&dir.path().join("records.jsonl"), &[record]);
     // A page found before: the test site answers only plain http, and
     // only https pages are kept.
     let malaria = "https://healthexample.org/sheets/malaria";

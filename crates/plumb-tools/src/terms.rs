@@ -5,7 +5,7 @@
 //! `fetch-text` fetches homepages once and keeps their visible text (up to
 //! [`plumb_crawl::MAX_PAGE_TEXT_WORDS`] words) in a pages file. `terms` then picks each
 //! page's terms with one of several [`Method`]s and writes them into the
-//! records' `terms` field, so `plumb-tools index` and `plumb-tools eval --rank
+//! sites' `terms` field ([`plumb_core::site::terms`]), so `plumb-tools index` and `plumb-tools eval --rank
 //! '{"terms_boost": ...}'` can compare the methods on the same pages.
 
 use std::collections::HashSet;
@@ -17,14 +17,15 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use plumb_core::{SiteRecord, MAX_TERMS};
+use plumb_core::{site, MAX_TERMS};
 use plumb_crawl::{pick_terms, words_of, CrawlConfig, CrawlOutcome, HomepageCrawler};
+use plumb_format::Item;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use plumb_node::cli::parse_positive;
 use plumb_node::crawl::target_for;
-use plumb_node::records::{load_records, replace_records, sorted_by_link_score};
+use plumb_node::records::{load_sites, replace_sites};
 use plumb_node::runtime;
 
 #[derive(Debug, Args)]
@@ -117,18 +118,18 @@ impl PageText {
 
 /// `plumb-tools fetch-text`.
 pub fn run_fetch_text(args: FetchTextArgs) -> Result<()> {
-    let records = load_records(&args.records)?;
-    let mut wanted: Vec<&SiteRecord> = sorted_by_link_score(&records)
-        .into_iter()
-        .filter(|r| r.redirect.is_none())
+    let sites = load_sites(&args.records)?;
+    let mut wanted: Vec<Item> = sites
+        .by_link_score()
+        .filter(|site| site::redirect(site).is_none())
         .take(args.top)
         .collect();
-    let mut seen: HashSet<&str> = wanted.iter().map(|r| r.domain.as_str()).collect();
+    let mut seen: HashSet<String> = wanted.iter().map(|site| site.id.clone()).collect();
     let mut missing = 0;
     for path in &args.domains {
         for domain in read_domains(path)? {
-            match records.get(&domain) {
-                Some(record) if seen.insert(record.domain.as_str()) => wanted.push(record),
+            match sites.get(&domain) {
+                Some(site) if seen.insert(site.id.clone()) => wanted.push(site),
                 Some(_) => {}
                 None => missing += 1,
             }
@@ -137,7 +138,7 @@ pub fn run_fetch_text(args: FetchTextArgs) -> Result<()> {
     if missing > 0 {
         info!("{missing} listed domains have no record and are skipped");
     }
-    let targets: Vec<_> = wanted.iter().map(|r| target_for(*r)).collect();
+    let targets: Vec<_> = wanted.iter().map(target_for).collect();
     let total = targets.len();
     println!("fetching {total} homepages, {} at a time", args.concurrency);
 
@@ -211,7 +212,7 @@ type Picked = (usize, Vec<String>, f64);
 /// `plumb-tools terms`.
 pub fn run_terms(args: TermsArgs) -> Result<()> {
     let pages: Vec<PageText> = plumb_core::read_jsonl(&args.pages)?;
-    let mut records = load_records(&args.records)?;
+    let mut sites = load_sites(&args.records)?;
     let picker = Picker::new(&args);
     let threads = args
         .threads
@@ -247,15 +248,15 @@ pub fn run_terms(args: TermsArgs) -> Result<()> {
     let (mut with_terms, mut words, mut bytes) = (0usize, 0usize, 0usize);
     for (i, terms, ms) in results.into_inner().unwrap() {
         times.push(ms);
-        if terms.is_empty() || records.get(&pages[i].domain).is_none() {
+        if terms.is_empty() || !sites.contains(&pages[i].domain) {
             continue;
         }
         with_terms += 1;
         words += terms.iter().collect::<HashSet<_>>().len();
         bytes += terms.iter().map(|t| t.len() + 1).sum::<usize>();
-        records.entry(&pages[i].domain).terms = terms;
+        sites.update(&pages[i].domain, |site| site::set_terms(site, terms));
     }
-    let written = replace_records(&args.out, sorted_by_link_score(&records))?;
+    let written = replace_sites(&args.out, &sites.into_sorted())?;
 
     times.sort_by(f64::total_cmp);
     let pct = |p: f64| {
@@ -351,6 +352,62 @@ mod tests {
         assert_eq!(
             read_domains(&path).unwrap(),
             ["tesla.com", "rivian.com", "example.org"]
+        );
+    }
+
+    #[test]
+    fn terms_are_written_into_a_copy_of_the_sites_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("records.jsonl");
+        crate::test_sites::write(&records, &crate::test_sites::sites());
+        let page = |domain: &str, title: Option<&str>, text: &str| PageText {
+            domain: domain.into(),
+            title: title.map(str::to_string),
+            text: text.into(),
+            ..PageText::default()
+        };
+        let pages = vec![
+            page(
+                "python.org",
+                Some("Python"),
+                "Download Python for any platform.",
+            ),
+            page("acer.com", None, "Acer laptops, desktops and monitors."),
+            page("xn--mnchen-3ya.de", Some("München"), "Die Stadt München."),
+            page("stub.net", None, ""),
+            page("nowhere.org", Some("Nowhere"), "Not in the records."),
+            page("Example.COM", None, "Not canonical."),
+        ];
+        let pages_path = dir.path().join("pages.jsonl");
+        plumb_core::write_jsonl(&pages_path, &pages).unwrap();
+        let out = dir.path().join("out.jsonl");
+        let args = || TermsArgs {
+            pages: pages_path.clone(),
+            records: records.clone(),
+            out: out.clone(),
+            method: Method::First,
+            count: 4,
+            threads: Some(2),
+        };
+        run_terms(args()).unwrap();
+
+        // The sites of the same file, with the terms of each page of a site
+        // they hold set.
+        let picker = Picker::new(&args());
+        let mut sites = plumb_node::records::load_sites(&records).unwrap();
+        for page in &pages {
+            let terms = picker.terms(&page.full_text());
+            if !terms.is_empty() && sites.contains(&page.domain) {
+                sites.update(&page.domain, |site| {
+                    plumb_core::site::set_terms(site, terms)
+                });
+            }
+        }
+        let expected = dir.path().join("expected.jsonl");
+        crate::test_sites::write_sorted(&expected, &sites);
+        assert_eq!(
+            String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
+            String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()
         );
     }
 }

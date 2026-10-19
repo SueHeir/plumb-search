@@ -51,12 +51,16 @@ var Plumb = (() => {
 
   /** The address that asks `node` for `query`: everything it lists, or
    * with `papers` only papers. Paper searches can also take years, but
-   * plumbsearch.org's papers carry no dates yet, so none is asked for. */
+   * plumbsearch.org's papers carry no dates yet, so none is asked for.
+   * Both ask for `full=1`, which gives each page as its item. A node from
+   * before items gives each page as it was, and answers a paper search as
+   * it would without `full=1`. */
   function searchURL(node, { query, limit, papers }) {
     const url = new URL(`${node}/api/search`);
     url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
-    url.searchParams.set(...(papers ? ["kind", "paper"] : ["full", "1"]));
+    if (papers) url.searchParams.set("kind", "paper");
+    url.searchParams.set("full", "1");
     return url.href;
   }
 
@@ -77,10 +81,10 @@ var Plumb = (() => {
     };
     for (const row of rows) {
       if (row.kind == "page") {
-        add(fromPage(row.page?.page));
+        add(fromPage(row.page));
       } else if (row.kind == "site") {
         add(fromSite(row.site));
-        for (const page of row.pages ?? []) add(fromPage(page.page));
+        for (const page of row.pages ?? []) add(fromPage(page));
       }
     }
     return found;
@@ -93,12 +97,67 @@ var Plumb = (() => {
     return assembled?.rows?.length ?? Math.max(pages?.length ?? 0, hits?.length ?? 0);
   }
 
-  function fromPage(page) {
+  /** A page the node listed: its item and the set it came from
+   * (`{item, set}`), or, from a node before items, the page itself
+   * (`{page}`). Either way the result's `page` holds what is read of it,
+   * by the names `readItem` gives. */
+  function fromPage(found) {
+    const page = found?.item ? readItem(found.item, found.set) : found?.page ? readPage(found.page) : null;
     const url = httpURL(page?.url);
     if (!url || !page.title) return null;
-    const set = String(page.set ?? "");
-    const kind = set.startsWith("wikipedia") ? "article" : (KINDS[set] ?? "page");
-    return { kind, title: page.title, url, description: page.description ?? "", page };
+    const kind = page.set.startsWith("wikipedia") ? "article" : (KINDS[page.set] ?? "page");
+    return { kind, title: page.title, url, description: page.about ?? "", page };
+  }
+
+  /** What is read of a page's item, named as the item names it: the site
+   * the page is about (its `about` edge to a site, not the item's `site`,
+   * which is the site its address is on), its outside ids, a paper's date
+   * (or year alone, which only its `paper` field has), authors and venue,
+   * and a package's version, release date and license. */
+  function readItem(item, set) {
+    const fields = item.fields ?? {};
+    const about = (item.edges ?? []).find((edge) => edge?.rel == "about" && /^site:/.test(edge.to ?? ""));
+    return {
+      set: String(set ?? ""),
+      url: item.url,
+      title: item.title,
+      site: about?.to.slice("site:".length),
+      about: item.about,
+      text: item.text,
+      doi: item.ids?.doi,
+      arxiv: item.ids?.arxiv,
+      published: item.published || textOf(fields.paper?.publication_year),
+      venue: fields.venue,
+      authors: fields.authors,
+      version: fields.package?.version,
+      released: fields.package?.released,
+      license: fields.package?.license,
+    };
+  }
+
+  /** The same values of a page as a node before items gives it. */
+  function readPage(page) {
+    const paper = page.paper ?? {};
+    return {
+      set: String(page.set ?? ""),
+      url: page.url,
+      title: page.title,
+      site: page.site,
+      about: page.description,
+      text: page.lead,
+      doi: paper.doi,
+      arxiv: paper.arxiv_id,
+      published: paper.publication_date || textOf(paper.publication_year),
+      venue: paper.venue,
+      authors: paper.authors,
+      version: page.package?.version,
+      released: page.package?.released,
+      license: page.package?.license,
+    };
+  }
+
+  function textOf(value) {
+    return value == null ? undefined : String(value);
   }
 
   function fromSite(site) {
@@ -111,10 +170,10 @@ var Plumb = (() => {
   /** The DOI or arXiv ID Zotero can look a result up by, as
    * `Zotero.Translate.Search#setIdentifier` takes it, or null. */
   function identifier(result) {
-    const paper = result.page?.paper ?? {};
-    const doi = paper.doi || doiOf(result.url);
+    const page = result.page ?? {};
+    const doi = page.doi || doiOf(result.url);
     if (doi) return { DOI: doi };
-    const arxiv = paper.arxiv_id || arxivOf(result.url);
+    const arxiv = page.arxiv || arxivOf(result.url);
     return arxiv ? { arXiv: arxiv } : null;
   }
 
@@ -141,7 +200,7 @@ var Plumb = (() => {
         Object.assign(json, {
           itemType: "encyclopediaArticle",
           encyclopediaTitle: "Wikipedia",
-          abstractNote: page.lead || result.description,
+          abstractNote: page.text || result.description,
           language: /^wikipedia-([a-z-]+)$/.exec(page.set)?.[1],
         });
         break;
@@ -168,9 +227,9 @@ var Plumb = (() => {
         Object.assign(json, {
           itemType: "computerProgram",
           abstractNote: result.description,
-          versionNumber: page.package?.version,
-          date: page.package?.released,
-          rights: page.package?.license,
+          versionNumber: page.version,
+          date: page.released,
+          rights: page.license,
         });
         break;
       case "podcast":
@@ -204,14 +263,14 @@ var Plumb = (() => {
   // metadata; older ones only the description "Paper by A et al., 2017,
   // Venue", which names the first author alone.
   function paperFields(result, by) {
-    const paper = result.page?.paper ?? {};
-    const venue = paper.venue || by.venue;
-    const doi = paper.doi || doiOf(result.url);
-    const arxiv = paper.arxiv_id || arxivOf(result.url) || ARXIV_DOI.exec(doi ?? "")?.[1];
+    const page = result.page ?? {};
+    const venue = page.venue || by.venue;
+    const doi = page.doi || doiOf(result.url);
+    const arxiv = page.arxiv || arxivOf(result.url) || ARXIV_DOI.exec(doi ?? "")?.[1];
     const fields = {
       itemType: "journalArticle",
-      creators: people(paper.authors?.length ? paper.authors : [by.who], "author"),
-      date: paper.publication_date || String(paper.publication_year ?? by.year ?? ""),
+      creators: people(page.authors?.length ? page.authors : [by.who], "author"),
+      date: page.published || by.year,
       DOI: doi,
     };
     if (arxiv && (!doi || ARXIV_DOI.test(doi))) {

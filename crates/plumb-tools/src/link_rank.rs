@@ -1,5 +1,5 @@
 //! `plumb-tools link-rank`: a PageRank of the sites in a records file, from the
-//! links their homepages make to other sites ([`SiteRecord::links_to`]).
+//! links their homepages make to other sites ([`plumb_core::site::links_to`]).
 //!
 //! A site ranks high when sites that rank high link to it. Three changes
 //! from plain PageRank keep it from being gamed or skewed:
@@ -32,7 +32,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
-use plumb_core::{canonical_domain, SiteRecord};
+use plumb_core::{canonical_domain, site};
+use plumb_format::Item;
 
 use crate::cli::LinkRankArgs;
 use plumb_node::web::group_thousands;
@@ -108,30 +109,26 @@ impl Graph {
         id
     }
 
-    /// Adds one record: the site, where it redirects, and its links.
-    pub(crate) fn add(&mut self, record: &SiteRecord) -> Result<()> {
-        let Some(domain) = canonical_domain(&record.domain) else {
+    /// Adds one site of the records file, as its stored item: the site,
+    /// where it redirects, and its links.
+    pub(crate) fn add(&mut self, site: &Item) -> Result<()> {
+        let Some(domain) = canonical_domain(&site.id) else {
             return Ok(());
         };
         let src = self.id(&domain);
+        let signals = site::signals(site);
         self.in_records[src as usize] = true;
-        self.tranco[src as usize] = record.signals.tranco_rank.unwrap_or(0);
-        self.seed[src as usize] = record.signals.official_site
-            || record
-                .signals
-                .tranco_rank
-                .is_some_and(|rank| rank <= SEED_TRANCO);
+        self.tranco[src as usize] = signals.tranco_rank.unwrap_or(0);
+        self.seed[src as usize] =
+            signals.official_site || signals.tranco_rank.is_some_and(|rank| rank <= SEED_TRANCO);
         // Links to a site folded into another count for that one.
-        if let Some(to) = record
-            .redirect
-            .as_ref()
+        if let Some(to) = site::redirect(site)
             .and_then(|r| r.folds_into(&domain))
             .filter(|to| !to.is_empty() && *to != domain)
         {
             self.resolve[src as usize] = self.id(&to);
         }
-        let targets: Vec<u32> = record
-            .links_to
+        let targets: Vec<u32> = site::links_to(site)
             .iter()
             .filter(|to| organization(to) != organization(&domain))
             .map(|to| self.id(to))
@@ -398,10 +395,10 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
     let mut graph = Graph::new(dir)?;
     let mut records = 0usize;
     let mut failed = None;
-    plumb_node::outline::for_each_record(&read_from, |record| {
+    plumb_node::outline::for_each_site(&read_from, |site| {
         records += 1;
         if failed.is_none() {
-            if let Err(err) = graph.add(&record) {
+            if let Err(err) = graph.add(&site) {
                 failed = Some(err);
             }
         }
@@ -525,31 +522,35 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
         let mut changed = 0usize;
         let mut demoted = 0usize;
         let mut failed = None;
-        plumb_node::outline::for_each_record(&read_from, |mut record| {
+        plumb_node::outline::for_each_site(&read_from, |mut site| {
             if failed.is_some() {
                 return;
             }
-            let id = canonical_domain(&record.domain)
+            let id = canonical_domain(&site.id)
                 .and_then(|domain| ranked.graph.ids.get(domain.as_str()).copied());
+            let mut signals = site::signals(&site);
+            let mut signals_changed = false;
             if let (true, Some(id)) = (args.demote, id) {
                 let untrusted = ranked.untrusted_in[id as usize];
-                let signals = &mut record.signals;
                 if untrusted > 0 && signals.linking_domains > 0 {
                     signals.linking_domains = signals.linking_domains.saturating_sub(untrusted);
                     demoted += 1;
+                    signals_changed = true;
                 }
             }
             let position = id.and_then(|id| positions[id as usize]);
             if let Some(position) = position.filter(|&p| p <= args.apply_top) {
                 let ours = u64::from(position);
-                let signals = &mut record.signals;
                 if signals.pagerank_rank.is_none_or(|rank| ours < rank) {
                     signals.pagerank_rank = Some(ours);
                     changed += 1;
+                    signals_changed = true;
                 }
             }
-            let written = serde_json::to_writer(&mut file, &record)
-                .map_err(anyhow::Error::from)
+            if signals_changed {
+                site::set_signals(&mut site, &signals);
+            }
+            let written = plumb_core::stored::write_item(&mut file, &site)
                 .and_then(|()| file.write_all(b"\n").map_err(anyhow::Error::from));
             if let Err(err) = written {
                 failed = Some(err);
@@ -600,23 +601,26 @@ mod tests {
     use super::*;
     use plumb_core::Redirect;
 
-    fn site(domain: &str, links: &[&str]) -> SiteRecord {
-        let mut record = SiteRecord::new(domain);
-        record.links_to = links.iter().map(|s| s.to_string()).collect();
+    fn site(domain: &str, links: &[&str]) -> Item {
+        let mut record = plumb_core::site::new(domain);
+        let links = links.iter().map(|s| s.to_string()).collect();
+        plumb_core::site::set_links_to(&mut record, links);
         record
     }
 
-    fn seed(domain: &str, links: &[&str]) -> SiteRecord {
+    fn seed(domain: &str, links: &[&str]) -> Item {
         let mut record = site(domain, links);
-        record.signals.official_site = true;
+        crate::test_sites::ranks(&mut record, |signals| signals.official_site = true);
         record
     }
 
-    fn ranked(records: &[SiteRecord]) -> Ranked {
+    fn ranked(records: &[Item]) -> Ranked {
         // The links file removes itself when the graph goes.
         let mut graph = Graph::new(&std::env::temp_dir()).unwrap();
         for record in records {
-            graph.add(record).unwrap();
+            let mut stored = record.clone();
+            plumb_core::site::clean(&mut stored);
+            graph.add(&stored).unwrap();
         }
         graph.rank(100).unwrap()
     }
@@ -654,11 +658,14 @@ mod tests {
     #[test]
     fn links_to_a_redirecting_site_count_for_where_it_goes() {
         let mut old = site("pncbank.com", &[]);
-        old.redirect = Some(Redirect {
-            to: "pnc.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut old,
+            Some(Redirect {
+                to: "pnc.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[
             old,
             site("a.com", &["pncbank.com"]),
@@ -676,11 +683,14 @@ mod tests {
     #[test]
     fn links_to_a_site_behind_a_bot_check_count_for_it() {
         let mut gated = site("esteri.it", &[]);
-        gated.redirect = Some(Redirect {
-            to: "perfdrive.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut gated,
+            Some(Redirect {
+                to: "perfdrive.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[
             gated,
             site("a.com", &["esteri.it"]),
@@ -694,17 +704,23 @@ mod tests {
     #[test]
     fn a_redirect_loop_stays_put() {
         let mut a = site("a.com", &[]);
-        a.redirect = Some(Redirect {
-            to: "b.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut a,
+            Some(Redirect {
+                to: "b.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let mut b = site("b.com", &[]);
-        b.redirect = Some(Redirect {
-            to: "a.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut b,
+            Some(Redirect {
+                to: "a.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[a, b, site("c.com", &["a.com"])]);
         assert_eq!(names(&ranked).len(), 3);
     }
@@ -798,5 +814,100 @@ mod tests {
     fn an_empty_graph_ranks_nothing() {
         let ranked = ranked(&[]);
         assert!(ranked.order().is_empty());
+    }
+
+    #[test]
+    fn a_records_file_is_ranked_and_its_copy_changes_only_ranks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        crate::test_sites::write(&path, &crate::test_sites::sites());
+        let (apply, out) = (dir.path().join("apply.jsonl"), dir.path().join("ranks.tsv"));
+        run(&LinkRankArgs {
+            records: path.clone(),
+            out: Some(out.clone()),
+            apply: Some(apply.clone()),
+            apply_top: 50_000,
+            demote: true,
+            similar: vec!["python.org".into()],
+            show: 30,
+            rounds: 50,
+        })
+        .unwrap();
+        // pncbank.com redirects to pnc.com, and Example.COM is example.com.
+        let ranks = [
+            "domain\tscore\tlinks_in\thas_record\ttranco_rank",
+            "python.org\t2.4313\t4\t1\t512",
+            "rust-lang.org\t2.1159\t1\t1\t1500",
+            "acer.com\t1.9093\t1\t1\t2000",
+            "gone.com\t1.9093\t0\t1\t100",
+            "plumbsearch.org\t1.9093\t0\t1\t0",
+            "stub.net\t1.9093\t0\t1\t5000",
+            "usbank.com\t1.9093\t0\t1\t700",
+            "example.com\t0.2067\t2\t1\t0",
+            "psf.org\t0.2067\t1\t0\t0",
+            "pypi.org\t0.2067\t1\t0\t0",
+            "crates.io\t0.1799\t1\t0\t0",
+            "intel.com\t0.1623\t1\t0\t0",
+            "foo_bar.com\t0.0176\t1\t0\t0",
+            "iana.org\t0.0176\t1\t0\t0",
+            "pnc.com\t0.0000\t0\t0\t0",
+            "xn--mnchen-3ya.de\t0.0000\t0\t1\t0",
+        ];
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            ranks.join("\n") + "\n"
+        );
+
+        // Each line of the copy is the site read off the file, with only
+        // its ranks and count of linking sites changed, as it was: as it is,
+        // but for Example.COM, whose link to foo_bar.com would not read back
+        // as it is, which is written clean.
+        let mut before = Vec::new();
+        plumb_node::outline::for_each_site(&path, |site| before.push(site)).unwrap();
+        let copy = std::fs::read_to_string(&apply).unwrap();
+        let lines: Vec<&str> = copy.lines().collect();
+        assert_eq!(lines.len(), before.len());
+        let mut changed = Vec::new();
+        for (site, line) in before.into_iter().zip(lines) {
+            let after = plumb_core::stored::read_item(line.as_bytes()).unwrap();
+            let (was, now) = (
+                plumb_core::site::signals(&site),
+                plumb_core::site::signals(&after),
+            );
+            let mut expected = site.clone();
+            let mut signals = was.clone();
+            signals.pagerank_rank = now.pagerank_rank;
+            signals.linking_domains = now.linking_domains;
+            plumb_core::site::set_signals(&mut expected, &signals);
+            if site.id == "Example.COM" {
+                plumb_core::site::clean(&mut expected);
+            }
+            assert_eq!(after, expected);
+            assert_eq!(
+                line.as_bytes(),
+                plumb_core::stored::item_as_line(&expected).unwrap()
+            );
+            if now != was {
+                changed.push((site.id, now.pagerank_rank, now.linking_domains));
+            }
+        }
+        // Each site's place by links, and Example.COM's link from münchen.de,
+        // which no trusted site links to, taken off.
+        let changed_to =
+            |domain: &str, place: u64, linking: u32| (domain.to_string(), Some(place), linking);
+        assert_eq!(
+            changed,
+            [
+                changed_to("python.org", 1, 412),
+                changed_to("Example.COM", 8, 29),
+                changed_to("acer.com", 3, 0),
+                changed_to("stub.net", 6, 0),
+                changed_to("gone.com", 4, 0),
+                changed_to("usbank.com", 7, 0),
+                changed_to("rust-lang.org", 2, 0),
+                changed_to("example.com", 8, 0),
+                changed_to("plumbsearch.org", 5, 0),
+            ]
+        );
     }
 }

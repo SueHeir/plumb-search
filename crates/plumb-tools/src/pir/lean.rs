@@ -1,5 +1,6 @@
-//! A PIR snapshot of a node's buckets, cut down to [`lean_record`]s and
-//! packed by [`PieceMap`] into one row of [`LEAN_ROW_BYTES`] per row group.
+//! A PIR snapshot of a node's buckets, each site cut down to its
+//! [`lean_site`] and packed by [`PieceMap`] into one row of
+//! [`LEAN_ROW_BYTES`] per row group.
 //!
 //! On a node with 1.36M sites (2026-10-05) the lean pieces came to 425 MB
 //! compressed and packed into rows of at most 28.5 KB, so the table is
@@ -7,15 +8,21 @@
 //! was measured at (`tools/pir-probe`, about half a second and 4 to 5 GB of
 //! memory per row on that node). Whole buckets of full records needed 4 GiB.
 //!
-//! The records carry no crawl proofs: a proof covers the full record, which
+//! The sites carry no crawl proofs: a proof covers the full site, which
 //! the table does not hold. A client trusts the node that signs the
 //! manifest, as it trusts any node answering it.
+//!
+//! A piece holds each site as the JSON of its old record
+//! ([`old_record::SiteRecord`]), the shape these tables were first built
+//! and measured in, and [`read_piece`] reads them back as the sites'
+//! items. Pieces of items are a new table format, built when the browser
+//! reads one.
 //!
 //! ```text
 //! row payload: for each non-empty piece of the row, in piece order:
 //!   u32 LE   piece number
 //!   u32 LE   length of what follows
-//!   bytes    the piece's lean records as a JSON array, raw deflate
+//!   bytes    the piece's lean sites as a JSON array of records, raw deflate
 //! ```
 
 use std::fs::{self, File};
@@ -26,8 +33,9 @@ use anyhow::{bail, ensure, Context, Result};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
-use plumb_core::keys::{bucket_of, lean_record, piece_of, record_keys, PIECES, PIECES_PER_BUCKET};
-use plumb_core::SiteRecord;
+use plumb_core::keys::{bucket_of, lean_site, piece_of, site_keys, PIECES, PIECES_PER_BUCKET};
+use plumb_core::site::Item;
+use plumb_core::stored::{self, old_record};
 use plumb_net::bucket::{BucketTable, BUCKETS};
 
 use super::pieces::PieceMap;
@@ -139,21 +147,23 @@ fn spill_pieces(table: &BucketTable, path: &Path) -> Result<(Vec<Span>, Vec<u64>
     let mut sizes = vec![0u64; PIECES as usize];
     let mut at = 0u64;
     for bucket in 0..BUCKETS {
-        let records: Vec<SiteRecord> = table
+        let sites: Vec<Item> = table
             .get(bucket)?
             .iter()
-            .map(|json| serde_json::from_str(json))
-            .collect::<Result<_, _>>()
-            .context("the bucket table holds a record that does not parse")?;
-        let mut by_piece: Vec<Vec<SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
-        for record in records {
+            .map(|line| stored::read_item(line.as_bytes()))
+            .collect::<Result<_>>()
+            .context("the bucket table holds a site that does not parse")?;
+        let mut by_piece: Vec<Vec<old_record::SiteRecord>> =
+            vec![Vec::new(); PIECES_PER_BUCKET as usize];
+        for site in sites {
             let mut wanted = [false; PIECES_PER_BUCKET as usize];
-            for key in record_keys(&record) {
+            for key in site_keys(&site) {
                 if bucket_of(&key) == bucket {
                     wanted[(piece_of(&key) % PIECES_PER_BUCKET) as usize] = true;
                 }
             }
-            let lean = lean_record(record);
+            let lean =
+                old_record::of_item(&lean_site(site)).context("a lean site that is no record")?;
             for (sub, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
                 by_piece[sub].push(lean.clone());
             }
@@ -180,10 +190,11 @@ fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
-/// The records of `piece` in a row's payload (from
-/// [`super::snapshot::assemble_bucket`]); none when the row has no such
+/// The sites of `piece` in a row's payload (from
+/// [`super::snapshot::assemble_bucket`]), each its record's item as it is
+/// ([`old_record::into_item`]); none when the row has no such
 /// piece. Fails for a damaged payload.
-pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<SiteRecord>> {
+pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<Item>> {
     ensure!(piece < PIECES, "there is no piece {piece}");
     let mut rest = payload;
     while !rest.is_empty() {
@@ -208,15 +219,17 @@ pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<SiteRecord>> {
             json.len() as u64 <= MAX_PIECE_INFLATED,
             "a row's piece inflates too far"
         );
-        return serde_json::from_slice(&json).context("reading a row's piece");
+        let records: Vec<old_record::SiteRecord> =
+            serde_json::from_slice(&json).context("reading a row's piece")?;
+        return Ok(records.into_iter().map(old_record::into_item).collect());
     }
     Ok(Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::keys::{matches, query_keys};
-    use plumb_core::{LinkText, Signals};
+    use plumb_core::keys::{query_keys, site_matches};
+    use plumb_core::{site, LinkText};
 
     use super::*;
     use crate::pir::snapshot::assemble_bucket;
@@ -226,21 +239,17 @@ mod tests {
     /// Small rows, so tests don't write the full 512 MiB table.
     const TEST_ROW_BYTES: u32 = 2048;
 
-    fn site(domain: &str, title: &str, text_words: usize) -> SiteRecord {
-        SiteRecord {
-            domain: domain.into(),
-            title: Some(title.into()),
-            description: Some("d".repeat(500)),
-            body_text: Some("word ".repeat(text_words)),
-            headings: vec!["Welcome".into()],
-            intro: Some("An intro.".into()),
-            link_texts: vec![LinkText::from_linkers(title.to_lowercase(), 7)],
-            signals: Signals {
-                linking_domains: 3,
-                ..Signals::default()
-            },
-            ..SiteRecord::default()
-        }
+    fn site(domain: &str, title: &str, text_words: usize) -> Item {
+        let mut site = site::new(domain);
+        site.title = Some(title.into());
+        site.about = Some("d".repeat(500));
+        site.text = Some("word ".repeat(text_words));
+        site::set_headings(&mut site, vec!["Welcome".into()]);
+        site::set_intro(&mut site, Some("An intro.".into()));
+        let link_text = LinkText::from_linkers(title.to_lowercase(), 7);
+        site::set_link_texts(&mut site, &[link_text]);
+        crate::test_sites::ranks(&mut site, |signals| signals.linking_domains = 3);
+        site
     }
 
     fn table(dir: &Path) -> BucketTable {
@@ -251,15 +260,22 @@ mod tests {
         ];
         records
             .extend((0..300).map(|n| site(&format!("site{n}.example"), &format!("Shop {n}"), 20)));
-        BucketTable::build(&dir.join("buckets"), &records).unwrap()
+        BucketTable::build(&dir.join("buckets"), &items(&records)).unwrap()
+    }
+
+    /// `sites` cleaned, as a node stores them.
+    fn items(sites: &[Item]) -> Vec<Item> {
+        let mut sites = sites.to_vec();
+        sites.iter_mut().for_each(site::clean);
+        sites
     }
 
     /// What a client does: the keys' pieces, their rows, each row checked
     /// against the manifest, then the piece read out.
-    fn search(snapshot: &Snapshot, query: &str) -> Vec<SiteRecord> {
+    fn search(snapshot: &Snapshot, query: &str) -> Vec<Item> {
         let map = snapshot.pieces().unwrap();
         let keys = query_keys(query);
-        let mut found: Vec<SiteRecord> = Vec::new();
+        let mut found: Vec<Item> = Vec::new();
         for key in &keys {
             let piece = piece_of(key);
             let row = map.row_of(piece);
@@ -269,9 +285,9 @@ mod tests {
                 &[snapshot.row(u64::from(row)).unwrap()],
             )
             .unwrap();
-            for record in read_piece(&payload, piece).unwrap() {
-                if matches(&record, &keys) && !found.iter().any(|f| f.domain == record.domain) {
-                    found.push(record);
+            for site in read_piece(&payload, piece).unwrap() {
+                if site_matches(&site, &keys) && !found.iter().any(|f| f.id == site.id) {
+                    found.push(site);
                 }
             }
         }
@@ -279,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn every_site_is_found_by_its_names_with_lean_records() {
+    fn every_site_is_found_by_its_names_with_lean_sites() {
         let dir = tempfile::tempdir().unwrap();
         let table = table(dir.path());
         let (snapshot, report) = build_rows(
@@ -298,28 +314,90 @@ mod tests {
         assert!(!dir.path().join("pir.pieces.tmp").exists());
 
         let found = search(&snapshot, "us bank");
-        let usbank = found
-            .iter()
-            .find(|r| r.domain == "usbank.com")
-            .expect("found");
-        assert_eq!(usbank.body_text, None);
-        assert_eq!(usbank.intro, None);
-        assert!(usbank.headings.is_empty());
-        assert_eq!(usbank.description.as_ref().unwrap().len(), 200);
+        let usbank = found.iter().find(|s| s.id == "usbank.com").expect("found");
+        assert_eq!(usbank.text, None);
+        assert_eq!(site::intro(usbank), None);
+        assert!(site::headings(usbank).is_empty());
+        assert_eq!(usbank.about.as_ref().unwrap().len(), 200);
         assert!(search(&snapshot, "chase")
             .iter()
-            .any(|r| r.domain == "chase.com"));
+            .any(|s| s.id == "chase.com"));
         for n in [0, 150, 299] {
             let domain = format!("site{n}.example");
             assert!(
                 search(&snapshot, &format!("shop {n}"))
                     .iter()
-                    .any(|r| r.domain == domain),
+                    .any(|s| s.id == domain),
                 "{domain}"
             );
         }
         let reopened = Snapshot::open(&dir.path().join("pir")).unwrap();
         assert_eq!(reopened.pieces().unwrap(), snapshot.pieces().unwrap());
+    }
+
+    /// The lean PIR snapshot of the tools' test sites, against
+    /// `lean_golden.txt` beside this file: the build's report, each file's
+    /// size and SHA-256, the manifest, and the sites of every piece as the
+    /// rows hold them. Written while the snapshot was made of records,
+    /// before it moved onto sites' items (step 10 of the data format plan),
+    /// so that the snapshot made of items is checked against it byte for
+    /// byte. Never written again to make a test pass:
+    /// `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-tools lean_golden` writes
+    /// it.
+    #[test]
+    fn lean_golden() {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sites = crate::test_sites::sites();
+        sites.extend(crate::test_sites::bucket_sites());
+        let table = BucketTable::build(&dir.path().join("buckets"), &items(&sites)).unwrap();
+        let pir = dir.path().join("pir");
+        let (snapshot, report) =
+            build_rows(&pir, &table, TEST_ROW_BYTES, "test", NOW, DAY).unwrap();
+        let mut out = String::from(
+            "# The lean PIR snapshot of plumb-tools' test sites: see lean_golden in\n\
+             # lean.rs before writing it again. Written on records.\n",
+        );
+        writeln!(
+            out,
+            "pieces {} largest_row {} total_bytes {}",
+            report.pieces, report.largest_row, report.total_bytes
+        )
+        .unwrap();
+        for file in ["manifest.json", "pieces.bin", "rows.bin"] {
+            let bytes = fs::read(pir.join(file)).unwrap();
+            let hash: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            writeln!(out, "{file} {} bytes {hash}", bytes.len()).unwrap();
+        }
+        let manifest = fs::read_to_string(pir.join("manifest.json")).unwrap();
+        writeln!(out, "manifest {manifest}").unwrap();
+        let map = snapshot.pieces().unwrap();
+        for (row, pieces) in map.pieces_by_row().into_iter().enumerate() {
+            if pieces.is_empty() {
+                continue;
+            }
+            let row = row as u32;
+            let rows = [snapshot.row(u64::from(row)).unwrap()];
+            let payload = assemble_bucket(snapshot.manifest(), row, &rows).unwrap();
+            let mut rest = payload.as_slice();
+            while !rest.is_empty() {
+                let piece = u32::from_le_bytes(rest[..4].try_into().unwrap());
+                let len = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+                let mut json = String::new();
+                DeflateDecoder::new(&rest[FRAME_BYTES..FRAME_BYTES + len])
+                    .read_to_string(&mut json)
+                    .unwrap();
+                writeln!(out, "row {row} piece {piece} {json}").unwrap();
+                rest = &rest[FRAME_BYTES + len..];
+            }
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pir/lean_golden.txt");
+        crate::test_sites::check_golden(&path, &out);
     }
 
     #[test]
@@ -351,17 +429,17 @@ mod tests {
     #[test]
     fn rows_too_small_for_the_fullest_fail_without_leftovers() {
         let dir = tempfile::tempdir().unwrap();
-        let mut records: Vec<SiteRecord> = (0..40)
+        let mut records: Vec<Item> = (0..40)
             .map(|n| site(&format!("bank{n}.example"), "Bank", 10))
             .collect();
         // Text that does not compress, in the one piece of the key `bank`.
         for record in &mut records {
             let noise: String = (0u8..4)
-                .map(|i| plumb_net::hash::Hash::of(&[record.domain.as_bytes(), &[i]]).to_hex())
+                .map(|i| plumb_net::hash::Hash::of(&[record.id.as_bytes(), &[i]]).to_hex())
                 .collect();
-            record.description = Some(noise);
+            record.about = Some(noise);
         }
-        let table = BucketTable::build(&dir.path().join("buckets"), &records).unwrap();
+        let table = BucketTable::build(&dir.path().join("buckets"), &items(&records)).unwrap();
         let path = dir.path().join("pir");
         let err = build_rows(&path, &table, 1024, "test", NOW, DAY).unwrap_err();
         assert!(err.to_string().contains("nothing is cut off"), "{err}");

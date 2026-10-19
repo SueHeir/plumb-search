@@ -9,8 +9,8 @@
 //! - [`HomepageCrawler`] fetches homepages (robots.txt, delays, redirect,
 //!   size and time limits).
 //! - [`extract_page_meta`] reads names and outbound links out of a page.
-//! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
-//!   to merge into a [`plumb_core::RecordSet`].
+//! - [`to_items`] turns crawl results into sites, each the stored item
+//!   a node keeps of it ([`plumb_core::site`]), to merge into its own.
 //! - [`check_feeds`] reads recent headlines from sites' RSS or Atom feeds.
 //! - [`follow_links`] follows a site's links toward the pages a node's
 //!   searches want.
@@ -52,7 +52,7 @@ pub use feed::{parse_date, read_feed};
 pub use follow::{follow_links, match_words, FollowTarget, Followed, Lead, WantedPage};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
-pub use records::{to_records, CRAWL_VERSION, REREAD_BELOW};
+pub use records::{to_items, CHARSETS_READ_SINCE, CRAWL_VERSION, REREAD_BELOW};
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -165,7 +165,7 @@ pub struct CrawlTarget {
     /// The URL to start at. Empty means `https://<domain>/`.
     #[serde(default)]
     pub url: String,
-    /// A URL the site was reached at before (a record's `url`), tried when
+    /// A URL the site was reached at before (a site's `url`), tried when
     /// `url` cannot be reached at all; see [`HomepageCrawler`]. Ignored
     /// unless it is on the same site as `url`: the same host, or one with
     /// the same registrable domain.
@@ -242,7 +242,7 @@ pub struct PageMeta {
     #[serde(skip)]
     pub page_text: String,
     /// Search terms [`pick_terms`] picked from the title, description,
-    /// headings and page text, for [`plumb_core::SiteRecord::terms`].
+    /// headings and page text, for [`plumb_core::site::terms`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terms: Vec<String>,
     /// The site's feed: the first `<link rel="alternate">` to an RSS or

@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn unspaced_corpus() -> Vec<SiteRecord> {
+fn unspaced_corpus() -> Vec<Item> {
     vec![
         site(
             "tenki.example",

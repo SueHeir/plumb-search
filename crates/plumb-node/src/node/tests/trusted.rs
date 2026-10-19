@@ -12,16 +12,18 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
         .public()
         .to_peer_id();
     let now = now_unix();
-    let sites: Vec<SiteRecord> = ["harbourmasters.org", "tidetables.net", "uncrawled.org"]
+    let sites: Vec<Item> = ["harbourmasters.org", "tidetables.net", "uncrawled.org"]
         .iter()
         .enumerate()
         .map(|(i, domain)| {
-            let mut record = SiteRecord::new(*domain);
-            record.signals.tranco_rank = Some(10 + i as u32);
+            let mut record = site::new(*domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(10 + i as u32);
+            site::set_signals(&mut record, &signals);
             if !domain.starts_with("uncrawled") {
                 record.url = Some(format!("https://{domain}/"));
                 record.title = Some(format!("Guild of {domain}"));
-                record.crawled_at = Some(now - 600);
+                site::set_crawled(&mut record, Some(now - 600));
             }
             record
         })
@@ -32,7 +34,9 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&sites))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -108,12 +112,13 @@ async fn shows_the_recent_headlines_a_trusted_node_shares() {
 
     let now = now_unix();
     let checked = |domain: &str, title: &str| {
-        let mut record = SiteRecord::new(domain);
-        record.news = vec![plumb_core::Headline {
+        let mut record = site::new(domain);
+        let news = vec![plumb_core::Headline {
             title: title.into(),
             url: format!("https://www.{domain}/story"),
             at: now - 600,
         }];
+        site::set_news(&mut record, news);
         record
     };
     let shared = vec![
@@ -122,7 +127,7 @@ async fn shows_the_recent_headlines_a_trusted_node_shares() {
     ];
     let mut body = String::new();
     for _ in 0..100 {
-        peer.publish(shared.clone()).await.unwrap();
+        peer.publish(listed(&shared)).await.unwrap();
         body = get(addr, "/api/recent?q=spring+tides").await.2;
         if body.contains("tidetables.net") {
             break;
@@ -166,15 +171,17 @@ async fn crawled_peer(
         .public()
         .to_peer_id();
     let now = now_unix();
-    let sites: Vec<SiteRecord> = domains
+    let sites: Vec<Item> = domains
         .iter()
         .enumerate()
         .map(|(i, domain)| {
-            let mut record = SiteRecord::new(*domain);
-            record.signals.tranco_rank = Some(10 + i as u32);
+            let mut record = site::new(*domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(10 + i as u32);
+            site::set_signals(&mut record, &signals);
             record.url = Some(format!("https://{domain}/"));
             record.title = Some(format!("Guild of {domain}"));
-            record.crawled_at = Some(now - 600);
+            site::set_crawled(&mut record, Some(now - 600));
             record
         })
         .collect();
@@ -183,7 +190,9 @@ async fn crawled_peer(
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&sites))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -289,7 +298,7 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     write_articles_file(&set_file, &articles).unwrap();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -434,7 +443,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     ]);
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -524,7 +533,7 @@ async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source(
     std::fs::write(&list_file, "adult.example\nother.example\n").unwrap();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());

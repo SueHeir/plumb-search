@@ -5,7 +5,8 @@
 //! `pick` writes the best-scored sites with no text, and what is known of
 //! them (names, title, link texts), as JSON lines for a model to read
 //! (`tools/summaries/summarize.py` asks Claude). `apply` writes the
-//! sentences that come back into the records' `summary` field.
+//! sentences that come back into the sites' `summary` field
+//! ([`plumb_core::site::summary`]).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -13,10 +14,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use plumb_core::{collapse_whitespace, SiteRecord, MAX_TEXT_CHARS};
+use plumb_core::{collapse_whitespace, site, MAX_TEXT_CHARS};
+use plumb_format::Item;
 use serde::{Deserialize, Serialize};
 
-use plumb_node::records::{load_records, replace_records, sorted_by_link_score};
+use plumb_node::records::{load_sites, replace_sites};
 
 /// Link texts sent with each site, most used first.
 const PICK_LINK_TEXTS: usize = 8;
@@ -100,67 +102,63 @@ pub fn run(args: SummariesArgs) -> Result<()> {
     }
 }
 
-/// Whether `record` has no words that say what the site is: no
-/// description, homepage text, headings or terms of its own, nor
-/// Wikidata's or Wikipedia's. A title alone ("Acer") names a site
-/// without describing it, so it does not count.
-pub fn has_no_text(record: &SiteRecord) -> bool {
-    let blank = |text: &Option<String>| text.as_deref().is_none_or(|t| t.trim().is_empty());
-    blank(&record.description)
-        && blank(&record.body_text)
-        && blank(&record.about)
-        && blank(&record.intro)
-        && blank(&record.summary)
-        && record.headings.iter().all(|h| h.trim().is_empty())
-        && record.terms.is_empty()
+/// Whether `site` has no words that say what it is: no description
+/// (the item's `about`), homepage text, headings or terms of its own, nor
+/// Wikidata's or Wikipedia's. A title alone ("Acer") names a site without
+/// describing it, so it does not count.
+pub fn has_no_text(site: &Item) -> bool {
+    let blank = |text: Option<&str>| text.is_none_or(|t| t.trim().is_empty());
+    blank(site.about.as_deref())
+        && blank(site.text.as_deref())
+        && blank(site::wikidata_about(site))
+        && blank(site::intro(site))
+        && blank(site::summary(site))
+        && site::headings(site).iter().all(|h| h.trim().is_empty())
+        && site::terms(site).is_empty()
 }
 
-/// Whether `record` is a site to summarize: one with no text that is
-/// still there under its own name.
-fn wanted(record: &SiteRecord) -> bool {
-    let folded = record
-        .redirect
-        .as_ref()
-        .and_then(|r| r.folds_into(&record.domain));
-    record.gone_at.is_none() && folded.is_none() && has_no_text(record)
+/// Whether `site` is one to summarize: one with no text that is still
+/// there under its own name.
+fn wanted(site: &Item) -> bool {
+    let folded = site::redirect(site).and_then(|r| r.folds_into(&site.id));
+    site::crawl_marks(site).gone.is_none() && folded.is_none() && has_no_text(site)
 }
 
-fn pick_of(record: &SiteRecord) -> Pick {
-    let title = record
+fn pick_of(site: &Item) -> Pick {
+    let title = site
         .title
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
     Pick {
-        domain: record.domain.clone(),
+        domain: site.id.clone(),
         title,
-        aliases: record.aliases.iter().take(PICK_ALIASES).cloned().collect(),
-        link_texts: record
-            .link_texts
-            .iter()
+        aliases: site.names.iter().take(PICK_ALIASES).cloned().collect(),
+        link_texts: site::link_texts(site)
+            .into_iter()
             .take(PICK_LINK_TEXTS)
-            .map(|lt| lt.text.clone())
+            .map(|lt| lt.text)
             .collect(),
-        kinds: record.kinds.clone(),
-        country: record.country.clone(),
+        kinds: site::kinds(site),
+        country: site::country(site).map(str::to_string),
     }
 }
 
 fn run_pick(args: &PickArgs) -> Result<()> {
-    let records = load_records(&args.records)?;
+    let sites = load_sites(&args.records)?;
     let mut out = BufWriter::new(
         File::create(&args.out).with_context(|| format!("creating {}", args.out.display()))?,
     );
     let mut picked = 0;
     let mut no_text = 0usize;
-    for record in sorted_by_link_score(&records) {
-        if !wanted(record) {
+    for site in sites.by_link_score() {
+        if !wanted(&site) {
             continue;
         }
         no_text += 1;
         if picked < args.top {
-            serde_json::to_writer(&mut out, &pick_of(record))?;
+            serde_json::to_writer(&mut out, &pick_of(&site))?;
             out.write_all(b"\n")?;
             picked += 1;
         }
@@ -168,7 +166,7 @@ fn run_pick(args: &PickArgs) -> Result<()> {
     out.flush()?;
     println!(
         "{no_text} of {} sites have no text; wrote the best {picked} to {}",
-        records.len(),
+        sites.len(),
         args.out.display()
     );
     Ok(())
@@ -205,7 +203,7 @@ fn read_summaries(path: &Path) -> Result<Vec<Summary>> {
 }
 
 fn run_apply(args: &ApplyArgs) -> Result<()> {
-    let mut records = load_records(&args.records)?;
+    let mut sites = load_sites(&args.records)?;
     let summaries = read_summaries(&args.summaries)?;
     let (mut applied, mut unknown, mut missing) = (0usize, 0usize, 0usize);
     for line in &summaries {
@@ -213,14 +211,14 @@ fn run_apply(args: &ApplyArgs) -> Result<()> {
             unknown += 1;
             continue;
         };
-        if records.get(&line.domain).is_none() {
+        if !sites.contains(&line.domain) {
             missing += 1;
             continue;
         }
-        records.entry(&line.domain).summary = Some(summary);
+        sites.update(&line.domain, |site| site::set_summary(site, Some(summary)));
         applied += 1;
     }
-    let written = replace_records(&args.out, sorted_by_link_score(&records))?;
+    let written = replace_sites(&args.out, &sites.into_sorted())?;
     println!(
         "{applied} of {} summaries applied ({unknown} empty or unknown, {missing} for sites \
          not in the records); wrote {written} records to {}",
@@ -232,34 +230,43 @@ fn run_apply(args: &ApplyArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::LinkText;
+    use plumb_core::{site, LinkText};
+    use plumb_node::records::{load_sites, replace_sites};
 
     use super::*;
 
+    /// `site` cleaned, as a node stores it.
+    fn stored(site: &Item) -> Item {
+        let mut site = site.clone();
+        site::clean(&mut site);
+        site
+    }
+
     #[test]
     fn a_title_alone_is_no_text() {
-        let mut record = SiteRecord::new("acer.com");
-        record.title = Some("Acer".into());
-        assert!(has_no_text(&record));
-        record.about = Some("Taiwanese computer maker".into());
-        assert!(!has_no_text(&record));
-        let mut record = SiteRecord::new("acer.com");
-        record.terms = vec!["laptops".into()];
-        assert!(!has_no_text(&record));
-        let mut record = SiteRecord::new("acer.com");
-        record.summary = Some("Acer makes laptops.".into());
+        let mut acer = site::new("acer.com");
+        acer.title = Some("Acer".into());
+        assert!(has_no_text(&stored(&acer)));
+        site::set_wikidata_about(&mut acer, Some("Taiwanese computer maker".into()));
+        assert!(!has_no_text(&stored(&acer)));
+        let mut acer = site::new("acer.com");
+        site::set_terms(&mut acer, vec!["laptops".into()]);
+        assert!(!has_no_text(&stored(&acer)));
+        let mut acer = site::new("acer.com");
+        site::set_summary(&mut acer, Some("Acer makes laptops.".into()));
         assert!(
-            !has_no_text(&record),
+            !has_no_text(&stored(&acer)),
             "a summarized site is not picked again"
         );
     }
 
     #[test]
     fn picks_carry_names_and_link_texts() {
-        let mut record = SiteRecord::new("allrecipes.com");
-        record.aliases = vec!["Allrecipes".into()];
-        record.link_texts = vec![LinkText::from_linkers("recipes", 0b11)];
-        let pick = pick_of(&record);
+        let mut allrecipes = site::new("allrecipes.com");
+        allrecipes.names = vec!["Allrecipes".into()];
+        let link_text = LinkText::from_linkers("recipes", 0b11);
+        site::set_link_texts(&mut allrecipes, &[link_text]);
+        let pick = pick_of(&stored(&allrecipes));
         assert_eq!(pick.aliases, ["Allrecipes"]);
         assert_eq!(pick.link_texts, ["recipes"]);
         assert_eq!(pick.title, None);
@@ -267,17 +274,19 @@ mod tests {
 
     #[test]
     fn gone_and_redirected_sites_are_not_picked() {
-        let mut record = SiteRecord::new("old.com");
-        assert!(wanted(&record));
-        record.redirect = Some(plumb_core::Redirect {
+        let mut old = site::new("old.com");
+        assert!(wanted(&stored(&old)));
+        let mut redirect = plumb_core::Redirect {
             to: "new.com".into(),
             at: 1,
             inner: false,
-        });
-        assert!(!wanted(&record));
+        };
+        site::set_redirect(&mut old, Some(redirect.clone()));
+        assert!(!wanted(&stored(&old)));
         // Sent to a sign-in or an inner page, it is still a site of its own.
-        record.redirect.as_mut().unwrap().inner = true;
-        assert!(wanted(&record));
+        redirect.inner = true;
+        site::set_redirect(&mut old, Some(redirect));
+        assert!(wanted(&stored(&old)));
     }
 
     #[test]
@@ -297,12 +306,11 @@ mod tests {
         let records = dir.path().join("records.jsonl");
         let out = dir.path().join("out.jsonl");
         let summaries = dir.path().join("summaries.jsonl");
-        replace_records(
+        replace_sites(
             &records,
-            [
-                &SiteRecord::new("allrecipes.com"),
-                &SiteRecord::new("x.com"),
-            ],
+            &[site::new("allrecipes.com"), site::new("x.com")]
+                .into_iter()
+                .collect(),
         )
         .unwrap();
         std::fs::write(
@@ -318,17 +326,114 @@ mod tests {
             out: out.clone(),
         })
         .unwrap();
-        let set = load_records(&out).unwrap();
+        let sites = load_sites(&out).unwrap();
+        let summary = |sites: &plumb_core::sites::Sites, domain: &str| {
+            site::summary(&sites.get(domain).unwrap()).map(str::to_owned)
+        };
         assert_eq!(
-            set.get("allrecipes.com").unwrap().summary.as_deref(),
+            summary(&sites, "allrecipes.com").as_deref(),
             Some("A recipe-sharing site.")
         );
-        assert_eq!(set.get("x.com").unwrap().summary, None);
-        assert!(load_records(&records)
-            .unwrap()
-            .get("allrecipes.com")
-            .unwrap()
-            .summary
-            .is_none());
+        assert_eq!(summary(&sites, "x.com"), None);
+        assert!(summary(&load_sites(&records).unwrap(), "allrecipes.com").is_none());
+    }
+
+    #[test]
+    fn picks_are_the_best_sites_with_no_text_as_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("records.jsonl");
+        crate::test_sites::write(&records, &crate::test_sites::sites());
+        let out = dir.path().join("picks.jsonl");
+        run_pick(&PickArgs {
+            records,
+            top: 4,
+            out: out.clone(),
+        })
+        .unwrap();
+        let picks: Vec<Pick> = plumb_core::read_jsonl(&out).unwrap();
+        let named = |domain: &str| Pick {
+            domain: domain.into(),
+            ..Pick::default()
+        };
+        // A bot check keeps no text of its own once loaded; the gone site,
+        // the one folded into another and the ones with text are not
+        // picked.
+        let expected = vec![
+            named("usbank.com"),
+            Pick {
+                title: Some("Acer".into()),
+                aliases: vec!["Acer Inc.".into()],
+                link_texts: vec!["acer".into(), "laptops".into()],
+                kinds: vec!["company".into()],
+                country: Some("TW".into()),
+                ..named("acer.com")
+            },
+            named("stub.net"),
+            Pick {
+                title: Some("München".into()),
+                aliases: vec!["Munich".into()],
+                ..named("xn--mnchen-3ya.de")
+            },
+        ];
+        assert_eq!(picks, expected);
+        let mut lines = String::new();
+        for pick in &expected {
+            lines += &serde_json::to_string(pick).unwrap();
+            lines.push('\n');
+        }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), lines);
+    }
+
+    #[test]
+    fn applied_summaries_are_written_into_the_sites_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("records.jsonl");
+        crate::test_sites::write(&records, &crate::test_sites::sites());
+        let mut late = site::new("late.org");
+        late.title = Some("Saved to the journal".into());
+        plumb_node::records::RecordStore::open(&records)
+            .save(&[
+                plumb_node::records::Change::Merge { site: late },
+                plumb_node::records::Change::Gone {
+                    domain: "pncbank.com".into(),
+                    at: 1_791_700_000,
+                },
+            ])
+            .unwrap();
+        let summaries = dir.path().join("summaries.jsonl");
+        std::fs::write(
+            &summaries,
+            "{\"domain\":\"acer.com\",\"summary\":\" Acer makes  laptops. \"}\n\
+             {\"domain\":\"late.org\",\"summary\":\"A late site.\"}\n\
+             {\"domain\":\"xn--mnchen-3ya.de\",\"summary\":\"The city of Munich.\"}\n\
+             {\"domain\":\"stub.net\",\"summary\":\"unknown\"}\n\
+             {\"domain\":\"Example.COM\",\"summary\":\"Not canonical.\"}\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out.jsonl");
+        run_apply(&ApplyArgs {
+            summaries,
+            records: records.clone(),
+            out: out.clone(),
+        })
+        .unwrap();
+
+        // The sites of the same file and journal, with the summaries that
+        // are kept, tidied, set: none that says it does not know, or is for
+        // a domain not written canonically.
+        let mut sites = load_sites(&records).unwrap();
+        for (domain, summary) in [
+            ("acer.com", "Acer makes laptops."),
+            ("late.org", "A late site."),
+            ("xn--mnchen-3ya.de", "The city of Munich."),
+        ] {
+            sites.update(domain, |site| site::set_summary(site, Some(summary.into())));
+        }
+        let expected = dir.path().join("expected.jsonl");
+        crate::test_sites::write_sorted(&expected, &sites);
+        assert_eq!(
+            String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
+            String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()
+        );
     }
 }

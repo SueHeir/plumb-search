@@ -92,12 +92,13 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
             "x-domain-ranks-top50.txt"
         ]
     );
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records = read_sites(&dir.path().join("records.jsonl"));
     assert_eq!(records.len(), 50);
-    let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
-    assert!(usbank.signals.official_site);
-    assert!(usbank.signals.tranco_rank.is_some());
-    assert!(usbank.signals.harmonic_rank.is_some());
+    let usbank = records.iter().find(|r| r.id == "usbank.com").unwrap();
+    let signals = site::signals(usbank);
+    assert!(signals.official_site);
+    assert!(signals.tranco_rank.is_some());
+    assert!(signals.harmonic_rank.is_some());
     // The quick index of the Tranco list, then the one of all the seed data.
     assert_eq!(names(&dir.path().join("indexes")), ["000002"]);
 }
@@ -284,9 +285,9 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     let err = status.wikidata_error.unwrap();
     assert!(err.message.contains("HTTP 403"), "{}", err.message);
     assert!(err.retry_at.is_some());
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records = read_sites(&dir.path().join("records.jsonl"));
     assert_eq!(records.len(), 50);
-    assert!(records.iter().all(|r| !r.signals.official_site));
+    assert!(records.iter().all(|r| !site::signals(r).official_site));
     let paths = store::Paths::new(dir.path());
     let saved = store::load_state(&paths).unwrap();
     assert!(saved.wikidata_missing);
@@ -312,32 +313,31 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     node.shutdown().await.unwrap();
 
     assert!(!store::load_state(&paths).unwrap().wikidata_missing);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records = read_sites(&dir.path().join("records.jsonl"));
     assert!(records.len() >= 50, "{}", records.len());
-    let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
-    assert!(usbank.signals.official_site);
-    assert!(usbank.signals.tranco_rank.is_some());
+    let usbank = records.iter().find(|r| r.id == "usbank.com").unwrap();
+    assert!(site::signals(usbank).official_site);
+    assert!(site::signals(usbank).tranco_rank.is_some());
     assert!(
-        usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"),
+        usbank.names.iter().any(|alias| alias == "U.S. Bancorp"),
         "{:?}",
-        usbank.aliases
+        usbank.names
     );
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
 
     // Records made before a change to how seed data is read are folded
     // again on request, from the seed files on disk, without downloading,
     // and a disambiguation page's claim is taken back off them.
-    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let mut records = read_sites(&dir.path().join("records.jsonl"));
     for record in &mut records {
-        record.signals.official_site = false;
-        record.aliases.clear();
+        let mut signals = site::signals(record);
+        signals.official_site = false;
+        site::set_signals(record, &signals);
+        record.names.clear();
     }
-    let usbank = records
-        .iter_mut()
-        .find(|r| r.domain == "usbank.com")
-        .unwrap();
-    usbank.aliases.push("USB".into());
-    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let usbank = records.iter_mut().find(|r| r.id == "usbank.com").unwrap();
+    usbank.names.push("USB".into());
+    write_old_lines(&dir.path().join("records.jsonl"), &records);
     let seed = dir.path().join("seed");
     let mut tsv = std::fs::read_to_string(seed.join(download::WIKIDATA_FILE_NAME)).unwrap();
     tsv.push_str("http://www.wikidata.org/entity/Q90000097\tUSB\thttps://www.usbank.com/\n");
@@ -360,14 +360,14 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     .await;
     node.shutdown().await.unwrap();
     assert_eq!(offline.requests.lock().unwrap().len(), 0);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
-    let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
-    assert!(usbank.signals.official_site);
-    assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
+    let records = read_sites(&dir.path().join("records.jsonl"));
+    let usbank = records.iter().find(|r| r.id == "usbank.com").unwrap();
+    assert!(site::signals(usbank).official_site);
+    assert!(usbank.names.iter().any(|alias| alias == "U.S. Bancorp"));
     assert!(
-        !usbank.aliases.iter().any(|alias| alias == "USB"),
+        !usbank.names.iter().any(|alias| alias == "USB"),
         "{:?}",
-        usbank.aliases
+        usbank.names
     );
 
     // Records made before the lists of sites on subdomains are folded
@@ -383,15 +383,14 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         "http://www.wikidata.org/entity/Q90000098\tCOE, Moro\thttps://mailto:coe@google.com\n",
     );
     std::fs::write(&wikidata, tsv).unwrap();
-    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
-    let google = records
-        .iter_mut()
-        .find(|r| r.domain == "google.com")
-        .unwrap();
-    google.aliases.push("Google Scholar".into());
-    google.aliases.insert(0, "COE, Moro".into());
-    google.kinds.push("college".into());
-    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let mut records = read_sites(&dir.path().join("records.jsonl"));
+    let google = records.iter_mut().find(|r| r.id == "google.com").unwrap();
+    google.names.push("Google Scholar".into());
+    google.names.insert(0, "COE, Moro".into());
+    let mut kinds = site::kinds(google);
+    kinds.push("college".into());
+    site::set_kinds(google, kinds);
+    write_old_lines(&dir.path().join("records.jsonl"), &records);
     let mut saved = store::load_state(&paths).unwrap();
     saved.sites_version = 0;
     store::save_state(&paths, &saved).unwrap();
@@ -421,17 +420,19 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     // the records a record at a time.
     assert!(!crate::records::journal_path(&dir.path().join("records.jsonl")).exists());
     let check = || {
-        let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-        let scholar = set.get("scholar.google.com").unwrap();
-        assert_eq!(scholar.aliases, ["Google Scholar"]);
-        assert_eq!(scholar.signals.tranco_rank, Some(1));
-        let google = set.get("google.com").unwrap();
-        assert_eq!(google.aliases, ["Google"]);
-        assert!(!google.kinds.iter().any(|kind| kind == "college"));
-        assert!(google.signals.official_site);
+        let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+        let scholar = sites.get("scholar.google.com").unwrap();
+        assert_eq!(scholar.names, ["Google Scholar"]);
+        assert_eq!(plumb_core::site::signals(&scholar).tranco_rank, Some(1));
+        let google = sites.get("google.com").unwrap();
+        assert_eq!(google.names, ["Google"]);
+        assert!(!plumb_core::site::kinds(&google)
+            .iter()
+            .any(|kind| kind == "college"));
+        assert!(plumb_core::site::signals(&google).official_site);
         // Hacker News needs a record for ycombinator.com, which this has not.
-        assert!(set.get("news.ycombinator.com").is_none());
-        set.len()
+        assert!(!sites.contains("news.ycombinator.com"));
+        sites.len()
     };
     let sites = check();
 
@@ -497,17 +498,20 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
     // Quick records: one only the Tranco list had, one a crawl reached, and
     // one a crawl found links to.
     let dir = tempfile::tempdir().unwrap();
-    let quick_only = SiteRecord::new("quick-only.example");
-    let mut crawled = SiteRecord::new("crawled.example");
-    crawled.crawl_attempted_at = Some(now_unix());
+    let quick_only = site::new("quick-only.example");
+    let mut crawled = site::new("crawled.example");
+    let marks = site::CrawlMarks {
+        tried: Some(now_unix()),
+        ..site::CrawlMarks::default()
+    };
+    site::set_crawl_marks(&mut crawled, marks);
     crawled.title = Some("Crawled".into());
-    let mut linked = SiteRecord::new("linked.example");
-    linked.add_link_text("Linked", "crawled.example");
-    write_jsonl(
+    let mut linked = site::new("linked.example");
+    site::add_link_text(&mut linked, "Linked", "crawled.example");
+    write_old_lines(
         &dir.path().join("records.jsonl"),
         &[quick_only, crawled, linked],
-    )
-    .unwrap();
+    );
     let paths = store::Paths::new(dir.path());
     store::save_state(
         &paths,
@@ -537,8 +541,8 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
 
     let saved = store::load_state(&paths).unwrap();
     assert!(!saved.quick_start && !saved.wikidata_missing);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
-    let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+    let records = read_sites(&dir.path().join("records.jsonl"));
+    let domains: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(records.len(), 52, "{domains:?}");
     assert!(!domains.contains(&"quick-only.example"));
     assert!(domains.contains(&"crawled.example"));
@@ -602,7 +606,7 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
         .unwrap()
         .public()
         .to_peer_id();
-    let sites: Vec<SiteRecord> = [
+    let sites: Vec<Item> = [
         "lighthouses.org",
         "uncrawledlanterns.org",
         "harbourmasters.org",
@@ -612,13 +616,15 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     .iter()
     .enumerate()
     .map(|(i, domain)| {
-        let mut record = SiteRecord::new(*domain);
-        record.signals.tranco_rank = Some(1 + i as u32);
-        record.about = Some(format!("keepers of {domain}"));
+        let mut record = site::new(*domain);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(1 + i as u32);
+        site::set_signals(&mut record, &signals);
+        site::set_wikidata_about(&mut record, Some(format!("keepers of {domain}")));
         if !domain.starts_with("uncrawled") {
             record.url = Some(format!("https://{domain}/"));
             record.title = Some(format!("Guild of {domain}"));
-            record.crawled_at = Some(now - 600);
+            site::set_crawled(&mut record, Some(now - 600));
         }
         record
     })
@@ -629,7 +635,9 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&sites))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -697,15 +705,15 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     .await;
     let hits = search(addr, "uncrawledbuoys").await;
     assert_eq!(hits[0].domain, "uncrawledbuoys.org");
-    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-    assert_eq!(records.len(), 5);
-    let buoys = records.get("uncrawledbuoys.org").unwrap();
-    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(sites.len(), 5);
+    let buoys = sites.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(plumb_core::site::signals(&buoys).tranco_rank, Some(5));
     assert_eq!(
-        buoys.about.as_deref(),
+        plumb_core::site::wikidata_about(&buoys),
         Some("keepers of uncrawledbuoys.org")
     );
-    assert!(buoys.crawled_at.is_none());
+    assert!(plumb_core::site::crawled(&buoys).is_none());
     // Nothing came from outside the network.
     assert!(names(&dir.path().join("seed")).is_empty());
 
@@ -734,4 +742,33 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     let error = status.last_error.unwrap().message;
     assert!(error.contains("Tranco"), "{error}");
     node.shutdown().await.unwrap();
+}
+
+/// Crawling only, a node sets up from the Tranco list without building an
+/// index, and counts the sites it saved, as filling counts an index's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_only_crawls_sets_up_without_an_index() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    config.crawl_only = true;
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "setup", |s| {
+        s.step == Step::Idle && s.last_refresh.is_some()
+    })
+    .await;
+    assert_eq!(status.last_error, None, "{status:#?}");
+    assert_eq!(status.index, None);
+    assert_eq!(node.inner.held_sites(), 50);
+    node.shutdown().await.unwrap();
+    let records = read_sites(&dir.path().join("records.jsonl"));
+    assert_eq!(records.len(), 50);
+    assert!(names(&dir.path().join("indexes")).is_empty());
 }

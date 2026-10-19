@@ -18,11 +18,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use plumb_core::site::{self, Item};
 use plumb_core::{
     domain_label, is_function_word, is_sign_in_page, joined, kind_key, language_code,
     language_fits, names_label, normalize_country, normalize_text, other_number,
-    record_adult_level, registrable_domain, site_country, truncate_chars, Operators, SafeSearch,
-    SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_TERMS, MAX_TEXT_CHARS,
+    registrable_domain, truncate_chars, Operators, SafeSearch, MAX_ALIASES, MAX_HEADINGS,
+    MAX_TERMS, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -139,7 +140,7 @@ pub const DEFAULT_WHOLE_QUERY_RELEVANCE: bool = false;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Ranked {
     pub domain: String,
-    /// The record's URL, or `https://<domain>/`.
+    /// The site's homepage, or `https://<domain>/`.
     pub url: String,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -148,9 +149,10 @@ pub struct Ranked {
     pub link_score: f32,
 }
 
-/// The best `limit` of `sites` for `query`, best first. Search operators
-/// in the query ([`Operators`]) narrow the sites as on a node.
-pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
+/// The best `limit` of `sites`, their items ([`plumb_core::site`]), for
+/// `query`, best first. Search operators in the query ([`Operators`])
+/// narrow the sites as on a node.
+pub fn rank(query: &str, sites: &[Item], options: &Options, limit: usize) -> Vec<Ranked> {
     rank_with_whole_query_relevance(query, sites, options, limit, DEFAULT_WHOLE_QUERY_RELEVANCE)
 }
 
@@ -158,7 +160,7 @@ pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) 
 /// searches use [`rank`] and retain the conservative default.
 pub fn rank_with_whole_query_relevance(
     query: &str,
-    sites: &[SiteRecord],
+    sites: &[Item],
     options: &Options,
     limit: usize,
     whole_query_relevance: bool,
@@ -167,9 +169,9 @@ pub fn rank_with_whole_query_relevance(
     if !ops.any() {
         return rank_words(query, sites, options, limit, whole_query_relevance);
     }
-    let kept: Vec<SiteRecord> = sites
+    let kept: Vec<Item> = sites
         .iter()
-        .filter(|site| ops.allows_host(&site.domain))
+        .filter(|site| ops.allows_host(&site.id))
         .cloned()
         .collect();
     rank_words(
@@ -191,7 +193,7 @@ pub fn rank_with_whole_query_relevance(
 /// [`rank`] for a query without operators.
 fn rank_words(
     query_text: &str,
-    sites: &[SiteRecord],
+    sites: &[Item],
     options: &Options,
     limit: usize,
     whole_query_relevance: bool,
@@ -204,7 +206,7 @@ fn rank_words(
     }
     let docs: Vec<Doc> = sites.iter().map(Doc::new).collect();
     let names: Vec<NameMatch> = docs.iter().map(|doc| query.name_match(doc)).collect();
-    let link_scores: Vec<f32> = sites.iter().map(SiteRecord::link_score).collect();
+    let link_scores: Vec<f32> = sites.iter().map(site::link_score).collect();
     let navigation_subject = navigation_subject(query_text).and_then(|s| Query::new(&s));
     let navigation_names: Vec<bool> = docs
         .iter()
@@ -300,11 +302,11 @@ fn rank_words(
         .filter(|wanted| !plumb_core::written_outside(wanted, query_text))
         .and_then(language_code);
     for (i, site) in sites.iter().enumerate() {
-        if options.safe.hides(record_adult_level(site)) {
+        if options.safe.hides(site::adult_level(site)) {
             continue;
         }
         let name = names[i];
-        let site_language = site.written_language();
+        let site_language = site::written_language(site);
         // A site the query names stays whatever its language, as on a node:
         // its domain or whole name, or two words or more of a well-known site's name
         // ("real madrid tickets").
@@ -323,7 +325,7 @@ fn rank_words(
         if text[i] <= 0.0 && name.words() == 0 && !is_kind {
             continue;
         }
-        let country = site_country(site);
+        let country = site::site_country(site);
         let country_bonus = match (&home, &country) {
             (Some(home), Some(country)) if home == country => COUNTRY_BOOST,
             (Some(_), Some(_)) if options.only_country => continue,
@@ -331,20 +333,21 @@ fn rank_words(
             _ => 0.0,
         };
         let link_score = link_scores[i];
-        let full_hostname = self::words(&site.domain) == query.tokens;
+        let full_hostname = self::words(&site.id) == query.tokens;
         let named = name.typed || full_hostname || name.words() >= query.len;
         let url = site
             .url
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty())
-            .map_or_else(|| format!("https://{}/", site.domain), str::to_string);
-        // A stranger's sign-in form, left out as on a node.
+            .map_or_else(|| format!("https://{}/", site.id), str::to_string);
+        // A stranger's sign-in form, left out as on a node: one Wikidata
+        // does not describe.
         if !named
             && link_score < WELL_KNOWN_LINK_SCORE
-            && site.about.is_none()
+            && site::wikidata_about(site).is_none()
             && is_sign_in_page(&url, site.title.as_deref())
-            && !names_label(query_text, &site.domain)
+            && !names_label(query_text, &site.id)
         {
             continue;
         }
@@ -412,10 +415,10 @@ fn rank_words(
             convincing,
             named,
             Ranked {
-                domain: site.domain.clone(),
+                domain: site.id.clone(),
                 url,
                 title: site.title.clone().filter(|t| !t.trim().is_empty()),
-                description: site.description.clone().filter(|d| !d.trim().is_empty()),
+                description: site.about.clone().filter(|d| !d.trim().is_empty()),
                 score: alpha * prior
                     + trust * ((1.0 - alpha) * text_score + name_bonus)
                     + country_bonus,
@@ -479,12 +482,15 @@ struct Doc {
 }
 
 impl Doc {
-    fn new(record: &SiteRecord) -> Doc {
+    /// The names and words of the site of `site`, its item: the homepage's
+    /// description is the item's `about`, and Wikidata's its own field
+    /// ([`site::wikidata_about`]).
+    fn new(site: &Item) -> Doc {
         let mut doc = Doc {
-            domain: record.domain.clone(),
+            domain: site.id.clone(),
             ..Doc::default()
         };
-        let label = label_text(&record.domain);
+        let label = label_text(&site.id);
         doc.label.extend(words(&label));
         doc.label.insert(joined(&label));
         doc.label_keys.insert(joined(&label));
@@ -492,12 +498,12 @@ impl Doc {
         fn non_empty(text: Option<&str>) -> Option<&str> {
             text.filter(|text| !text.trim().is_empty())
         }
-        let borrowed = non_empty(record.url.as_deref())
+        let borrowed = non_empty(site.url.as_deref())
             .and_then(registrable_domain)
-            .is_some_and(|domain| domain != record.domain);
-        let title = non_empty(record.title.as_deref())
+            .is_some_and(|domain| domain != site.id);
+        let title = non_empty(site.title.as_deref())
             .filter(|_| !borrowed)
-            .or_else(|| record.aliases.iter().find_map(|a| non_empty(Some(a))));
+            .or_else(|| site.names.iter().find_map(|a| non_empty(Some(a))));
         if let Some(title) = title {
             let title = truncate_chars(title, MAX_TEXT_CHARS);
             let parts: Vec<&str> = title
@@ -515,35 +521,36 @@ impl Doc {
             }
             doc.title.extend(words(&title));
         }
-        let description = non_empty(record.description.as_deref());
+        let description = non_empty(site.about.as_deref());
         if let Some(description) = description.filter(|_| !borrowed) {
             doc.description
                 .extend(words(&truncate_chars(description, MAX_TEXT_CHARS)));
         }
-        let intro = non_empty(record.intro.as_deref());
+        let intro = non_empty(site::intro(site));
         if let Some(intro) = intro {
             doc.description
                 .extend(words(&truncate_chars(intro, MAX_TEXT_CHARS)));
         }
-        if let Some(summary) = non_empty(record.summary.as_deref())
+        if let Some(summary) = non_empty(site::summary(site))
             .filter(|_| intro.is_none() && (borrowed || description.is_none()))
         {
             doc.description
                 .extend(words(&truncate_chars(summary, MAX_TEXT_CHARS)));
         }
-        if let Some(about) = &record.about {
+        if let Some(about) = site::wikidata_about(site) {
             doc.about
                 .extend(words(&truncate_chars(about, MAX_TEXT_CHARS)));
         }
-        for heading in record.headings.iter().take(MAX_HEADINGS) {
+        for heading in site::headings(site).iter().take(MAX_HEADINGS) {
             doc.headings
                 .extend(words(&truncate_chars(heading, MAX_TEXT_CHARS)));
         }
-        for term in record.terms.iter().take(MAX_TERMS) {
+        for term in site::terms(site).iter().take(MAX_TERMS) {
             doc.terms.extend(words(term));
         }
-        for alias in record
-            .aliases
+        let official = site::signals(site).official_site;
+        for alias in site
+            .names
             .iter()
             .filter(|a| !a.trim().is_empty())
             .take(MAX_ALIASES)
@@ -556,14 +563,15 @@ impl Doc {
                 .filter(|rest| !rest.is_empty())
                 .map(joined);
             for key in std::iter::once(joined(&alias)).chain(short.clone()) {
-                if record.signals.official_site {
+                if official {
                     doc.label_keys.insert(key.clone());
                 }
                 doc.alias_keys.insert(key);
             }
             doc.joined.extend(short);
         }
-        let mut texts: Vec<_> = record.link_texts.iter().collect();
+        let link_texts = site::link_texts(site);
+        let mut texts: Vec<_> = link_texts.iter().collect();
         texts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
         for (i, lt) in texts.into_iter().enumerate() {
             doc.anchors.extend(words(&lt.text));
@@ -572,8 +580,7 @@ impl Doc {
             }
         }
         doc.kinds.extend(
-            record
-                .kinds
+            site::kinds(site)
                 .iter()
                 .map(|kind| kind_key(kind))
                 .filter(|k| !k.is_empty()),
@@ -958,27 +965,28 @@ fn label_text(domain: &str) -> String {
 
 /// One copy of each site: a site can come in more than one bucket, or from
 /// more than one node. The first copy's text is kept, and each popularity
-/// signal keeps the less favorable value of all copies, as nodes do with
-/// each other's answers, so one node alone cannot make a site look more
-/// popular.
-pub fn merge_copies(sites: Vec<SiteRecord>) -> Vec<SiteRecord> {
-    let mut order: Vec<SiteRecord> = Vec::new();
+/// signal ([`site::signals`]) keeps the less favorable value of all
+/// copies, as nodes do with each other's answers, so one node alone cannot
+/// make a site look more popular.
+pub fn merge_copies(sites: Vec<Item>) -> Vec<Item> {
+    let mut order: Vec<Item> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
-    for site in sites {
-        match at.get(&site.domain) {
+    for copy in sites {
+        match at.get(&copy.id) {
             Some(&i) => {
-                let kept = &mut order[i].signals;
-                let other = &site.signals;
+                let mut kept = site::signals(&order[i]);
+                let other = site::signals(&copy);
                 kept.harmonic_rank = worse_rank(kept.harmonic_rank, other.harmonic_rank);
                 kept.pagerank_rank = worse_rank(kept.pagerank_rank, other.pagerank_rank);
                 kept.tranco_rank = worse_rank(kept.tranco_rank, other.tranco_rank);
                 kept.linking_domains = kept.linking_domains.min(other.linking_domains);
                 kept.official_site &= other.official_site;
                 kept.sitelinks = kept.sitelinks.min(other.sitelinks);
+                site::set_signals(&mut order[i], &kept);
             }
             None => {
-                at.insert(site.domain.clone(), order.len());
-                order.push(site);
+                at.insert(copy.id.clone(), order.len());
+                order.push(copy);
             }
         }
     }
@@ -1030,13 +1038,16 @@ mod evidence_tests {
 
     #[test]
     fn domain_and_anchor_words_are_not_substantive_qualifier_evidence() {
-        let mut site = SiteRecord::new("aster.example");
-        site.title = Some("Aster Observatory".into());
-        site.link_texts = vec![plumb_core::LinkText::with_count(
-            "Aster Observatory refund",
-            4,
-        )];
-        let docs = [Doc::new(&site)];
+        let mut aster = site::new("aster.example");
+        aster.title = Some("Aster Observatory".into());
+        site::set_link_texts(
+            &mut aster,
+            &[plumb_core::LinkText::with_count(
+                "Aster Observatory refund",
+                4,
+            )],
+        );
+        let docs = [Doc::new(&aster)];
         let query = Query::new("aster refund").unwrap();
         let weights = query.evidence_weights(&docs);
         let evidence = query.evidence(&docs[0], &weights, 1);
@@ -1047,11 +1058,11 @@ mod evidence_tests {
 
     #[test]
     fn borrowed_words_remain_excluded_from_release_text_evidence() {
-        let mut record = SiteRecord::new("aster.example");
-        record.title = Some("Aster refund information".into());
-        record.description = Some("Aster refunds".into());
-        record.url = Some("https://nimbus.example/".into());
-        let docs = [Doc::new(&record)];
+        let mut aster = site::new("aster.example");
+        aster.title = Some("Aster refund information".into());
+        aster.about = Some("Aster refunds".into());
+        aster.url = Some("https://nimbus.example/".into());
+        let docs = [Doc::new(&aster)];
         let query = Query::new("aster refund").unwrap();
         let weights = query.evidence_weights(&docs);
         let evidence = query.evidence(&docs[0], &weights, 1);
@@ -1063,10 +1074,10 @@ mod evidence_tests {
 
     #[test]
     fn remaining_evidence_counts_distinct_prefix_words() {
-        let mut site = SiteRecord::new("aster.example");
-        site.title = Some("Aster Observatory".into());
-        site.description = Some("Refunds".into());
-        let docs = [Doc::new(&site)];
+        let mut aster = site::new("aster.example");
+        aster.title = Some("Aster Observatory".into());
+        aster.about = Some("Refunds".into());
+        let docs = [Doc::new(&aster)];
         for query in ["aster refund", "aster aster refund", "the aster refund"] {
             let query = Query::new(query).unwrap();
             let weights = query.evidence_weights(&docs);

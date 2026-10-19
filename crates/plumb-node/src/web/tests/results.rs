@@ -14,6 +14,8 @@ fn a_misspelled_name_offers_its_site_with_the_suggestion() {
             site: Some("youtube.com".into()),
             applied: false,
         }),
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "youtbue",
@@ -48,6 +50,8 @@ fn results_for_a_spelling_say_so_and_link_the_query_as_typed() {
             site: None,
             applied: true,
         }),
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "kayne west",
@@ -80,6 +84,8 @@ fn typos_are_searched_as_typed_with_a_suggestion() {
             site: None,
             applied: false,
         }),
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let mut settings = no_settings();
     settings.options.country = Some("DE".into());
@@ -142,6 +148,7 @@ fn a_search_naming_a_song_near_the_top_is_about_it() {
                 popularity: 0.1,
                 whole: false,
                 learned: None,
+                meant: false,
             },
             under: under.map(str::to_string),
             at,
@@ -181,6 +188,7 @@ fn site_queries_list_every_page_on_the_site() {
                 popularity: 0.1,
                 whole: false,
                 learned: None,
+                meant: false,
             },
             under: None,
             at: 0,
@@ -191,6 +199,8 @@ fn site_queries_list_every_page_on_the_site() {
         hits: Vec::new(),
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "einstein site:wikipedia.org",
@@ -219,6 +229,7 @@ fn a_site_shows_every_page_under_it() {
             popularity: 0.1,
             whole: false,
             learned: None,
+            meant: false,
         },
         under: Some("census.gov".into()),
         at: 0,
@@ -244,6 +255,8 @@ fn a_site_shows_every_page_under_it() {
         hits: vec![scored("census.gov", 0.9)],
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "census population clock",
@@ -272,6 +285,8 @@ fn the_source_line_says_where_results_came_from() {
         hits: vec![scored("a.com", 0.9)],
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let mut settings = no_settings();
     settings.network = NetSetting::Off;
@@ -388,6 +403,8 @@ fn results_show_site_icons_inline_and_letters_otherwise() {
             ),
         ],
         site_search: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let mut icons = Icons::default();
     icons
@@ -420,6 +437,8 @@ fn results_show_site_icons_inline_and_letters_otherwise() {
         spelling: None,
         hits: vec![hit("jsr.io", "https://jsr.io/", Some("JSR"), None)],
         site_search: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "jsr",
@@ -451,6 +470,8 @@ fn recent_headlines_follow_the_first_result_escaped() {
             hit("other.com", "https://other.com/", Some("Other"), None),
         ],
         site_search: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let now = now_unix();
     let headline = |title: &str, url: &str| crate::news::RecentHeadline {

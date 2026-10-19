@@ -4,17 +4,19 @@
 //! * Crawling follows the network's daily assignment: a refresh picks its
 //!   homepages among the sites this node is assigned today, and each batch
 //!   of results is signed and published as it is saved.
-//! * Records other nodes publish are appended to `DIR/net/inbox.jsonl` as
-//!   they arrive, and folded into the records file between two pieces of
-//!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
+//! * Sites other nodes publish are appended to `DIR/net/inbox.jsonl` as
+//!   they arrive, each as the stored line of its item that plumb-net hands
+//!   over ([`plumb_net::node::RecordDelivery`]), and folded into the
+//!   records file between two pieces of work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
 //!   [`REBUILD_AFTER_RECORDS`] records have come in, at most once every
 //!   [`NETWORK_REBUILD_GAP`] (longer after a slow build), or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
-//!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
-//!   answered from the index being served. An index built before the node
-//!   joined has none, and serves no buckets until the next build.
+//!   `indexes/NNNNNN/buckets/` ([`super::worker::build_from_file`]), and
+//!   bucket requests are answered from the index being served. An index
+//!   built before the node joined has none, and serves no buckets until
+//!   the next build.
 //! * Popularity (see `plumb_net::popularity`): every node in the network
 //!   ranks with what the reports it holds say people pick for a query
 //!   ([`apply_popularity`]). A node started with
@@ -56,15 +58,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::site;
+use plumb_core::sites::{SiteLine, SiteList};
+use plumb_format::Item;
 use plumb_index::Hit;
 use plumb_net::popularity::report_epoch;
-use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, Report};
+use plumb_net::{BucketSource, NetHandle, PickLog, PopularityTable, Report};
 use tracing::{debug, info, warn};
 
 use super::{Inner, MB};
 use crate::icons::{self, IconStore};
-use crate::records::{Change, RecordStore};
+use crate::records::{Change, ChangeLines, RecordStore};
 
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
@@ -234,27 +239,6 @@ pub(super) fn wants_buckets(inner: &Inner) -> bool {
             .is_some_and(|n| n.answer_searches)
 }
 
-/// Writes the buckets of a new index into its directory, for a node that
-/// [`wants_buckets`]. A failure is logged, not raised: the index still
-/// works, it just serves no buckets.
-pub(super) fn build_buckets<R: std::borrow::Borrow<SiteRecord>>(
-    inner: &Inner,
-    index_dir: &Path,
-    records: &[R],
-) {
-    if !wants_buckets(inner) {
-        return;
-    }
-    let dir = index_dir.join(BUCKETS_DIR);
-    if let Err(err) = BucketTable::build_with_budget(&dir, records, inner.storage.clone()) {
-        warn!(
-            "cannot write the buckets of {}: {err:#}",
-            index_dir.display()
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
-
 /// The name browsers know an index's buckets by (see `GET /api/buckets`):
 /// the index id and the start of a hash of its bucket index. `None` when
 /// the index has no buckets.
@@ -326,22 +310,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
                 }
             };
             let plumb_net::node::RecordDelivery {
-                records: mut batch,
+                sites: batch,
                 reservation,
                 acknowledgment,
             } = delivery;
-            // Crawling only, other nodes' crawls are not kept: they would
-            // only grow the records this node crawls from.
-            if receiver.config.crawl_only {
-                batch.clear();
-            }
-            receiver.drop_denied_records(&mut batch);
-            // Feed checks and raw crawls have separate durable destinations.
-            let (news, mut batch): (Vec<_>, Vec<_>) =
-                batch.into_iter().partition(|r| !r.news.is_empty());
-            if !receiver.config.take_new_sites {
-                held_only(&receiver, &mut batch);
-            }
+            let (batch, news) = delivered(&receiver, batch);
             persist_delivery(
                 receiver.clone(),
                 batch,
@@ -353,6 +326,26 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// What of `batch`, crawls another node published, this node keeps: the
+/// crawls for the inbox and the feed checks for the headlines, in that
+/// order, without what its denylist takes off. Each site stays the line
+/// plumb-net handed over, written again only where the denylist took a
+/// key page or headline off it.
+pub(super) fn delivered(inner: &Inner, mut batch: SiteList) -> (SiteList, SiteList) {
+    // Crawling only, other nodes' crawls are not kept: they would only
+    // grow the records this node crawls from.
+    if inner.config.crawl_only {
+        batch = SiteList::new();
+    }
+    inner.drop_denied_sites(&mut batch);
+    // Feed checks and raw crawls have separate durable destinations.
+    let (news, mut batch) = batch.partition(|site| !site::news(site).is_empty());
+    if !inner.config.take_new_sites {
+        held_only(inner, &mut batch);
+    }
+    (batch, news)
 }
 
 /// Stops the network side, if running.
@@ -492,40 +485,25 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             } else {
                 0
             };
-            // Read a record at a time, the journal folded in first.
-            let _records = inner.hold_records();
-            let budget = crate::records::records_budget(&path, inner.storage.as_ref())?;
-            RecordStore::open(&path).with_budget(budget).fold()?;
-            let mut crawled: Vec<SiteRecord> = Vec::new();
-            crate::outline::for_each_record(&path, |record| {
-                if record
-                    .crawled_at
-                    .is_some_and(|at| at > after && at >= oldest)
-                {
-                    crawled.push(crawl_facts(&record));
-                }
-            })?;
-            crawled.sort_by_key(|r| r.crawled_at);
-            inner.drop_denied_records(&mut crawled);
-            anyhow::Ok(crawled)
+            to_publish(&inner, &path, after, oldest)
         })
         .await
         .context("the publishing task failed")??
     };
     let mut published = 0;
-    for chunk in since.chunks(PUBLISH_CHUNK) {
-        if inner.stopping() {
+    let mut since = since.into_lines();
+    loop {
+        let chunk: Vec<SiteLine> = since.by_ref().take(PUBLISH_CHUNK).collect();
+        if chunk.is_empty() || inner.stopping() {
             break;
         }
-        net.publish(chunk.to_vec()).await?;
-        let up_to = chunk.last().and_then(|r| r.crawled_at).unwrap_or(0);
+        let up_to = (chunk.last())
+            .and_then(|site| site::crawled(&site.item()))
+            .unwrap_or(0);
+        let chunk: SiteList = chunk.into_iter().collect();
+        net.publish(chunk.clone()).await?;
         let n = chunk.len();
-        let (inner2, chunk, marker, file) = (
-            inner.clone(),
-            chunk.to_vec(),
-            marker.clone(),
-            path.to_path_buf(),
-        );
+        let (inner2, marker, file) = (inner.clone(), marker.clone(), path.to_path_buf());
         tokio::task::spawn_blocking(move || {
             append_inbox(&inner2, &chunk)?;
             let n = chunk.len() as u64;
@@ -544,39 +522,62 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
     Ok(published)
 }
 
+/// The homepages the records file at `path` holds crawled after `after`
+/// and not before `oldest`, as [`publish_new_records`] publishes them:
+/// what each crawl saw ([`crawl_facts`]), oldest first, without what the
+/// denylist takes off. Each site of the file is read as its stored item
+/// ([`crate::outline::for_each_site`]), and what is published of it held
+/// as its line.
+pub(super) fn to_publish(inner: &Inner, path: &Path, after: u64, oldest: u64) -> Result<SiteList> {
+    // Read a site at a time, the journal folded in first.
+    let _records = inner.hold_records();
+    let budget = crate::records::records_budget(path, inner.storage.as_ref())?;
+    RecordStore::open(path).with_budget(budget).fold()?;
+    let mut crawled: Vec<(u64, SiteLine)> = Vec::new();
+    crate::outline::for_each_site(path, |site| {
+        if let Some(at) = site::crawled(&site).filter(|&at| at > after && at >= oldest) {
+            crawled.push((at, SiteLine::of(crawl_facts(&site))));
+        }
+    })?;
+    crawled.sort_by_key(|(at, _)| *at);
+    let mut crawled: SiteList = crawled.into_iter().map(|(_, site)| site).collect();
+    inner.drop_denied_sites(&mut crawled);
+    Ok(crawled)
+}
+
 /// What a crawl saw of a site's homepage, without the ranks, seed data and
 /// bookkeeping of the file it came from.
-fn crawl_facts(record: &SiteRecord) -> SiteRecord {
-    let mut facts = SiteRecord::new(record.domain.clone());
-    facts.url = record.url.clone();
-    facts.title = record.title.clone();
-    facts.description = record.description.clone();
-    facts.aliases = record.aliases.clone();
-    facts.headings = record.headings.clone();
-    facts.body_text = record.body_text.clone();
-    facts.terms = record.terms.clone();
-    facts.key_pages = record.key_pages.clone();
-    facts.crawled_at = record.crawled_at;
+fn crawl_facts(site: &Item) -> Item {
+    let mut facts = site::new(site.id.clone());
+    facts.url = site.url.clone();
+    facts.title = site.title.clone();
+    facts.about = site.about.clone();
+    facts.names = site.names.clone();
+    site::set_headings(&mut facts, site::headings(site));
+    facts.text = site.text.clone();
+    site::set_terms(&mut facts, site::terms(site));
+    site::set_key_pages(&mut facts, site::key_pages(site));
+    site::set_crawled(&mut facts, site::crawled(site));
     facts
 }
 
 /// Shared headlines with each site's language as this node's index has
 /// it, since a news line carries none ([`crate::news::NewsStore::put_shared`]).
-fn with_languages(inner: &Inner, news: &[SiteRecord]) -> Vec<SiteRecord> {
+fn with_languages(inner: &Inner, news: &SiteList) -> Vec<Item> {
     let index = inner.current();
     news.iter()
-        .cloned()
-        .map(|mut record| {
-            record.language = index
+        .map(|mut site| {
+            site.lang = index
                 .as_ref()
-                .and_then(|index| index.backend().searcher().language(&record.domain));
-            record
+                .and_then(|index| index.backend().searcher().language(&site.id));
+            site
         })
         .collect()
 }
 
-pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
-    append_inbox_reserved(inner, records, &mut None)
+/// Appends `sites` to the inbox, each as the stored line the list holds.
+pub(super) fn append_inbox(inner: &Inner, sites: &SiteList) -> Result<()> {
+    append_inbox_reserved(inner, sites, &mut None)
 }
 
 /// Keep one bounded delivery until both headline and raw destinations persist,
@@ -584,12 +585,12 @@ pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> 
 /// source survives configured retention; recovery never reapplies net credits.
 pub(super) async fn persist_delivery(
     inner: Arc<Inner>,
-    records: Vec<SiteRecord>,
-    news: Vec<SiteRecord>,
+    sites: SiteList,
+    news: SiteList,
     mut reservation: Option<plumb_net::storage::Reservation>,
     acknowledgment: Option<plumb_net::store::DeliveryAck>,
 ) {
-    let records = Arc::new(records);
+    let sites = Arc::new(sites);
     let news = Arc::new(news);
     let acknowledgment = acknowledgment.map(Arc::new);
     let mut news_persisted = news.is_empty();
@@ -601,7 +602,7 @@ pub(super) async fn persist_delivery(
             return;
         }
         let writer = inner.clone();
-        let payload = records.clone();
+        let payload = sites.clone();
         let headlines = news.clone();
         let acknowledgment = acknowledgment.clone();
         let mut admitted = reservation.take();
@@ -650,7 +651,7 @@ pub(super) async fn persist_delivery(
             news_persisted = *durable_news;
             if *durable_raw && !persisted {
                 persisted = true;
-                let n = records.len() as u64;
+                let n = sites.len() as u64;
                 let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
                 if total >= REBUILD_AFTER_RECORDS {
                     inner.wake.notify_one();
@@ -686,13 +687,13 @@ pub(super) async fn persist_delivery(
     }
 }
 
-fn check_inbox_payload(records: &[SiteRecord]) -> Result<()> {
+fn check_inbox_payload(sites: &SiteList) -> Result<()> {
     let mut size = plumb_core::storage::ByteCount {
         bytes: 0,
         limit: MAX_INBOX_PAYLOAD as u64,
     };
-    for record in records {
-        serde_json::to_writer(&mut size, record).context(UnsupportedInboxPayload)?;
+    for line in sites.lines() {
+        size.write_all(line).context(UnsupportedInboxPayload)?;
         size.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
     Ok(())
@@ -700,7 +701,7 @@ fn check_inbox_payload(records: &[SiteRecord]) -> Result<()> {
 
 fn append_inbox_reserved(
     inner: &Inner,
-    records: &[SiteRecord],
+    sites: &SiteList,
     reservation: &mut Option<plumb_net::storage::Reservation>,
 ) -> Result<()> {
     use plumb_net::storage::{allocation_for, file_bytes, LimitedBytes};
@@ -709,8 +710,11 @@ fn append_inbox_reserved(
         bytes: Vec::new(),
         limit: MAX_INBOX_PAYLOAD,
     };
-    for record in records {
-        serde_json::to_writer(&mut lines, record).context(UnsupportedInboxPayload)?;
+    // Each site goes in as the stored line of its item the list holds
+    // (`stored::write_item`), the line the inbox is read back from as the
+    // site's item (`read_inbox`).
+    for line in sites.lines() {
+        lines.write_all(line).context(UnsupportedInboxPayload)?;
         lines.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
     let _guard = inner.inbox_lock.locked();
@@ -833,30 +837,30 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     // its topics and official websites (see super::trim).
     let topics = (!super::trim::takes_new_sites(inner)).then(|| inner.keep_topics());
     // Saved a part at a time, so an inbox of many thousand records is never
-    // all in memory.
-    let mut changes = Vec::with_capacity(ABSORB_CHUNK);
+    // all in memory, and each change held as the journal's line.
+    let mut changes = ChangeLines::default();
     let mut n = 0;
-    read_inbox(BufReader::new(file), |mut record| {
-        keep_shared_icon(&icons, &mut record);
-        changes.push(match &topics {
-            Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
-                Change::RefreshShared { record }
+    read_inbox(BufReader::new(file), |mut site| {
+        keep_shared_icon(&icons, &mut site);
+        changes.push(&match &topics {
+            Some(topics) if !super::trim::keeps_new_site(&site, topics) => {
+                Change::RefreshShared { site }
             }
-            _ => Change::MergeShared { record },
-        });
+            _ => Change::MergeShared { site },
+        })?;
         if changes.len() >= ABSORB_CHUNK {
-            store.save(&changes)?;
+            store.save_lines(&changes)?;
             n += changes.len() as u64;
             changes.clear();
         }
         Ok(())
     })
     .with_context(|| format!("reading {}", paths.absorbing.display()))?;
-    store.save(&changes)?;
+    store.save_lines(&changes)?;
     n += changes.len() as u64;
     drop(changes);
     if store.wants_compaction() {
-        // Folded a record at a time; a file only a whole set can fold
+        // Folded a site at a time; a file only a whole set can fold
         // (a site on two lines) keeps its journal for the next build.
         store.fold_with_check(|| inner.check_stop())?;
     }
@@ -868,13 +872,11 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     Ok(n)
 }
 
-/// Calls `each` with every record in the inbox `reader` reads, one a
-/// line. A line that is not one (cut short by a crash, or not even UTF-8)
-/// is skipped, so it never holds up the records after it.
-fn read_inbox(
-    mut reader: impl BufRead,
-    mut each: impl FnMut(SiteRecord) -> Result<()>,
-) -> Result<()> {
+/// Calls `each` with every site in the inbox `reader` reads, one a line,
+/// as its stored item ([`plumb_core::stored::read_item`]). A line that is
+/// not one (cut short by a crash, or not even UTF-8) is skipped, so it
+/// never holds up the sites after it.
+fn read_inbox(mut reader: impl BufRead, mut each: impl FnMut(Item) -> Result<()>) -> Result<()> {
     let (mut damaged, mut line) = (0usize, Vec::new());
     loop {
         line.clear();
@@ -884,8 +886,8 @@ fn read_inbox(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_slice::<SiteRecord>(&line) {
-            Ok(record) => each(record)?,
+        match plumb_core::stored::read_item(&line) {
+            Ok(site) => each(site)?,
             Err(_) => damaged += 1,
         }
     }
@@ -899,10 +901,10 @@ fn read_inbox(
 /// index being served does not hold, for a node holding back new sites
 /// ([`super::NodeConfig::take_new_sites`] off): they only refresh the sites
 /// it has. Filling free space still adds sites (see super::fill).
-fn held_only(inner: &Inner, batch: &mut Vec<SiteRecord>) {
+fn held_only(inner: &Inner, batch: &mut SiteList) {
     let index = inner.current();
     let backend = index.as_ref().and_then(|index| index.backend.as_ref());
-    batch.retain(|record| backend.is_some_and(|backend| backend.has_domain(&record.domain)));
+    batch.retain_domains(|domain| backend.is_some_and(|backend| backend.has_domain(domain)));
 }
 
 /// Most sites [`Inner::kept_found`] remembers before it starts over.
@@ -916,7 +918,7 @@ const MAX_KEPT_FOUND: usize = 10_000;
 /// of published batches apply (a crawl is kept only from a trusted crawler
 /// or once confirmed, text only from trusted crawlers). Sites this
 /// node does not hold are left out: searching never fills its storage.
-pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
+pub(super) fn keep_found(inner: &Inner, mut sites: SiteList) {
     let Some(index) = inner.current() else {
         return;
     };
@@ -924,46 +926,50 @@ pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
         return;
     };
     let mut kept = inner.kept_found.locked();
-    let new: Vec<SiteRecord> = records
-        .into_iter()
-        .filter(|record| {
-            let Some(at) = record.crawled_at else {
-                return false;
-            };
-            kept.get(&record.domain).is_none_or(|&had| had < at)
-                && backend.has_domain(&record.domain)
-        })
-        .collect();
-    if new.is_empty() {
+    let mut crawled = Vec::new();
+    sites.retain(|site| {
+        let Some(at) = site::crawled(site) else {
+            return false;
+        };
+        let new = kept.get(&site.id).is_none_or(|&had| had < at) && backend.has_domain(&site.id);
+        if new {
+            crawled.push((site.id.clone(), at));
+        }
+        new
+    });
+    if sites.is_empty() {
         return;
     }
-    let n = new.len() as u64;
-    match append_inbox(inner, &new) {
+    let n = sites.len() as u64;
+    match append_inbox(inner, &sites) {
         Ok(()) => {
-            if kept.len() + new.len() > MAX_KEPT_FOUND {
+            if kept.len() + crawled.len() > MAX_KEPT_FOUND {
                 kept.clear();
             }
-            for record in &new {
-                kept.insert(record.domain.clone(), record.crawled_at.unwrap_or(0));
-            }
+            kept.extend(crawled);
             debug!("kept {n} signed crawls a network search found");
             let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
             if total >= REBUILD_AFTER_RECORDS {
                 inner.wake.notify_one();
             }
         }
-        Err(err) => warn!("cannot keep records a network search found: {err:#}"),
+        Err(err) => warn!("cannot keep the sites a network search found: {err:#}"),
     }
 }
 
 /// Moves the icon a shared crawl carries into the icon store: icons are
 /// never kept in the records file.
-fn keep_shared_icon(icons: &IconStore, record: &mut SiteRecord) {
-    let Some(icon) = record.icon.take().as_deref().and_then(icons::from_shared) else {
+fn keep_shared_icon(icons: &IconStore, site: &mut Item) {
+    let shared = plumb_core::site::icon(site).map(str::to_owned);
+    if shared.is_none() {
+        return;
+    }
+    plumb_core::site::set_icon(site, None);
+    let Some(icon) = shared.as_deref().and_then(icons::from_shared) else {
         return;
     };
-    if let Err(err) = icons.put(&record.domain, Some(&icon)) {
-        warn!("cannot save the icon of {}: {err}", record.domain);
+    if let Err(err) = icons.put(&site.id, Some(&icon)) {
+        warn!("cannot save the icon of {}: {err}", site.id);
     }
 }
 
@@ -1018,24 +1024,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let icons = IconStore::new(dir.path());
         // A 1x1 PNG is too small to be an icon: dropped, but still not kept.
-        let mut tiny = SiteRecord::new("tiny.com");
-        tiny.icon = Some("iVBORw0KGgo=".into());
+        let mut tiny = site::new("tiny.com");
+        site::set_icon(&mut tiny, Some("iVBORw0KGgo=".into()));
         keep_shared_icon(&icons, &mut tiny);
-        assert!(tiny.icon.is_none());
+        assert_eq!(tiny, plumb_core::site::new("tiny.com"));
         assert_eq!(icons.get("tiny.com"), None);
 
         let png = plumb_crawl::normalize_icon(&crate::icons::tests::bmp()).unwrap();
-        let mut record = SiteRecord::new("a.com");
-        record.icon = Some(base64::engine::general_purpose::STANDARD.encode(&png));
+        let mut record = site::new("a.com");
+        site::set_icon(
+            &mut record,
+            Some(base64::engine::general_purpose::STANDARD.encode(&png)),
+        );
         keep_shared_icon(&icons, &mut record);
-        assert!(record.icon.is_none());
+        assert_eq!(record, plumb_core::site::new("a.com"));
         assert!(icons.get("a.com").unwrap().starts_with(b"\x89PNG"));
     }
 
     #[test]
     fn a_damaged_inbox_line_is_skipped_not_fatal() {
         let line = |domain: &str| {
-            let mut line = serde_json::to_vec(&SiteRecord::new(domain)).unwrap();
+            // As versions up to 0.4 wrote it: the record's own JSON.
+            let mut line = crate::test_lines::old_line(&site::new(domain)).into_bytes();
             line.push(b'\n');
             line
         };
@@ -1047,8 +1057,8 @@ mod tests {
         inbox.extend(line("b.com"));
         inbox.extend_from_slice(b"\n");
         let mut domains = Vec::new();
-        read_inbox(inbox.as_slice(), |record| {
-            domains.push(record.domain);
+        read_inbox(inbox.as_slice(), |site| {
+            domains.push(site.id);
             Ok(())
         })
         .unwrap();
@@ -1119,5 +1129,57 @@ mod tests {
         apply_popularity(&table, "delta airlines", &mut other);
         assert_eq!(other[0].domain, "delta.org");
         assert_eq!(other[1].score, 0.9);
+    }
+
+    /// The crawls a node publishes are read off its records file a site
+    /// at a time, and come out the same, byte for byte as the network
+    /// carries them, whether the file's lines are the records' JSON, as
+    /// versions up to 0.4 wrote them, or stored items.
+    #[test]
+    fn published_crawls_are_the_same_whatever_the_shape_of_the_stored_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = site::new("python.org");
+        record.url = Some("https://www.python.org/".into());
+        record.title = Some(" Welcome\u{7} to Python.org ".into());
+        record.text = Some("Python lets you work quickly. ".repeat(60));
+        site::set_key_pages(
+            &mut record,
+            vec![plumb_core::KeyPage {
+                label: "Downloads".into(),
+                url: "https://www.python.org/downloads/".into(),
+            }],
+        );
+        site::set_links_to(&mut record, vec!["pypi.org".into()]);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(512);
+        site::set_signals(&mut record, &signals);
+        site::set_crawled(&mut record, Some(1_791_605_520));
+        let mut marks = site::crawl_marks(&record);
+        marks.tried = Some(1_791_605_600);
+        marks.failures = 1;
+        site::set_crawl_marks(&mut record, marks);
+        site::set_icon(&mut record, Some("iVBORw0KGgo=".into()));
+        let records = [record, site::new("ranked.com")];
+        let read = |name: &str, line: &dyn Fn(&Item) -> String| {
+            let path = dir.path().join(name);
+            let mut file = Vec::new();
+            for record in &records {
+                file.extend(line(record).into_bytes());
+                file.push(b'\n');
+            }
+            fs::write(&path, file).unwrap();
+            let mut read = Vec::new();
+            crate::outline::for_each_site(&path, |site| read.push(site)).unwrap();
+            read
+        };
+        let old = read("old.jsonl", &crate::test_lines::old_line);
+        let new = read("new.jsonl", &crate::test_lines::item_line);
+        assert_eq!(new, old);
+        assert_eq!(new, records);
+        let sent = |sites: &[Item]| -> Vec<String> {
+            let facts = sites.iter().map(crawl_facts);
+            facts.map(|facts| site::to_line(&facts).unwrap()).collect()
+        };
+        assert_eq!(sent(&new), sent(&old));
     }
 }

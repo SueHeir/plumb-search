@@ -381,7 +381,7 @@ async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> 
         };
         let (domain, base) = (domain.clone(), url.clone());
         let read = tokio::task::spawn_blocking(move || {
-            let text = crate::charset::decode(&body, kind.as_deref());
+            let text = crate::charset::decode(&body, kind.as_deref(), base.host_str());
             crate::read_feed(&domain, &base, &text, now_unix())
         })
         .await;
@@ -895,7 +895,7 @@ impl<'a> Visit<'a> {
         let base_url = final_url.clone();
         let extraction = self.extraction;
         let parsed = tokio::task::spawn_blocking(move || {
-            let text = crate::charset::decode(&body, kind.as_deref());
+            let text = crate::charset::decode(&body, kind.as_deref(), base_url.host_str());
             crate::extract_inner_page_meta(&base_url, &text, extraction)
         })
         .await;
@@ -1207,11 +1207,12 @@ mod tests {
     use axum::response::{Html, Response};
     use axum::routing::get;
     use axum::Router;
-    use plumb_core::SiteRecord;
+    use plumb_core::site;
+    use plumb_format::Item;
 
     use super::*;
     use crate::test_alloc::peak_bytes;
-    use crate::{to_records, OutLink, USER_AGENT};
+    use crate::{to_items, OutLink, USER_AGENT};
 
     /// Fetches each target's homepage, at most `cfg.concurrency` targets at a
     /// time, returning one result per target (in any order), each as
@@ -1264,13 +1265,10 @@ mod tests {
         }
     }
 
-    /// A record's link texts as (text, number of linking sites).
-    fn link_texts_of(record: &SiteRecord) -> Vec<(&str, u32)> {
-        record
-            .link_texts
-            .iter()
-            .map(|lt| (lt.text.as_str(), lt.count))
-            .collect()
+    /// A site's link texts as (text, number of linking sites).
+    fn link_texts_of(site: &Item) -> Vec<(String, u32)> {
+        let link_texts = site::link_texts(site).into_iter();
+        link_texts.map(|lt| (lt.text, lt.count)).collect()
     }
 
     /// A request a test server received.
@@ -2422,11 +2420,11 @@ mod tests {
                 title: Some("KillBot Verification".into())
             }
         );
-        let records = to_records(&[CrawlResult {
+        let sites = to_items(&[CrawlResult {
             domain: "example.test".into(),
             outcome,
         }]);
-        assert!(records.is_empty(), "{records:?}");
+        assert!(sites.is_empty(), "{sites:?}");
     }
 
     #[tokio::test]
@@ -2575,7 +2573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_results_become_records() {
+    async fn crawl_results_become_sites() {
         let (port, _) = serve(|_| {
             Router::new()
                 .route(
@@ -2629,27 +2627,30 @@ mod tests {
         domains.sort_unstable();
         assert_eq!(domains, ["example.com", "example.org", "gone.example"]);
 
-        let records = to_records(&results);
-        let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+        let sites = to_items(&results);
+        let domains: Vec<&str> = sites.iter().map(|site| site.id.as_str()).collect();
         assert_eq!(domains, ["example.com", "example.org", "partner.org"]);
 
-        let beta = &records[0];
+        let beta = &sites[0];
         assert_eq!(beta.title.as_deref(), Some("Beta Corp"));
         assert_eq!(beta.url, Some(format!("http://127.0.0.1:{port}/beta")));
-        assert!(beta.crawled_at.is_some());
-        assert_eq!(link_texts_of(beta), [("beta corp", 1)]);
-        assert_eq!(beta.signals.linking_domains, 1);
+        assert!(site::crawled(beta).is_some());
+        assert_eq!(link_texts_of(beta), [("beta corp".into(), 1)]);
+        assert_eq!(site::signals(beta).linking_domains, 1);
 
-        let alpha = &records[1];
+        let alpha = &sites[1];
         assert_eq!(alpha.title.as_deref(), Some("Alpha Co"));
-        assert_eq!(alpha.aliases, ["Alpha"]);
-        assert_eq!(link_texts_of(alpha), [("alpha", 1)]);
+        assert_eq!(alpha.names, ["Alpha"]);
+        assert_eq!(link_texts_of(alpha), [("alpha".into(), 1)]);
 
         // Discovered. "about our partner" is on a deep link, so it is left out.
-        let partner = &records[2];
-        assert_eq!((partner.title.as_deref(), partner.crawled_at), (None, None));
-        assert_eq!(link_texts_of(partner), [("partner", 2)]);
-        assert_eq!(partner.signals.linking_domains, 2);
+        let partner = &sites[2];
+        assert_eq!(
+            (partner.title.as_deref(), site::crawled(partner)),
+            (None, None)
+        );
+        assert_eq!(link_texts_of(partner), [("partner".into(), 2)]);
+        assert_eq!(site::signals(partner).linking_domains, 2);
     }
 
     #[tokio::test]

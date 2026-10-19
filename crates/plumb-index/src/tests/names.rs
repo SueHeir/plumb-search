@@ -94,7 +94,7 @@ fn little_known_sites_without_a_title_come_after_titled_ones() {
 fn a_name_a_site_borrows_does_not_name_it() {
     let official = |domain, title, aliases: &[&str], about: &str, signals| {
         let mut record = site(domain, Some(title), None, aliases, &[], signals);
-        record.about = Some(about.to_string());
+        site::set_wikidata_about(&mut record, Some(about.to_string()));
         record
     };
     let records = [
@@ -122,10 +122,10 @@ fn a_name_a_site_borrows_does_not_name_it() {
                 "American technology company",
                 popular(400, 300_000),
             );
-            meta.intro = Some(
+            site::set_intro(&mut meta, Some(
                 "Meta Platforms, Inc., formerly Facebook, Inc., is an American technology company."
                     .to_string(),
-            );
+            ));
             meta
         },
         // Not official, and its description names the brand in passing.
@@ -628,7 +628,7 @@ fn a_titleless_full_query_domain_needs_corroboration_to_precede_real_matches() {
     assert_eq!(top(&searcher, "awesome-python.com"), "awesome-python.com");
     // An independently indexed full alias establishes the name even
     // when the homepage itself could not be crawled.
-    records[1].add_alias("Awesome Python");
+    site::add_alias(&mut records[1], "Awesome Python");
     let (_dir, searcher) = build(&records);
     let hits = experimental_search(&searcher, "awesome python", 10);
     let at = domains(&hits)
@@ -640,7 +640,7 @@ fn a_titleless_full_query_domain_needs_corroboration_to_precede_real_matches() {
 #[test]
 fn the_networks_own_site_comes_first_for_its_name() {
     let records = vec![
-        plumb_core::home_site_record(),
+        plumb_core::home_site(),
         site(
             "plumbs.com",
             Some("Plumbs"),
@@ -676,7 +676,7 @@ fn the_networks_own_site_comes_first_for_its_name() {
 #[test]
 fn wikidata_descriptions_are_searched_and_shown() {
     let mut navy = site("navyfederal.org", None, None, &[], &[], ranked(4_000, 500));
-    navy.about = Some("American credit union".into());
+    site::set_wikidata_about(&mut navy, Some("American credit union".into()));
     let records = vec![
         navy,
         site("navy.mil", None, None, &[], &[], popular(2_000, 9_000)),
@@ -697,7 +697,10 @@ fn wikidata_descriptions_are_searched_and_shown() {
 #[test]
 fn summaries_stand_in_for_a_missing_description() {
     let mut recipes = site("allrecipes.com", None, None, &[], &[], ranked(3_000, 500));
-    recipes.summary = Some("Allrecipes is a site where home cooks share recipes.".into());
+    site::set_summary(
+        &mut recipes,
+        Some("Allrecipes is a site where home cooks share recipes.".into()),
+    );
     let mut described = site(
         "food.com",
         None,
@@ -706,7 +709,10 @@ fn summaries_stand_in_for_a_missing_description() {
         &[],
         ranked(5_000, 400),
     );
-    described.summary = Some("Food.com shares recipes from home cooks.".into());
+    site::set_summary(
+        &mut described,
+        Some("Food.com shares recipes from home cooks.".into()),
+    );
     let (_dir, searcher) = build(&[recipes, described]);
     let hits = searcher.search("home cooks recipes", 10).unwrap();
     let found = |domain: &str| hits.iter().find(|hit| hit.domain == domain);
@@ -729,18 +735,24 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
         &[],
         ranked(9_000, 400),
     );
-    lookalike.redirect = Some(plumb_core::Redirect {
-        to: "pnc.com".into(),
-        at: 1,
-        inner: false,
-    });
+    site::set_redirect(
+        &mut lookalike,
+        Some(plumb_core::Redirect {
+            to: "pnc.com".into(),
+            at: 1,
+            inner: false,
+        }),
+    );
     // A redirect to a site not in the index changes nothing.
     let mut elsewhere = site("fb.example", None, None, &[], &[], ranked(50_000, 10));
-    elsewhere.redirect = Some(plumb_core::Redirect {
-        to: "facebook.example".into(),
-        at: 1,
-        inner: false,
-    });
+    site::set_redirect(
+        &mut elsewhere,
+        Some(plumb_core::Redirect {
+            to: "facebook.example".into(),
+            at: 1,
+            inner: false,
+        }),
+    );
     // Sent to a page about it, or to the sign-in of the domain it is on,
     // a site stays one of its own.
     let mut section = site(
@@ -751,11 +763,14 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
         &[],
         ranked(9_000, 50),
     );
-    section.redirect = Some(plumb_core::Redirect {
-        to: "bungie.net".into(),
-        at: 1,
-        inner: true,
-    });
+    site::set_redirect(
+        &mut section,
+        Some(plumb_core::Redirect {
+            to: "bungie.net".into(),
+            at: 1,
+            inner: true,
+        }),
+    );
     let mut gmail = site(
         "mail.google.com",
         Some("Gmail"),
@@ -764,11 +779,14 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
         &[],
         ranked(1, 900),
     );
-    gmail.redirect = Some(plumb_core::Redirect {
-        to: "google.com".into(),
-        at: 1,
-        inner: false,
-    });
+    site::set_redirect(
+        &mut gmail,
+        Some(plumb_core::Redirect {
+            to: "google.com".into(),
+            at: 1,
+            inner: false,
+        }),
+    );
     let records = vec![
         site("pnc.com", None, None, &[], &[], ranked(2_000, 900)),
         lookalike,
@@ -780,7 +798,7 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
         gmail,
     ];
     let dir = TempDir::new().unwrap();
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     assert_eq!((stats.docs, stats.redirected), (7, 1));
     let searcher = Searcher::open(dir.path()).unwrap();
     let hits = searcher.search("pnc bank", 10).unwrap();

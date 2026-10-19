@@ -479,6 +479,17 @@ impl Mcp {
         self.backend.search_full(query, limit, options)
     }
 
+    /// [`Mcp::lookup`] to find whose site a name or domain is
+    /// ([`SearchBackend::search_names`]).
+    fn lookup_name(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.backend.search_names(query, limit, options)
+    }
+
     /// True when the node's denylist takes off the page at `url`.
     fn denies(&self, url: &str) -> bool {
         self.node.as_ref().is_some_and(|node| node.denies(url))

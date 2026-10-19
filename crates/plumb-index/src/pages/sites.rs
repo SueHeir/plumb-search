@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::TermQuery;
-use tantivy::schema::{IndexRecordOption, Value};
+use tantivy::schema::IndexRecordOption;
 use tantivy::{TantivyDocument, Term};
 
 use super::{Page, PageHit, PageSearcher, ALIAS_MATCH, POPULARITY_SCALE, TITLE_CANDIDATES};
@@ -131,13 +131,9 @@ impl PageSearcher {
         let mut articles = Vec::new();
         for (popularity, address) in best {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             if page.is_article() && page.website.is_none() {
                 let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
                 articles.push((page, popularity));
@@ -182,6 +178,7 @@ impl PageSearcher {
                 popularity,
                 whole: false,
                 learned: None,
+                meant: false,
             },
         );
         Ok(())

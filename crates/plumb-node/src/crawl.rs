@@ -1,7 +1,13 @@
 //! Crawling: fetches homepages and merges what they say into the records,
 //! including links that discover new domains. A long-running node
 //! ([`crate::node`]) crawls through [`select_targets`] and
-//! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand.
+//! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand, holding the
+//! whole file as a set of sites ([`plumb_core::sites::Sites`]) and choosing
+//! from it with [`select_site_targets`]. What a crawl reads of its
+//! homepages are sites, each its stored item ([`plumb_crawl::to_items`]),
+//! which the journal's changes carry and the crawls a node shares with the
+//! network are signed from, and choosing homepages reads a site's crawl
+//! marks as its item holds them ([`CrawlSite`]).
 //!
 //! # Which homepages
 //!
@@ -23,7 +29,7 @@
 //!
 //! Each homepage is fetched at `https://<domain>/` first. When that gets no
 //! answer, the crawler tries the URL the site was last reached at (the
-//! record's `url`), then the `www.` host and plain http.
+//! site's `url`), then the `www.` host and plain http.
 //!
 //! # Saving
 //!
@@ -58,8 +64,10 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
-use plumb_crawl::{to_records, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_core::sites::Sites;
+use plumb_core::{now_unix, site};
+use plumb_crawl::{to_items, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_format::Item;
 use tracing::{info, warn};
 
 use crate::records::{Change, RecordStore};
@@ -75,7 +83,7 @@ pub const CRAWL_BATCH_SIZE: usize = 500;
 /// recrawl window.
 pub(crate) const FIRST_RETRY_AFTER: u64 = SECONDS_PER_DAY;
 
-/// A site judged dead ([`plumb_core::SiteRecord::gone_at`]) is tried again
+/// A site judged dead ([`site::CrawlMarks::gone`]) is tried again
 /// after this many recrawl windows, in case it came back.
 pub(crate) const GONE_RETRY_WINDOWS: u64 = 3;
 
@@ -87,13 +95,15 @@ pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 /// homepages that should answer could not be fetched.
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
 
-/// What choosing homepages to crawl reads of a site: a whole
-/// [`SiteRecord`], or the little a node keeps of each site during a crawl
-/// round (see `crate::node`).
+/// What choosing homepages to crawl reads of a site: its stored item
+/// ([`plumb_core::site`]), the little [`select_site_targets`] keeps of it,
+/// or the little a node keeps of each site during a crawl round (see
+/// `crate::node`).
 pub trait CrawlSite {
     /// The canonical domain.
     fn domain(&self) -> &str;
-    /// Where the homepage was last reached ([`SiteRecord::url`]).
+    /// Where the homepage was last reached, after redirects (the site's
+    /// `url`).
     fn url(&self) -> Option<&str>;
     fn link_score(&self) -> f32;
     fn crawled_at(&self) -> Option<u64>;
@@ -102,9 +112,11 @@ pub trait CrawlSite {
     fn gone_at(&self) -> Option<u64>;
 }
 
-impl CrawlSite for SiteRecord {
+/// A site's stored item: its crawl marks are the item's `crawl` field
+/// ([`site::crawl_marks`]).
+impl CrawlSite for Item {
     fn domain(&self) -> &str {
-        &self.domain
+        &self.id
     }
 
     fn url(&self) -> Option<&str> {
@@ -112,28 +124,29 @@ impl CrawlSite for SiteRecord {
     }
 
     fn link_score(&self) -> f32 {
-        SiteRecord::link_score(self)
+        site::link_score(self)
     }
 
     fn crawled_at(&self) -> Option<u64> {
-        self.crawled_at
+        site::crawled(self)
     }
 
     fn crawl_attempted_at(&self) -> Option<u64> {
-        self.crawl_attempted_at
+        site::crawl_marks(self).tried
     }
 
     fn crawl_failures(&self) -> u32 {
-        self.crawl_failures
+        site::crawl_marks(self).failures
     }
 
     fn gone_at(&self) -> Option<u64> {
-        self.gone_at
+        site::crawl_marks(self).gone
     }
 }
 
-/// The sites a crawl changes as it goes ([`crawl_rolling`]): a whole
-/// [`RecordSet`], or what a node keeps of each site during a round.
+/// The sites a crawl changes as it goes ([`crawl_rolling`]): a whole set of
+/// sites ([`Sites`]), as `plumb-tools crawl` holds it, or what a node keeps
+/// of each site during a round.
 // A crawl only counts the sites; nothing asks whether a set is empty.
 #[allow(clippy::len_without_is_empty)]
 pub trait CrawlSet {
@@ -154,13 +167,15 @@ pub trait CrawlSet {
     fn compact(&self, store: &mut RecordStore) -> Result<usize>;
 }
 
-impl CrawlSet for RecordSet {
+/// A whole set of sites takes each change as loading the journal makes it
+/// ([`Change::apply`]), and is written whole when the journal is folded in
+/// ([`RecordStore::compact`]).
+impl CrawlSet for Sites {
     fn marks(&self, domain: &str) -> (Option<u64>, u32) {
-        let record = self.get(domain);
-        (
-            record.and_then(|r| r.crawl_attempted_at),
-            record.map_or(0, |r| r.crawl_failures),
-        )
+        self.get(domain).map_or((None, 0), |site| {
+            let marks = site::crawl_marks(&site);
+            (marks.tried, marks.failures)
+        })
     }
 
     fn apply(&mut self, change: Change) {
@@ -168,7 +183,7 @@ impl CrawlSet for RecordSet {
     }
 
     fn len(&self) -> usize {
-        RecordSet::len(self)
+        Sites::len(self)
     }
 
     fn compact(&self, store: &mut RecordStore) -> Result<usize> {
@@ -189,6 +204,81 @@ pub fn select_targets<'a, S: CrawlSite + 'a>(
     window: u64,
 ) -> Vec<CrawlTarget> {
     select_targets_with(records, budget, now, window, |_| false)
+}
+
+/// [`select_targets`] of a whole set of sites, as `plumb-tools crawl`
+/// chooses its homepages. Each site is read from its line once
+/// ([`Sites::iter`]), and of those that could be picked at `now` (never
+/// tried, or due again) only what choosing reads is kept: their items
+/// would take more memory than the set itself.
+pub fn select_site_targets(
+    sites: &Sites,
+    budget: usize,
+    now: u64,
+    window: u64,
+) -> Vec<CrawlTarget> {
+    let candidates: Vec<Candidate> = sites
+        .iter()
+        .filter(|site| due_at(site, window).is_none_or(|due| due <= now))
+        .map(|site| Candidate::of(&site))
+        .collect();
+    select_targets(candidates.iter(), budget, now, window)
+}
+
+/// What choosing homepages reads of a site ([`CrawlSite`]), as
+/// [`select_site_targets`] keeps it of each site it could pick.
+struct Candidate {
+    domain: Box<str>,
+    url: Option<Box<str>>,
+    link_score: f32,
+    crawled_at: Option<u64>,
+    attempted_at: Option<u64>,
+    failures: u32,
+    gone_at: Option<u64>,
+}
+
+impl Candidate {
+    fn of(site: &Item) -> Candidate {
+        Candidate {
+            domain: site.id.as_str().into(),
+            url: site.url.as_deref().map(Into::into),
+            link_score: CrawlSite::link_score(site),
+            crawled_at: CrawlSite::crawled_at(site),
+            attempted_at: CrawlSite::crawl_attempted_at(site),
+            failures: CrawlSite::crawl_failures(site),
+            gone_at: CrawlSite::gone_at(site),
+        }
+    }
+}
+
+impl CrawlSite for Candidate {
+    fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    fn link_score(&self) -> f32 {
+        self.link_score
+    }
+
+    fn crawled_at(&self) -> Option<u64> {
+        self.crawled_at
+    }
+
+    fn crawl_attempted_at(&self) -> Option<u64> {
+        self.attempted_at
+    }
+
+    fn crawl_failures(&self) -> u32 {
+        self.failures
+    }
+
+    fn gone_at(&self) -> Option<u64> {
+        self.gone_at
+    }
 }
 
 /// [`select_targets`], also counting the crawled sites for which `due_now`
@@ -373,7 +463,7 @@ impl<F: FnMut(Vec<CrawlTarget>) -> Option<Vec<CrawlResult>>> Fetcher for Batches
 /// old marks back, and [`RunTotals::end`] says why the run ended.
 #[cfg(test)]
 pub(crate) fn crawl_in_batches(
-    set: &mut RecordSet,
+    set: &mut impl CrawlSet,
     targets: &[CrawlTarget],
     batch_size: usize,
     store: &mut RecordStore,
@@ -652,11 +742,11 @@ fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Op
     })
 }
 
-/// Turns crawl batches into changes to a record set.
+/// Turns crawl batches into changes to a set of sites.
 #[derive(Debug, Default)]
 struct BatchMerger {
     /// Distinct crawled domains linking to each domain, over the whole run.
-    /// [`to_records`] counts the linking domains of one batch only, and
+    /// [`to_items`] counts the linking domains of one batch only, and
     /// merging keeps the larger of two counts, so without this a site linked
     /// from several batches would keep only the count of its best batch.
     /// Domains are kept as hashes ([`domain_hash`]): a round's links
@@ -673,7 +763,7 @@ fn domain_hash(domain: &str) -> u64 {
 }
 
 impl BatchMerger {
-    /// The records [`to_records`] makes of a batch's results, with
+    /// The sites [`to_items`] makes of a batch's results, with
     /// `linking_domains` counted over the whole run, as changes to merge.
     fn changes(&mut self, results: &[CrawlResult]) -> Vec<Change> {
         for result in results {
@@ -681,7 +771,7 @@ impl BatchMerger {
                 continue;
             };
             for link in &page.meta.links {
-                // The links `to_records` counts: self-links are not inbound.
+                // The links `to_items` counts: self-links are not inbound.
                 if link.target_domain.is_empty() || link.target_domain == page.domain {
                     continue;
                 }
@@ -691,15 +781,16 @@ impl BatchMerger {
                     .insert(domain_hash(&page.domain));
             }
         }
-        to_records(results)
+        to_items(results)
             .into_iter()
-            .map(|mut record| {
-                if let Some(linkers) = self.linkers.get(&domain_hash(&record.domain)) {
+            .map(|mut site| {
+                if let Some(linkers) = self.linkers.get(&domain_hash(&site.id)) {
                     let count = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
-                    let signals = &mut record.signals;
+                    let mut signals = site::signals(&site);
                     signals.linking_domains = signals.linking_domains.max(count);
+                    site::set_signals(&mut site, &signals);
                 }
-                Change::Merge { record }
+                Change::Merge { site }
             })
             .collect()
     }

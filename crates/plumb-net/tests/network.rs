@@ -6,16 +6,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::site::{self, Item};
+use plumb_core::sites::SiteList;
 use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use plumb_net::{BucketSource, BucketTable, Multiaddr, NetConfig, NetHandle, PeerId, SearchScope};
 use tempfile::TempDir;
 use tokio::sync::mpsc::Receiver;
 
-/// Serves the buckets of the records it was given, as a node with an
-/// index of them would.
-fn table(dir: &std::path::Path, records: &[SiteRecord]) -> Arc<dyn BucketSource> {
-    Arc::new(BucketTable::build(&dir.join("buckets"), records).unwrap())
+/// `sites` as a node holds its crawls to publish.
+fn listed(sites: &[Item]) -> SiteList {
+    sites.iter().cloned().collect()
+}
+
+/// Serves the buckets of the sites it was given, as a node with an index
+/// of them would, each clean as a node holds it.
+fn table(dir: &std::path::Path, sites: &[Item]) -> Arc<dyn BucketSource> {
+    let mut sites = sites.to_vec();
+    sites.iter_mut().for_each(site::clean);
+    Arc::new(BucketTable::build(&dir.join("buckets"), &sites).unwrap())
 }
 
 struct Node {
@@ -25,7 +34,7 @@ struct Node {
 }
 
 impl Node {
-    async fn start(relay: bool, bootstrap: Vec<Multiaddr>, local: Vec<SiteRecord>) -> Node {
+    async fn start(relay: bool, bootstrap: Vec<Multiaddr>, local: Vec<Item>) -> Node {
         Self::start_with(relay, bootstrap, local, true).await
     }
 
@@ -34,7 +43,7 @@ impl Node {
     async fn start_with(
         relay: bool,
         bootstrap: Vec<Multiaddr>,
-        local: Vec<SiteRecord>,
+        local: Vec<Item>,
         listen: bool,
     ) -> Node {
         let dir = tempfile::tempdir().unwrap();
@@ -47,7 +56,7 @@ impl Node {
         dir: TempDir,
         relay: bool,
         bootstrap: Vec<Multiaddr>,
-        local: Vec<SiteRecord>,
+        local: Vec<Item>,
         listen: bool,
         tweak: impl FnOnce(&mut NetConfig),
     ) -> Node {
@@ -87,12 +96,14 @@ impl Node {
         addr.with_p2p(self.handle.peer_id()).unwrap()
     }
 
-    async fn next_records(&mut self) -> Vec<SiteRecord> {
+    async fn next_sites(&mut self) -> Vec<Item> {
         tokio::time::timeout(Duration::from_secs(30), self.records.recv())
             .await
-            .expect("records within 30 s")
+            .expect("sites within 30 s")
             .expect("the node is running")
-            .records
+            .sites
+            .iter()
+            .collect()
     }
 }
 
@@ -108,7 +119,7 @@ async fn wait_for<T>(mut check: impl FnMut() -> Option<T>) -> T {
 
 /// A crawled homepage all of `peers` are assigned today, whose title
 /// contains `word`.
-fn crawled_for(peers: &[PeerId], word: &str) -> SiteRecord {
+fn crawled_for(peers: &[PeerId], word: &str) -> Item {
     let now = now_unix();
     let domain = (0..)
         .map(|i| format!("{word}{i}.com"))
@@ -118,10 +129,10 @@ fn crawled_for(peers: &[PeerId], word: &str) -> SiteRecord {
                 .all(|peer| is_assigned(epoch_of(now), peer, d, MAX_SHARE_PPM))
         })
         .unwrap();
-    let mut record = SiteRecord::new(domain.as_str());
+    let mut record = site::new(domain.as_str());
     record.url = Some(format!("https://{domain}/"));
     record.title = Some(format!("The {word} site"));
-    record.crawled_at = Some(now);
+    site::set_crawled(&mut record, Some(now));
     record
 }
 
@@ -150,7 +161,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         &[a.handle.peer_id(), relay.handle.peer_id()],
         "harbor",
     )];
-    let id = a.handle.publish(published.clone()).await.unwrap().unwrap();
+    let id = a.handle.publish(listed(&published)).await.unwrap().unwrap();
     wait_for(|| (b.handle.status().agreement.pending_sites == 1).then_some(())).await;
     assert!(b.records.try_recv().is_err(), "one crawler is not enough");
     let mut again = published.clone();
@@ -160,10 +171,10 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         relay.records.try_recv().is_err(),
         "one crawler is not enough"
     );
-    relay.handle.publish(again).await.unwrap().unwrap();
-    let got = b.next_records().await;
+    relay.handle.publish(listed(&again)).await.unwrap().unwrap();
+    let got = b.next_sites().await;
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].domain, published[0].domain);
+    assert_eq!(got[0].id, published[0].id);
     assert_eq!(got[0].title.as_deref(), Some("The harbor site!"));
     // Delivery wakes this receiver before the producer refreshes cached status.
     wait_for(|| (b.handle.status().agreement.confirmed_sites == 1).then_some(())).await;
@@ -176,11 +187,8 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     // C answers searches from an index holding A's crawl, with a proof
     // from the batch it received.
     let mut c = Node::start(false, vec![relay_addr.clone()], published.clone()).await;
-    let caught_up = c.next_records().await;
-    assert_eq!(
-        caught_up[0].domain, published[0].domain,
-        "catches up on join"
-    );
+    let caught_up = c.next_sites().await;
+    assert_eq!(caught_up[0].id, published[0].id, "catches up on join");
     wait_for(|| (b.handle.status().connected_peers >= 2).then_some(())).await;
 
     let mut result = None;
@@ -199,7 +207,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     }
     let result = result.expect("a verified hit from C");
     let hit = &result.found[0];
-    assert_eq!(hit.record.domain, published[0].domain);
+    assert_eq!(hit.site.domain(), published[0].id);
     assert_eq!(result.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
     let crawlers = [
         a.handle.peer_id().to_string(),
@@ -344,7 +352,7 @@ async fn bucket_requests_go_sealed_through_a_relay() {
     let records = vec![crawled_for(&[crawler.handle.peer_id()], "lantern")];
     crawler
         .handle
-        .publish(records.clone())
+        .publish(listed(&records))
         .await
         .unwrap()
         .unwrap();
@@ -389,7 +397,7 @@ async fn bucket_requests_go_sealed_through_a_relay() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let result = result.expect("a verified hit through a relay");
-    assert_eq!(result.found[0].record.domain, records[0].domain);
+    assert_eq!(result.found[0].site.domain(), records[0].id);
     assert_eq!(result.direct, 0, "{result:?}");
     assert_eq!(result.relayed, result.answered, "{result:?}");
     assert!(holder.handle.status().buckets_served > served_before);
@@ -525,13 +533,13 @@ async fn confirmed_crawls_earn_credits_that_buy_tokens() {
         .is_err());
 
     // A and R crawl the same sites and agree on every one.
-    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+    let sites: Vec<Item> = (0..MIN_JUDGED)
         .map(|i| crawled_for(&peers, &format!("credit{i}x")))
         .collect();
-    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    a.handle.publish(listed(&sites)).await.unwrap().unwrap();
     let n = sites.len();
     wait_for(|| (r.handle.status().agreement.pending_sites == n).then_some(())).await;
-    r.handle.publish(sites.clone()).await.unwrap().unwrap();
+    r.handle.publish(listed(&sites)).await.unwrap().unwrap();
     let earned = i64::from(MIN_JUDGED) * credits_for(now_unix());
     // R counts every one of A's crawls: each matched R's own. R vouches for
     // A only after A matched 3 of its crawls, so R's own crawls of those
@@ -594,7 +602,7 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
             .to_peer_id()
     };
     let peers = [key(&a_dir), key(&r_dir)];
-    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+    let sites: Vec<Item> = (0..MIN_JUDGED)
         .map(|i| crawled_for(&peers, &format!("busy{i}x")))
         .collect();
 
@@ -609,10 +617,10 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
     let r = &r.handle;
 
     // A and R crawl the same sites, so R counts credits for A.
-    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    a.handle.publish(listed(&sites)).await.unwrap().unwrap();
     let n = sites.len();
     wait_for(|| (r.status().agreement.pending_sites == n).then_some(())).await;
-    r.publish(sites.clone()).await.unwrap().unwrap();
+    r.publish(listed(&sites)).await.unwrap().unwrap();
     let mut credits = 0;
     for _ in 0..100 {
         credits = a.handle.credits_at(r.peer_id()).await.unwrap().credits;
@@ -636,10 +644,7 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
     let paid = a.handle.search("busy0x", wait).await.unwrap();
     assert!(paid.priority > 0, "{paid:?}");
     assert_eq!(paid.priority, paid.answered, "{paid:?}");
-    assert!(paid
-        .found
-        .iter()
-        .any(|s| s.record.domain == sites[0].domain));
+    assert!(paid.found.iter().any(|s| s.site.domain() == sites[0].id));
     let spent = paid.priority;
     assert_eq!(a.handle.tokens_held(&r.peer_id()), 8 - spent);
     wait_for(|| (a.handle.status().credits.tokens_spent == spent as u64).then_some(())).await;
@@ -668,7 +673,11 @@ async fn answering_earns_credits_and_a_node_keeps_to_its_daily_limit() {
         c.answer_per_day = Some(per_day)
     })
     .await;
-    r.handle.publish(vec![site.clone()]).await.unwrap().unwrap();
+    r.handle
+        .publish(listed(std::slice::from_ref(&site)))
+        .await
+        .unwrap()
+        .unwrap();
     let a = Node::start(false, vec![r.addr().await], vec![]).await;
     wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
     // A transport connection can precede Identify registering the bucket protocol.
@@ -686,7 +695,7 @@ async fn answering_earns_credits_and_a_node_keeps_to_its_daily_limit() {
     assert!(found
         .found
         .iter()
-        .any(|s| s.record.domain == site.domain && s.verified));
+        .any(|s| s.site.domain() == site.id && s.verified));
 
     // A counts credits for R for each answer holding a signed crawl: R
     // can ask A what it has there. The padding buckets, empty here, earn
@@ -763,7 +772,7 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     assert!(found
         .found
         .iter()
-        .any(|s| s.record.domain.starts_with("quay")));
+        .any(|s| s.site.domain().starts_with("quay")));
 
     a.handle.shutdown().await;
     h.handle.shutdown().await;
@@ -854,13 +863,15 @@ async fn scheduled_empty_answers_are_reused_without_search_triggered_fetches() {
 async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
     // S holds crawls of many sites; F trusts S, U trusts nobody.
     let now = now_unix();
-    let mut local: Vec<SiteRecord> = (0..30u32)
+    let mut local: Vec<Item> = (0..30u32)
         .map(|i| {
-            let mut record = SiteRecord::new(format!("filler{i}.com"));
-            record.signals.tranco_rank = Some(i + 1);
+            let mut record = site::new(format!("filler{i}.com"));
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(i + 1);
+            site::set_signals(&mut record, &signals);
             if i % 3 != 1 {
                 record.title = Some(format!("Filler {i}"));
-                record.crawled_at = Some(now - 3_600);
+                site::set_crawled(&mut record, Some(now - 3_600));
             }
             record
         })
@@ -897,7 +908,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
     };
     assert_eq!(first.peer, s_id);
     assert_eq!(first.total, 30);
-    let domains: Vec<&str> = first.records.iter().map(|r| r.domain.as_str()).collect();
+    let domains: Vec<&str> = first.sites.domains().collect();
     assert_eq!(
         domains,
         [
@@ -908,7 +919,10 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             "filler6.com"
         ]
     );
-    assert!(first.records.iter().all(|r| r.crawled_at.is_some()));
+    assert!(first
+        .sites
+        .iter()
+        .all(|site| plumb_core::site::crawled(&site).is_some()));
     // A node setting up asks for every site, crawled or not.
     let all = f
         .handle
@@ -916,7 +930,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
         .await
         .unwrap()
         .unwrap();
-    let domains: Vec<&str> = all.records.iter().map(|r| r.domain.as_str()).collect();
+    let domains: Vec<&str> = all.sites.domains().collect();
     assert_eq!(
         domains,
         [
@@ -927,9 +941,10 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             "filler4.com"
         ]
     );
-    assert_eq!(all.records[1].signals.tranco_rank, Some(2));
+    let second = all.sites.iter().nth(1).unwrap();
+    assert_eq!(plumb_core::site::signals(&second).tranco_rank, Some(2));
     assert_eq!(all.next, 5);
-    let mut filled = first.records.len();
+    let mut filled = first.sites.len();
     let mut from = first.next;
     loop {
         let page = f
@@ -942,7 +957,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             // Asked too often this minute: S turns F away for now.
             break;
         }
-        filled += page.records.len();
+        filled += page.sites.len();
         from = page.next;
         if page.done() {
             break;
@@ -1169,10 +1184,10 @@ async fn catchup_resumes_after_slow_delivery_without_relisting_or_maintenance() 
     let source = Node::start(false, vec![], vec![]).await;
     let now = now_unix();
     for i in 0..28 {
-        let mut record = SiteRecord::new(format!("burst-{i}.example"));
-        record.crawled_at = Some(now);
+        let mut record = site::new(format!("burst-{i}.example"));
+        site::set_crawled(&mut record, Some(now));
         record.title = Some(format!("Catchup {i}"));
-        source.handle.publish(vec![record]).await.unwrap();
+        source.handle.publish(listed(&[record])).await.unwrap();
     }
     let addr = source
         .addr()
@@ -1204,8 +1219,8 @@ async fn catchup_resumes_after_slow_delivery_without_relisting_or_maintenance() 
                 )
             })
             .unwrap();
-        for record in records.records {
-            delivered.insert(record.domain);
+        for domain in records.sites.domains() {
+            delivered.insert(domain.to_string());
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
@@ -1232,11 +1247,16 @@ async fn fresh_own_publication_past_the_storage_limit_is_still_published() {
         },
     )
     .await;
-    let mut record = SiteRecord::new("protected-own.example");
-    record.crawled_at = Some(now_unix());
+    let mut record = site::new("protected-own.example");
+    site::set_crawled(&mut record, Some(now_unix()));
     // The limit is a target, as in 0.2.0: crawls pause at it, but a crawl
     // already made is published.
-    assert!(node.handle.publish(vec![record]).await.unwrap().is_some());
+    assert!(node
+        .handle
+        .publish(listed(&[record]))
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(node.handle.status().batches_published, 1);
     assert_eq!(node.handle.status().batches_held, 1);
     let storage = node.handle.storage_budget().unwrap().status();
@@ -1297,10 +1317,10 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
         });
         let now = now_unix();
         for i in 0..28 {
-            let mut record = SiteRecord::new(format!("busy-{i}.example"));
-            record.crawled_at = Some(now);
+            let mut record = site::new(format!("busy-{i}.example"));
+            site::set_crawled(&mut record, Some(now));
             record.title = Some(format!("Temporary busy {i}"));
-            source.handle.publish(vec![record]).await.unwrap();
+            source.handle.publish(listed(&[record])).await.unwrap();
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while source.handle.status().batch_busy_replies == 0
@@ -1332,7 +1352,7 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
                         )
                     })
                     .unwrap();
-                domains.extend(delivery.records.into_iter().map(|record| record.domain));
+                domains.extend(delivery.sites.domains().map(str::to_string));
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             assert_eq!(client.handle.status().batches_held, 28);
@@ -1368,9 +1388,9 @@ fn startup_overload_retries_empty_headers_before_any_batch_ids_are_known() {
     let source = source_runtime.block_on(async {
         let first = Node::start(false, vec![], vec![]).await;
         for i in 0..28 {
-            let mut record = SiteRecord::new(format!("startup-busy-{i}.example"));
-            record.crawled_at = Some(now_unix());
-            first.handle.publish(vec![record]).await.unwrap();
+            let mut record = site::new(format!("startup-busy-{i}.example"));
+            site::set_crawled(&mut record, Some(now_unix()));
+            first.handle.publish(listed(&[record])).await.unwrap();
         }
         first.handle.shutdown().await;
         // Restart clears gossip announcements; all IDs must come from Lists.
@@ -1458,7 +1478,7 @@ fn startup_overload_retries_empty_headers_before_any_batch_ids_are_known() {
                                 )
                             })
                             .unwrap();
-                    domains.extend(delivery.records.into_iter().map(|record| record.domain));
+                    domains.extend(delivery.sites.domains().map(str::to_string));
                 }
                 wait_for(|| (client.handle.status().batches_held == 28).then_some(())).await;
                 let status = client.handle.status();

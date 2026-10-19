@@ -51,10 +51,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
             })
         })
         .unwrap();
-    let mut crawled = SiteRecord::new(domain.as_str());
+    let mut crawled = site::new(domain.as_str());
     crawled.url = Some(format!("https://{domain}/"));
     crawled.title = Some("Lighthouse Keepers Guild".to_string());
-    crawled.crawled_at = Some(now);
+    site::set_crawled(&mut crawled, Some(now));
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -64,8 +64,11 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.bootstrap = vec![node_addr.clone()];
     // The peer trusts the node, so it may fill its space from it.
     peer_config.trusted_peers = vec![net_status.peer_id.parse().unwrap()];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -143,7 +146,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         from_node
             .found
             .iter()
-            .any(|f| f.record.domain == "usbank.com"),
+            .any(|f| f.site.domain() == "usbank.com"),
         "{from_node:?}"
     );
 
@@ -152,7 +155,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     // from its own index.
     let mut published = None;
     for _ in 0..100 {
-        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        published = peer
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         let (_, _, body) = get(addr, "/api/status").await;
         let status: serde_json::Value = serde_json::from_str(&body).unwrap();
         if status["network"]["agreement"]["pending_sites"] == 1 {
@@ -175,14 +181,19 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         c.bootstrap = vec![node_addr.clone()];
         c
     };
-    let empty =
-        plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[] as &[SiteRecord])
-            .unwrap();
+    let empty = plumb_net::BucketTable::build(
+        &second_dir.path().join("buckets"),
+        &[] as &[plumb_core::site::Item],
+    )
+    .unwrap();
     let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
         .await
         .unwrap();
     for _ in 0..100 {
-        second.publish(vec![crawled.clone()]).await.unwrap();
+        second
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         if dir.path().join("net/inbox.jsonl").exists() {
             break;
         }
@@ -249,11 +260,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
         }
     };
     let _ = peer_id;
-    let mut crawled = SiteRecord::new("reddit.com");
+    let mut crawled = site::new("reddit.com");
     crawled.url = Some("https://www.reddit.com/".to_string());
     crawled.title = Some("Reddit".to_string());
-    crawled.description = Some("Communities for every interest, from news to hobbies".to_string());
-    crawled.crawled_at = Some(now);
+    crawled.about = Some("Communities for every interest, from news to hobbies".to_string());
+    site::set_crawled(&mut crawled, Some(now));
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -261,8 +272,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -272,7 +286,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     .await;
     // Signed, so its answers carry the proof. One crawler is not enough
     // for the node to take the crawl from gossip.
-    assert!(peer.publish(vec![crawled.clone()]).await.unwrap().is_some());
+    assert!(peer
+        .publish(listed(std::slice::from_ref(&crawled)))
+        .await
+        .unwrap()
+        .is_some());
 
     // The node's own result shows the network's signed text, untinted.
     let mut body = String::new();
@@ -298,11 +316,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     // A crawl the search may keep (trusted or confirmed, see
     // plumb_net::FoundSite::keeps) goes to the inbox once, and the node's
     // next index has the text.
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     let kept = inbox();
     assert_eq!(kept.lines().count(), 1, "{kept}");
     assert!(kept.contains("Communities for every"), "{kept}");
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     assert_eq!(inbox(), kept, "kept once");
     node.refresh_now();
     wait_for(addr, "a new index", |s| {
@@ -362,23 +380,26 @@ async fn network_results_go_through_the_denylist() {
     // Another node holds a site this node's denylist takes off, one with
     // a key page it takes off, and one whose key pages the index fills in
     // (plumb_core::key_pages_or_known), one of them denied.
-    let site = |domain: &str, title: &str| {
-        let mut record = SiteRecord::new(domain);
+    let titled = |domain: &str, title: &str| {
+        let mut record = site::new(domain);
         record.url = Some(format!("https://{domain}/"));
         record.title = Some(title.to_string());
         record
     };
-    let mut keepers = site("lighthouse-keepers.org", "Lighthouse Keepers Guild");
+    let mut keepers = titled("lighthouse-keepers.org", "Lighthouse Keepers Guild");
     let page = |label: &str, path: &str| plumb_core::KeyPage {
         label: label.into(),
         url: format!("https://lighthouse-keepers.org/{path}"),
     };
-    keepers.key_pages = vec![
-        page("Visiting hours", "hours"),
-        page("Wreck maps", "wreck-maps"),
-    ];
-    let wreckers = site("lighthouse-wreckers.org", "Lighthouse Wreckers");
-    let mut facebook = site("facebook.com", "Lighthouse Fans on Facebook");
+    site::set_key_pages(
+        &mut keepers,
+        vec![
+            page("Visiting hours", "hours"),
+            page("Wreck maps", "wreck-maps"),
+        ],
+    );
+    let wreckers = titled("lighthouse-wreckers.org", "Lighthouse Wreckers");
+    let mut facebook = titled("facebook.com", "Lighthouse Fans on Facebook");
     facebook.url = Some("https://www.facebook.com/".into());
     let peer_dir = tempfile::tempdir().unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -389,7 +410,9 @@ async fn network_results_go_through_the_denylist() {
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
     let records = [keepers, wreckers, facebook];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &records).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&records))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -496,9 +519,11 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let source =
-        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
-            .unwrap();
+    let source = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&fixture_sites()),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
         .await
         .unwrap();

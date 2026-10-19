@@ -76,6 +76,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `grades pick` | Write a records file's sites for a language model to grade, those about health, addiction, money or law first and well-known ones left out (see [tools/grades](../../tools/grades/README.md)) |
 | Experiments | `fetch-text`, `terms` | Fetch homepages' visible text once, then try ways of picking each site's search terms |
 | | `relations`, `relate` | Learn kinds of Wikidata facts as maps between article vectors, then follow or check a relation |
+| | `embed-pages`, `page-meaning` | Make a vector for each page of a set that has a snippet (or every page, with `--without-snippet`), then measure which pages searches find by meaning in each file; a node or `eval` takes the vectors, a file or a directory of them, with `--page-vectors` |
 | Sets | `set new-key` | Make a set-signing key and print its public key |
 | | `set from-pages` | Write a page set file as a set of items |
 | | `set page-sets` | Write every page set a node holds as `plumb/<id>` sets |
@@ -148,7 +149,7 @@ plumb-tools train-rank --features features.jsonl --out crates/plumb-index/src/le
 plumb-tools train-rank --features features.jsonl --judge builtin
 ```
 
-`train-rank` trains on the tune half (`--half`) and prints top-1, top-3 and MRR for each queries file and half, before and after. `--judge builtin` measures the model nodes use instead of training one. The model itself is in [plumb-index](../plumb-index/src/learned.rs).
+`train-rank` trains on the tune half (`--half`) and prints top-1, top-3 and MRR for each queries file and half, before and after. `--judge builtin` measures the model nodes use instead of training one. The model reads and moves each search's first 10 rows; `--rows N` trains and judges one that reads deeper, on features written with `eval --limit N`. The model itself is in [plumb-index](../plumb-index/src/learned.rs).
 
 ### Build and sign a set
 
@@ -191,6 +192,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [page_items.rs](src/page_items.rs) | Today's page sets written as items of the data format |
 | [site_rules.rs](src/site_rules.rs) | Site rules beyond the built-in lists, and the hosts a rules set would move |
 | [relations.rs](src/relations.rs), [relations/maps.rs](src/relations/maps.rs) | `relations`, `relate` |
+| [embed_pages.rs](src/embed_pages.rs) | `embed-pages`, `page-meaning`: page vectors keyed by URL, and how often the page a search wants is among the nearest |
 | [pir/](src/pir/mod.rs) | The table a private information retrieval server would answer from |
 
 Commands that only look leave their inputs as they are: `link-rank`, `top-sites` and `fact-trust` read a records file and its journal from a copy, and write anything they change to a new file. `fetch-pages --data DIR` writes into `DIR/pages/sets/`, where a running node picks the file up.

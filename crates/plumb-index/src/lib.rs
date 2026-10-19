@@ -1,4 +1,4 @@
-//! The local search index: a Tantivy index over site records, ranked for
+//! The local search index: a Tantivy index over sites, ranked for
 //! navigational queries ("us bank" should put usbank.com first).
 //!
 //! Ranking blends how well the query matches the site's names (BM25 over the
@@ -32,7 +32,7 @@
 //!   theguardian.com because most links saying "the guardian" go there,
 //!   whatever its own pages call it.
 //! - A query that is a kind of thing ("banks", "airlines") gives every site
-//!   of that kind ([`SiteRecord::kinds`](plumb_core::SiteRecord::kinds)) a
+//!   of that kind ([`plumb_core::site::kinds`]) a
 //!   full text match and [`RankConfig::kind_bonus`], so they are listed by
 //!   popularity.
 //! - `country` is [`RankConfig::country_boost`] for a site of the searcher's
@@ -70,6 +70,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+pub mod candidates;
 pub mod grades;
 pub mod health;
 mod hits;
@@ -79,6 +80,7 @@ mod junk;
 mod language;
 pub mod learned;
 mod names;
+pub mod page_items;
 pub mod pages;
 pub mod places;
 mod query;
@@ -266,7 +268,7 @@ pub struct RankConfig {
     /// intent parsing remain independent of coverage/tier adjustments.
     pub whole_query_relevance: bool,
     /// BM25 boost of a query word matching a site's search terms
-    /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
+    /// ([`plumb_core::site::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
     /// Words that ask or say what is wanted ([`FILLER_WORDS`]) name no site
     /// in a query of two words or more.
@@ -288,8 +290,17 @@ pub struct RankConfig {
     /// worse), the described ones most of all.
     pub drop_namesakes: bool,
     /// Put the first results in the order the learned ranking gives
-    /// ([`learned::reorder`]), once pages are placed among the sites.
+    /// ([`learned::reorder_results`]), once pages are placed among the
+    /// sites.
     pub learned: bool,
+    /// With [`RankConfig::learned`] and a [`Meaning`], put the first
+    /// [`learned::LEARNED_SITES`] sites in the order the site model gives
+    /// ([`learned::reorder_sites`]) before anything else moves them. The
+    /// learned order then only places pages among them. Off: it ordered
+    /// sites better in replays, but on a node, where pages and named
+    /// sites are placed too, the Batch evals found it no better (review
+    /// 162 better, 192 worse).
+    pub learned_sites: bool,
     /// Rank typo corrections by the spelling model learned from the
     /// index's words ([`spell_model`]): what the edits cost against how
     /// common the correction is. Without it, or without a model, fewest
@@ -355,6 +366,7 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
+            learned_sites: false,
             spelling_channel: true,
             real_word_weight: None,
             context_weight: None,
@@ -383,25 +395,46 @@ pub trait Meaning {
     fn plain_closeness(&self, _domain: &str) -> Option<Option<f32>> {
         None
     }
+    /// The pages nearest the query in meaning, nearest first: one from
+    /// each set of page vectors the node has, where it stands out from the
+    /// next nearest ([`pages::PageSearcher::add_meant`]), each with how
+    /// near it is to the nearest of `sites`, the domains listed first.
+    fn nearest_pages(&self, _sites: &[&str]) -> Vec<MeantPage> {
+        Vec::new()
+    }
 }
 
-/// What [`build_index`] built. Every record is a document, merged into
+/// A page near a query in meaning ([`Meaning::nearest_pages`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeantPage {
+    pub url: String,
+    /// Its cosine to the query.
+    pub cosine: f32,
+    /// How far that stands above the cosine of the last of the nearest
+    /// pages of its set.
+    pub gap: f32,
+    /// Its cosine to the nearest in meaning of the sites listed first,
+    /// when any of them has a vector.
+    pub sites: Option<f32>,
+}
+
+/// What [`build_index`] built. Every site given is a document, merged into
 /// another one, skipped or folded into the site it redirects to: `docs +
-/// merged + skipped + redirected` is the number of records.
+/// merged + skipped + redirected` is the number of sites given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexStats {
     /// Documents in the index, one per domain.
     pub docs: u64,
-    /// Records merged into an earlier record for the same domain.
+    /// Sites merged into an earlier one of the same domain.
     #[serde(default)]
     pub merged: u64,
-    /// Records skipped because their domain is not a valid registrable
+    /// Sites skipped because their domain is not a valid registrable
     /// domain ([`plumb_core::canonical_domain`] rejects it), empty ones
     /// included, or because the site is gone
-    /// ([`plumb_core::SiteRecord::gone_at`]).
+    /// ([`plumb_core::site::crawl_marks`]).
     #[serde(default)]
     pub skipped: u64,
-    /// Records left out because their homepage redirects to another site in
+    /// Sites left out because their homepage redirects to another site in
     /// the index, whose names they joined.
     #[serde(default)]
     pub redirected: u64,
@@ -426,7 +459,7 @@ pub struct Hit {
     /// [`pages::place_pages`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placing_text_score: Option<f32>,
-    /// The country the site belongs to ([`plumb_core::site_country`]),
+    /// The country the site belongs to ([`plumb_core::site::site_country`]),
     /// `None` for global sites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
@@ -564,6 +597,14 @@ pub struct SearchResults {
     /// Set when the query looks misspelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spelling: Option<Spelling>,
+    /// The pages nearest the query in meaning ([`Meaning::nearest_pages`]),
+    /// for the page search to add one of. Not sent: a node finds its own.
+    #[serde(skip)]
+    pub meant: Vec<MeantPage>,
+    /// Whether the site model put `hits` in order ([`learned::reorder_sites`]),
+    /// so the row model only places pages among them. Not sent.
+    #[serde(skip)]
+    pub sites_ordered: bool,
 }
 
 /// A suggested spelling of a query: "amazom" -> "amazon".

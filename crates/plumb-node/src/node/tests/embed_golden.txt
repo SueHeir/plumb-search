@@ -1,0 +1,83 @@
+# The sites a node and `plumb-tools embed` embed of a records file, and
+# the vectors they keep: each site's link score, domain, text hash and
+# text. Written by
+# `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib seed_golden`.
+## plumb-tools embed, 100 words: 6 lines
+0.59072155	cafe.fr	93266c4c15cdb17d842fb07a36cdcc8d5fc54165bdecdddc42b19992b801aa12	"Café de Flore, Paris. Le café historique. Ouvert tous les jours."
+0.5770221	untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd	"Untidy GmbH. Untidy GmbH is a company."
+0.15	summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2	"A model's summary of the site."
+0.04515446	linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb	"one. two. three. four. five"
+0.0	long.org	c39819c864b9bb47ec2a22ccb6e8efb4576d474c7dd0230e6cebae9af5eef3f0	"A long page. word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word22 word23 word24 word25 word26 word27 word28 word29 word30 word31 word32 word33 word34 word35 word36 word37 word38 word39 word40 word41 word42 word43 word44 word45 word46 word47 word48 word49 word50 word51 word52 word53 word54 word55 word56 word57 word58 word59 word60 word61 word62 word63 word64 word65 word66 word67 word68 word69 word70 word71 word72 word73 word74 word75 word76 word77 word78 word79 word80 word81 word82 word83 word84 word85 word86 word87 word88 word89 word90 word91 word92 word93 word94 word95 word96 word97"
+0.0	new.example	9ee2062353f79f62ae9b48ef81364e2899cdd3fdc07a9057fd21864923d9e57e	"A new site"
+## the vectors kept: 2 lines
+cafe.fr
+tesla.com
+## plumb-tools embed, 5 words: 7 lines
+0.80625	tesla.com	8b9a270075a210dd06fdeb9d0b0133bdb3df4c57c915b80cc3394151aae9c9ce	"Tesla. Tesla, Inc.. Electric Cars,"
+0.59072155	cafe.fr	a87329d0b827c5a618c0320d9f6b9e5dd94533b42a30ddd6efe775dbeeb4e890	"Café de Flore, Paris. Le"
+0.5770221	untidy.de	d92c8456cc7953967fa2c98a769a81ebe02e8e1cd894964fde7de39c709e585d	"Untidy GmbH. Untidy GmbH is"
+0.15	summary.org	e8a0a17d1a2148753010b372d4c601dc13d30ac0f7b6e75eaf74359e68142ef8	"A model's summary of the"
+0.04515446	linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb	"one. two. three. four. five"
+0.0	long.org	24499cf1647283463bbd2df832be1b145c6ee6b890f35f6d221fcc1c92fbe55d	"A long page. word1 word2"
+0.0	new.example	9ee2062353f79f62ae9b48ef81364e2899cdd3fdc07a9057fd21864923d9e57e	"A new site"
+## the vectors kept: 2 lines
+cafe.fr
+tesla.com
+## wanted from other nodes: 6 lines
+cafe.fr	93266c4c15cdb17d842fb07a36cdcc8d5fc54165bdecdddc42b19992b801aa12
+linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb
+long.org	c39819c864b9bb47ec2a22ccb6e8efb4576d474c7dd0230e6cebae9af5eef3f0
+new.example	9ee2062353f79f62ae9b48ef81364e2899cdd3fdc07a9057fd21864923d9e57e
+summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2
+untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd
+## the records file, folded: 9 lines
+{"id":"tesla.com","kind":"site","title":"Electric  Cars, Solar | Tesla","url":"https://www.tesla.com/","names":["Tesla","Tesla, Inc."],"about":"tesla","fields":{"crawl":{"tried":1791605520},"crawl_version":7,"crawled":"2026-10-10T04:12:00Z","headings":["Model 3","Model Y"],"ranks":{"tranco":10},"wikidata":{"about":"American electric vehicle company","official_site":true}}}
+{"id":"cafe.fr","kind":"site","title":"Café de Flore, Paris","url":"https://www.cafe.fr/","about":"Le café  historique","text":"Ouvert tous les jours.","fields":{"crawl":{"tried":1791700000},"crawl_version":7,"crawled":"2026-10-11T06:26:40Z","ranks":{"tranco":50}}}
+{"id":"summary.org","kind":"site","fields":{"summary":"A model's summary of the site.","wikidata":{"official_site":true}}}
+{"id":"linked.com","kind":"site","weight":7.0,"fields":{"link_texts":[{"count":6,"linkers":"8004400000000680","text":"one"},{"count":6,"linkers":"8004400000000680","text":"two"},{"count":5,"linkers":"8004000000000680","text":"three"},{"count":4,"linkers":"0004000000000680","text":"four"},{"count":3,"linkers":"0004000000000480","text":"five"},{"count":2,"linkers":"0004000000000400","text":"six"},{"count":1,"linkers":"0004000000000000","text":"seven"}]}}
+{"id":"empty.com","kind":"site","fields":{"ranks":{"tranco":1}}}
+{"id":"gone.example","kind":"site","fields":{"crawl":{"gone":1791700000,"tried":1700000000},"crawled":"2023-11-14T22:13:20Z","ranks":{"harmonic":30}}}
+{"id":"long.org","kind":"site","title":"A long page","url":"https://www.long.org/","text":"word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word22 word23 word24 word25 word26 word27 word28 word29 word30 word31 word32 word33 word34 word35 word36 word37 word38 word39 word40 word41 word42 word43 word44 word45 word46 word47 word48 word49 word50 word51 word52 word53 word54 word55 word56 word57 word58 word59 word60 word61 word62 word63 word64 word65 word66 word67 word68 word69 word70 word71 word72 word73 word74 word75 word76 word77 word78 word79 word80 word81 word82 word83 word84 word85 word86 word87 word88 word89 word90 word91 word92 word93 word94 word95 word96 word97 word98 word99 word100 word101 word102 word103 word104 word105 word106 word107 word108 word109 word110 word111 word112 word113 word114 word115 word116 word117 word118 word119 word120 word121 word122 word123 word124 word125 word126 word127 word128 word129 word130 word131 word132 word133 word134 word135 word136 word137 word138 word139 word140 word141 word142 word143 word144 word145 word146 word147 word148 word149 word150","fields":{"crawl":{"tried":1791605520},"crawl_version":7,"crawled":"2026-10-10T04:12:00Z"}}
+{"id":"untidy.de","kind":"site","names":["Untidy GmbH","Untidy GmbH"],"fields":{"intro":"Untidy GmbH is a company.","ranks":{"pagerank":70}}}
+{"id":"new.example","kind":"site","title":"A new site","url":"https://www.new.example/","fields":{"crawl":{"tried":1791700000},"crawl_version":7,"crawled":"2026-10-11T06:26:40Z"}}
+## a node, the best 3 at 100 words (more: true): 3 lines
+0.59072155	cafe.fr	93266c4c15cdb17d842fb07a36cdcc8d5fc54165bdecdddc42b19992b801aa12	"Café de Flore, Paris. Le café historique. Ouvert tous les jours."
+0.5770221	untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd	"Untidy GmbH. Untidy GmbH is a company."
+0.15	summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2	"A model's summary of the site."
+## the vectors kept: 2 lines
+cafe.fr
+tesla.com
+## a node, the best 100 at 100 words (more: false): 6 lines
+0.59072155	cafe.fr	93266c4c15cdb17d842fb07a36cdcc8d5fc54165bdecdddc42b19992b801aa12	"Café de Flore, Paris. Le café historique. Ouvert tous les jours."
+0.5770221	untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd	"Untidy GmbH. Untidy GmbH is a company."
+0.15	summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2	"A model's summary of the site."
+0.04515446	linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb	"one. two. three. four. five"
+0.0	long.org	c39819c864b9bb47ec2a22ccb6e8efb4576d474c7dd0230e6cebae9af5eef3f0	"A long page. word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word22 word23 word24 word25 word26 word27 word28 word29 word30 word31 word32 word33 word34 word35 word36 word37 word38 word39 word40 word41 word42 word43 word44 word45 word46 word47 word48 word49 word50 word51 word52 word53 word54 word55 word56 word57 word58 word59 word60 word61 word62 word63 word64 word65 word66 word67 word68 word69 word70 word71 word72 word73 word74 word75 word76 word77 word78 word79 word80 word81 word82 word83 word84 word85 word86 word87 word88 word89 word90 word91 word92 word93 word94 word95 word96 word97"
+0.0	new.example	9ee2062353f79f62ae9b48ef81364e2899cdd3fdc07a9057fd21864923d9e57e	"A new site"
+## the vectors kept: 2 lines
+cafe.fr
+tesla.com
+## a node, the best 100 at 7 words (more: false): 7 lines
+0.80625	tesla.com	2ee0eeaa61e7fbee0955fdb82be91560c007245d11e0df9d737866ea76585c80	"Tesla. Tesla, Inc.. Electric Cars, Solar |"
+0.59072155	cafe.fr	d4ed4569887f5bc5a77aa659bed6e360a3406d94f9672b94c1f4953e0c082a23	"Café de Flore, Paris. Le café historique."
+0.5770221	untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd	"Untidy GmbH. Untidy GmbH is a company."
+0.15	summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2	"A model's summary of the site."
+0.04515446	linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb	"one. two. three. four. five"
+0.0	long.org	6e4c8604d9d20089299bd1b9b3eae0af5e95ce262f0a1ad73775ef305abcfc40	"A long page. word1 word2 word3 word4"
+0.0	new.example	9ee2062353f79f62ae9b48ef81364e2899cdd3fdc07a9057fd21864923d9e57e	"A new site"
+## the vectors kept: 2 lines
+cafe.fr
+tesla.com
+## a node, a file holding sites twice (more: false): 8 lines
+0.6115199	gone.example	55f6a88dc02579e8f6f191ee9ec91f66067b5d362434877cfbc325e4bf23aef1	"Gone"
+0.59072155	cafe.fr	8f85c26a1bb31adfcab7796917f55196eaa9e4e3980b7b9b81b8e77d52197894	"Café de Flore. Le café\u0007 historique"
+0.5770221	untidy.de	c0b94bdc4a8d5ccc22f9a7b561464f3a92f95acddcdf880e1578a9ad194ae7fd	"Untidy GmbH. Untidy GmbH is a company."
+0.15	summary.org	0f0cb2d216fe9475b95ca5ed49c9319e900f93c70f5ea509d74df86f57804da2	"A model's summary of the site."
+0.04515446	linked.com	1c207e3c4efc998ced536210e1b67b6ebf3d0bbc56a45af0b9176361e9a728fb	"one. two. three. four. five"
+0.0	google.com	bc013b88bd9f42ea2afc84ba53c35c88776aafb8a20d09e0923af96d04342b9d	"Google Inc.. Google Search. Search"
+0.0	long.org	c39819c864b9bb47ec2a22ccb6e8efb4576d474c7dd0230e6cebae9af5eef3f0	"A long page. word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18 word19 word20 word21 word22 word23 word24 word25 word26 word27 word28 word29 word30 word31 word32 word33 word34 word35 word36 word37 word38 word39 word40 word41 word42 word43 word44 word45 word46 word47 word48 word49 word50 word51 word52 word53 word54 word55 word56 word57 word58 word59 word60 word61 word62 word63 word64 word65 word66 word67 word68 word69 word70 word71 word72 word73 word74 word75 word76 word77 word78 word79 word80 word81 word82 word83 word84 word85 word86 word87 word88 word89 word90 word91 word92 word93 word94 word95 word96 word97"
+0.0	tesla.com	30e4206bc1e84585a348b01d503cce01c6fbe257b6c9a999ec46bf615f8150f9	"Tesla Motors. Tesla"
+## the vectors kept: 3 lines
+cafe.fr
+gone.example
+tesla.com

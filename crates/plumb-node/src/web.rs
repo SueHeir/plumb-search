@@ -4,7 +4,9 @@
 //! - `GET /search?q=` shows results as server-rendered HTML, ten at first;
 //!   "More results" under them asks for ten more (`limit=`),
 //! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`](plumb_index::Hit)s, or with
-//!   `full=1` a [`SearchResults`] object that also holds the site search link,
+//!   `full=1` the members of a [`SearchResults`], each page as its item
+//!   (`assembly::PageItem`), and all else the results page shows, the site
+//!   search link among them,
 //!
 //! Both searches take `country=XX` (a two-letter code, or `any` for none)
 //! and `only=1` (leave out other countries' sites). Without `country`, the
@@ -110,6 +112,8 @@ use self::html::{
 pub(crate) use self::html::{duration_words, http_url, time_ago};
 pub use self::html::{escape_html, group_thousands};
 use self::network::network_page;
+#[cfg(test)]
+pub(crate) use self::network::{rank_found, take_found};
 pub use self::panel::ADD_TO_FIREFOX_PATH;
 use self::params::{flag, SearchParams};
 use self::search::{

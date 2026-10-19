@@ -12,10 +12,13 @@
 //!   the build, so it can be cached for good.
 //! - `GET /api/buckets` names the bucket table being served, and
 //!   `GET /api/buckets/{table}/{bucket}` returns one bucket's sites as a
-//!   JSON list of trimmed records ([`plumb_core::keys::slim_record`]).
+//!   JSON list of their items, trimmed ([`plumb_core::keys::slim_site`]).
 //!   A table's buckets never change, so they are cached for good too; once
 //!   a newer index replaces it, its address answers 404 and the page asks
-//!   for the new table.
+//!   for the new table. Versions before sites' items served trimmed
+//!   records' JSON at the same address, which a browser may still hold
+//!   for a table the node kept through an upgrade; the page reads both
+//!   (`plumb_private::read_bucket`).
 //!
 //! Each search fetches [`plumb_core::keys::BUCKETS_PER_SEARCH`] buckets, its
 //! own padded with random ones, so the node learns a few bucket numbers,
@@ -28,8 +31,9 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use plumb_core::keys::{slim_record, BUCKETS};
-use plumb_core::SiteRecord;
+use plumb_core::keys::{slim_site, BUCKETS};
+use plumb_core::site::Item;
+use plumb_core::stored;
 use plumb_index::SearchOptions;
 use tracing::warn;
 
@@ -279,19 +283,22 @@ async fn bucket(
     }
 }
 
-/// A bucket's records, trimmed to what a browser needs, as one JSON list.
-/// Records that do not read are left out.
-fn slim_bucket(records: &[String]) -> String {
-    let slim: Vec<SiteRecord> = records
+/// A bucket's sites, each its stored item ([`stored::read_item`]) trimmed
+/// to what a browser needs, as one JSON list. Lines that do not read are
+/// left out.
+pub(super) fn slim_bucket(lines: &[String]) -> String {
+    let slim: Vec<Item> = lines
         .iter()
-        .filter_map(|json| serde_json::from_str::<SiteRecord>(json).ok())
-        .map(slim_record)
+        .filter_map(|line| stored::read_item(line.as_bytes()).ok())
+        .map(slim_site)
         .collect();
     serde_json::to_string(&slim).unwrap_or_else(|_| "[]".to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::site;
+
     use super::*;
 
     #[test]
@@ -322,14 +329,81 @@ mod tests {
 
     #[test]
     fn buckets_are_trimmed() {
-        let mut record = SiteRecord::new("usbank.com");
-        record.crawl_failures = 2;
+        let mut usbank = site::new("usbank.com");
+        let marks = site::CrawlMarks {
+            failures: 2,
+            ..Default::default()
+        };
+        site::set_crawl_marks(&mut usbank, marks);
         let json = slim_bucket(&[
-            serde_json::to_string(&record).unwrap(),
+            String::from_utf8(stored::item_as_line(&usbank).unwrap()).unwrap(),
             "not json".to_string(),
         ]);
-        let back: Vec<SiteRecord> = serde_json::from_str(&json).unwrap();
+        let back: Vec<Item> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
-        assert_eq!(back[0].crawl_failures, 0);
+        assert_eq!(back[0].id, "usbank.com");
+        assert_eq!(site::crawl_marks(&back[0]).failures, 0);
+    }
+
+    /// A browser gets the same trimmed items, byte for byte, whether the
+    /// bucket table's lines are the records' JSON, as versions up to 0.4
+    /// wrote them, or stored items, and none of the node's own fields.
+    #[test]
+    fn buckets_are_the_same_whatever_the_shape_of_the_stored_lines() {
+        let mut python = site::new("python.org");
+        python.url = Some("https://www.python.org/".into());
+        python.title = Some("Welcome to Python.org".into());
+        python.text = Some("Python lets you work quickly. ".repeat(60));
+        let link_text = plumb_core::LinkText::from_linkers("python", 0b101);
+        site::set_link_texts(&mut python, &[link_text]);
+        let mut signals = site::signals(&python);
+        signals.tranco_rank = Some(512);
+        site::set_signals(&mut python, &signals);
+        site::set_crawled(&mut python, Some(1_791_605_520));
+        let marks = site::CrawlMarks {
+            tried: Some(1_791_605_600),
+            failures: 1,
+            gone: Some(1_791_605_700),
+        };
+        site::set_crawl_marks(&mut python, marks);
+        site::set_icon(&mut python, Some("iVBORw0KGgo=".into()));
+        let news = vec![plumb_core::Headline {
+            title: "Python 3.15 is out".into(),
+            url: "https://www.python.org/news/".into(),
+            at: 1_791_605_520,
+        }];
+        site::set_news(&mut python, news);
+        site::set_links_to(&mut python, vec!["pypi.org".into()]);
+        site::clean(&mut python);
+        let ranked = site::new("ranked.com");
+        let new: Vec<String> = [&python, &ranked]
+            .iter()
+            .map(|site| String::from_utf8(stored::item_as_line(site).unwrap()).unwrap())
+            .collect();
+        // The same sites as the lines of a records file of version 0.4.
+        let old: Vec<String> = new
+            .iter()
+            .map(|line| stored::record_json(line.clone()).unwrap())
+            .collect();
+        assert!(new.iter().all(|line| line.starts_with("{\"id\":")));
+        assert!(old.iter().all(|line| line.starts_with("{\"domain\":")));
+        let json = slim_bucket(&new);
+        assert_eq!(json, slim_bucket(&old));
+        assert!(
+            json.starts_with("[{\"id\":\"python.org\",\"kind\":\"site\""),
+            "{json}"
+        );
+        for field in [
+            "crawl_failures",
+            "gone_at",
+            "icon",
+            "news",
+            "links_to",
+            "linkers",
+            "\"crawl\"",
+            "\"crawled\"",
+        ] {
+            assert!(!json.contains(field), "{field}: {json}");
+        }
     }
 }

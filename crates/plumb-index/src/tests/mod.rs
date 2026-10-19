@@ -3,6 +3,8 @@
 
 mod brands_and_copies;
 mod building;
+mod candidates;
+mod golden;
 mod junk;
 mod kinds_and_filters;
 mod link_names;
@@ -19,7 +21,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use plumb_core::{LinkText, Signals, SiteRecord, MAX_TEXT_CHARS};
+use plumb_core::{site, LinkText, Signals, MAX_TEXT_CHARS};
+use plumb_format::Item;
 use tempfile::TempDir;
 
 use super::*;
@@ -29,7 +32,7 @@ use crate::names::names_kind;
 use crate::query::ParsedQuery;
 use crate::rank::NEAREST_RANKED;
 
-/// A record with the given page fields, aliases and link texts.
+/// A site with the given page fields, aliases and link texts.
 fn site(
     domain: &str,
     title: Option<&str>,
@@ -37,21 +40,22 @@ fn site(
     aliases: &[&str],
     link_texts: &[(&str, u32)],
     signals: Signals,
-) -> SiteRecord {
-    let mut record = SiteRecord::new(domain);
-    record.title = title.map(str::to_string);
-    record.description = description.map(str::to_string);
+) -> Item {
+    let mut site = site::new(domain);
+    site.title = title.map(str::to_string);
+    site.about = description.map(str::to_string);
     for alias in aliases {
-        record.add_alias(alias);
+        site::add_alias(&mut site, alias);
     }
-    for &(text, count) in link_texts {
-        let text = plumb_core::normalize_text(text);
-        if !text.is_empty() {
-            record.link_texts.push(LinkText::with_count(text, count));
-        }
-    }
-    record.signals = signals;
-    record
+    let link_texts: Vec<LinkText> = link_texts
+        .iter()
+        .map(|&(text, count)| (plumb_core::normalize_text(text), count))
+        .filter(|(text, _)| !text.is_empty())
+        .map(|(text, count)| LinkText::with_count(text, count))
+        .collect();
+    site::set_link_texts(&mut site, &link_texts);
+    site::set_signals(&mut site, &signals);
+    site
 }
 
 /// The default ranking, keeping sites far below a named one.
@@ -81,7 +85,7 @@ fn obscure(harmonic_rank: u64, linking_domains: u32) -> Signals {
 }
 
 /// Real brands plus decoys that stuff the brand name into their own pages.
-fn corpus() -> Vec<SiteRecord> {
+fn corpus() -> Vec<Item> {
     let mut usbank = site(
         "usbank.com",
         Some("U.S. Bank | Personal Banking, Credit Cards, Home Loans & More"),
@@ -217,9 +221,17 @@ fn corpus() -> Vec<SiteRecord> {
     ]
 }
 
-fn build(records: &[SiteRecord]) -> (TempDir, Searcher) {
+/// `sites` cleaned ([`site::clean`]), as a node holds the sites an index
+/// is built from.
+fn items(sites: &[Item]) -> Vec<Item> {
+    let mut sites = sites.to_vec();
+    sites.iter_mut().for_each(site::clean);
+    sites
+}
+
+fn build(records: &[Item]) -> (TempDir, Searcher) {
     let dir = TempDir::new().unwrap();
-    let stats = build_index(dir.path(), records).unwrap();
+    let stats = build_index(dir.path(), &items(records)).unwrap();
     assert_eq!(stats.docs, records.len() as u64);
     let searcher = Searcher::open(dir.path()).unwrap();
     (dir, searcher)
@@ -245,9 +257,12 @@ fn a_site_is_found_by_its_page_terms() {
         &[],
         obscure(200_000, 10),
     );
-    maker.terms = ["electric", "electric", "car", "vehicles"]
-        .map(String::from)
-        .to_vec();
+    site::set_terms(
+        &mut maker,
+        ["electric", "electric", "car", "vehicles"]
+            .map(String::from)
+            .to_vec(),
+    );
     let other = site(
         "carparts.example",
         Some("Car parts"),
@@ -273,10 +288,10 @@ fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
     }
 }
 
-fn with_facts(mut record: SiteRecord, country: Option<&str>, kinds: &[&str]) -> SiteRecord {
-    record.country = country.map(str::to_string);
+fn with_facts(mut record: Item, country: Option<&str>, kinds: &[&str]) -> Item {
+    site::set_country(&mut record, country.map(str::to_string));
     for kind in kinds {
-        record.add_kind(kind);
+        site::add_kind(&mut record, kind);
     }
     record
 }
@@ -325,7 +340,7 @@ fn near_and_far(near: &[(&'static str, f32)], far: &[(&'static str, f32)]) -> Fi
 
 /// Short official domains and the spelled-out or one-word domains that
 /// beat them before Wikidata names counted as labels.
-fn short_names_corpus() -> Vec<SiteRecord> {
+fn short_names_corpus() -> Vec<Item> {
     vec![
         site(
             "wsj.com",
@@ -394,7 +409,7 @@ fn options(country: &str, only_country: bool) -> SearchOptions {
 /// Official sites and the look-alikes built for their brand-plus-intent
 /// queries, modeled on `fixtures/`: keyword-stuffed titles, a link from
 /// one spam page, no rank.
-fn lookalike_corpus() -> Vec<SiteRecord> {
+fn lookalike_corpus() -> Vec<Item> {
     let spam_linked = || Signals {
         linking_domains: 1,
         ..Signals::default()
@@ -497,7 +512,7 @@ fn entries(dir: &Path) -> Vec<String> {
 
 /// Well-known sites, an obscure look-alike, and enough sites about
 /// pizza and forecasts that the index knows those words.
-fn typo_corpus() -> Vec<SiteRecord> {
+fn typo_corpus() -> Vec<Item> {
     let mut records = vec![
         site(
             "google.com",

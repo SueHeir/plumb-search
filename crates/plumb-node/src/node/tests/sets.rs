@@ -3,68 +3,75 @@
 
 use super::*;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
-    use ed25519_dalek::SigningKey;
-    use plumb_format::PublicKey;
-
-    let peer_dir = tempfile::tempdir().unwrap();
-    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
-        .unwrap()
-        .public()
-        .to_peer_id();
-    let held = peer_dir.path().join("held");
-    let publisher = SigningKey::from_bytes(&[7; 32]);
-    // The books page set as the project's item set, a book a part.
-    let pages: Vec<plumb_index::pages::Page> = ["Lighthouse keeping", "Fresnel lenses", "Foghorns"]
+/// The pages of `set` with these titles as the project's item set, held
+/// in `held` and signed by `publisher`, a page a part.
+fn sign_page_set(
+    held: &Path,
+    publisher: &ed25519_dalek::SigningKey,
+    set: &str,
+    titles: &[&str],
+) -> Vec<plumb_index::pages::Page> {
+    let pages: Vec<plumb_index::pages::Page> = titles
         .iter()
         .zip([30, 20, 10])
         .enumerate()
         .map(|(n, (title, views))| {
             serde_json::from_value(serde_json::json!({
-                "set": "books", "url": format!("https://openlibrary.org/works/OL{n}W"),
+                "set": set, "url": format!("https://openlibrary.org/works/OL{n}W"),
                 "title": title, "description": "A lighthouse keeper", "views": views,
             }))
             .unwrap()
         })
         .collect();
-    let books = crate::node::signed_sets::set_dir(&held, "plumb/books").unwrap();
+    let name = format!("plumb/{set}");
+    let dir = crate::node::signed_sets::set_dir(held, &name).unwrap();
     let serde_json::Value::Object(manifest) = serde_json::json!({"format": plumb_format::FORMAT,
-        "set": "plumb/books", "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
+        "set": name, "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
     else {
         unreachable!()
     };
     let items = pages.iter().map(plumb_tools::page_items::page_item);
     let fields = plumb_tools::page_items::page_fields();
-    plumb_tools::set::write_set(items, fields, manifest, &books, &[1, 2], 3).unwrap();
-    plumb_tools::set::sign_set(&books, &publisher, None, None).unwrap();
+    let part_ends: Vec<u64> = (1..pages.len() as u64).collect();
+    plumb_tools::set::write_set(items, fields, manifest, &dir, &part_ends, 3).unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+    pages
+}
 
+/// A node serving the signed sets held in `held`, and its address.
+async fn serve_sets(
+    peer_dir: &Path,
+    held: PathBuf,
+) -> (plumb_net::NetHandle, plumb_net::Multiaddr) {
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
     let table = plumb_net::BucketTable::build(
-        &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &peer_dir.join("buckets"),
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
-    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let (peer, _records) =
-        plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held.clone())))
-            .await
-            .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held)))
+        .await
+        .unwrap();
     let peer_addr: plumb_net::Multiaddr = loop {
         if let Some(addr) = peer.status().listening.first() {
             break addr.parse().unwrap();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    (peer, peer_addr.with_p2p(peer_id).unwrap())
+}
 
-    let dir = seeded_dir();
-    let mut config = test_config(dir.path());
-    config.set_publishers = vec![PublicKey::of(&publisher)];
-    config.settings.page_sets = crate::pages::PageSets::parse("books=2").unwrap();
+/// A node's network settings to take sets from the node at `peer` only.
+fn from_peer(peer: plumb_net::Multiaddr) -> plumb_net::NetConfig {
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -73,8 +80,27 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
     net.round_every = None;
     net.fill = false;
     net.trusted_peers = Vec::new();
-    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
-    config.network = Some(net);
+    net.bootstrap = vec![peer];
+    net
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let titles = ["Lighthouse keeping", "Fresnel lenses", "Foghorns"];
+    let pages = sign_page_set(&held, &publisher, "books", &titles);
+    let (peer, peer_addr) = serve_sets(peer_dir.path(), held).await;
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    config.settings.page_sets = crate::pages::PageSets::parse("books=2").unwrap();
+    config.network = Some(from_peer(peer_addr));
     let node = start(config).await.unwrap();
 
     let taken = crate::node::signed_sets::set_dir(dir.path(), "plumb/books").unwrap();
@@ -145,6 +171,39 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
     assert!(!taken.join("items-002.jsonl.zst").exists());
     assert!(!taken.join("items-003.jsonl.zst").exists());
 
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_updates_leaving_a_page_set_out_take_none_of_it() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    sign_page_set(&held, &publisher, "books", &["Lighthouse keeping"]);
+    sign_page_set(&held, &publisher, "films", &["The Lighthouse"]);
+    let (peer, peer_addr) = serve_sets(peer_dir.path(), held).await;
+
+    // Books come before films in a look for sets, so once films are in,
+    // books were looked at and left alone: the node has none of them, and
+    // `--set-updates` names films only.
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    config.settings.page_sets = crate::pages::PageSets::parse("books=all,films=all").unwrap();
+    config.set_updates = "films".parse().unwrap();
+    config.network = Some(from_peer(peer_addr));
+    let node = start(config).await.unwrap();
+    let held = |set: &str| crate::node::signed_sets::set_dir(dir.path(), set).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !held("plumb/films").join("items-001.jsonl.zst").is_file() {
+        assert!(Instant::now() < deadline, "the films never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!held("plumb/books").exists(), "books taken");
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }
@@ -235,7 +294,7 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
         .to_peer_id();
     let held = peer_dir.path().join("held");
     let publisher = SigningKey::from_bytes(&[7; 32]);
-    let sites: Vec<SiteRecord> = [
+    let sites: Vec<Item> = [
         "lighthouses.org",
         "uncrawledlanterns.org",
         "harbourmasters.org",
@@ -245,13 +304,15 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
     .iter()
     .enumerate()
     .map(|(i, domain)| {
-        let mut record = SiteRecord::new(*domain);
-        record.signals.tranco_rank = Some(1 + i as u32);
-        record.about = Some(format!("keepers of {domain}"));
+        let mut record = site::new(*domain);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(1 + i as u32);
+        site::set_signals(&mut record, &signals);
+        site::set_wikidata_about(&mut record, Some(format!("keepers of {domain}")));
         if !domain.starts_with("uncrawled") {
             record.url = Some(format!("https://{domain}/"));
             record.title = Some(format!("Guild of {domain}"));
-            record.crawled_at = Some(now - 600);
+            site::set_crawled(&mut record, Some(now - 600));
         }
         record
     })
@@ -262,17 +323,19 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
     else {
         unreachable!()
     };
-    let items = sites.iter().map(|site| Some(site.to_item().unwrap()));
+    let items = sites.iter().map(|one| Some(site::to_item(one).unwrap()));
     let fields = plumb_core::site_item::site_fields();
     plumb_tools::set::write_set(items, fields, manifest, &set, &[3], 3).unwrap();
     plumb_tools::set::sign_set(&set, &publisher, None, None).unwrap();
 
     // The node holding it is trusted too, and its own list holds another
     // site: the set comes first.
-    let mut own = SiteRecord::new("trustedonly.org");
+    let mut own = site::new("trustedonly.org");
     own.url = Some("https://trustedonly.org/".into());
-    own.crawled_at = Some(now - 600);
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[own]).unwrap();
+    site::set_crawled(&mut own, Some(now - 600));
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&[own]))
+            .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -354,17 +417,17 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
         search(addr, "uncrawledbuoys").await[0].domain,
         "uncrawledbuoys.org"
     );
-    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-    assert_eq!(records.len(), 5);
-    let buoys = records.get("uncrawledbuoys.org").unwrap();
-    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(sites.len(), 5);
+    let buoys = sites.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(plumb_core::site::signals(&buoys).tranco_rank, Some(5));
     assert_eq!(
-        buoys.about.as_deref(),
+        plumb_core::site::wikidata_about(&buoys),
         Some("keepers of uncrawledbuoys.org")
     );
-    assert!(buoys.crawled_at.is_none());
+    assert!(plumb_core::site::crawled(&buoys).is_none());
     // The trusted node's own list was never asked for.
-    assert!(records.get("trustedonly.org").is_none());
+    assert!(!sites.contains("trustedonly.org"));
     assert_eq!(peer.status().fill_records_served, 0);
     assert!(names(&dir.path().join("seed")).is_empty());
 
@@ -431,7 +494,7 @@ async fn a_node_takes_the_map_as_a_set_going_on_from_what_it_fetched() {
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -556,7 +619,7 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -790,7 +853,7 @@ async fn a_node_searches_the_pages_it_has_while_a_download_waits() {
         .to_peer_id();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let (asked_tx, asked) = std::sync::mpsc::channel();
@@ -1020,10 +1083,18 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
     assert!(!body.contains("usbank.com"), "{body}");
     node.shutdown().await.unwrap();
 
-    // Turned off, only the csam entry applies.
+    // Turned off, only the csam entry applies. The index was built
+    // without the sites the list denied, which come back in the next one.
+    let paths = store::Paths::new(dir.path());
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.index_stale = true;
+    store::save_state(&paths, &saved).unwrap();
     let node = start(config(false)).await.unwrap();
     let addr = node.addr();
-    wait_for(addr, "the index", ready_and_idle).await;
+    wait_for(addr, "the index built again", |status| {
+        ready_and_idle(status) && status.index.as_deref() == Some("000002")
+    })
+    .await;
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     let found = domains(search(addr, "chase").await);
     assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
@@ -1083,4 +1154,122 @@ async fn a_node_pushes_down_the_sites_its_grades_set_marks_as_far_as_its_setting
     node.inner.change_settings(settings).unwrap();
     assert_eq!(domains(search(addr, "bank").await), ungraded);
     node.shutdown().await.unwrap();
+}
+
+/// An index built from the records file, as every index is, leaves out
+/// what the denylist denies, before redirects are folded: the denied site,
+/// in the index, in the buckets other nodes take and among the feeds
+/// watched, and the denied key page of a site it keeps. A site whose
+/// homepage sends visitors to the denied one is indexed on its own.
+#[test]
+fn an_index_built_from_the_records_file_leaves_out_what_the_denylist_denies() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let deny = |target: &str| plumb_tools::set::DenyEntryArgs {
+        category: "copyright".into(),
+        target: Some(target.into()),
+        hash_of: None,
+        any_query: false,
+        places: Vec::new(),
+        id: None,
+    };
+    hold_denylist(
+        dir.path(),
+        &publisher,
+        &[
+            deny("site:lighthouse-wreckers.org"),
+            deny("url:https://lighthouse-keepers.org/wreck-maps"),
+        ],
+    );
+    let ranked = |domain: &str, tranco: u32, title: &str| {
+        let mut record = site::new(domain);
+        record.url = Some(format!("https://{domain}/"));
+        record.title = Some(title.to_string());
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut record, &signals);
+        record
+    };
+    let mut keepers = ranked("lighthouse-keepers.org", 2, "Lighthouse Keepers Guild");
+    let page = |label: &str, path: &str| plumb_core::KeyPage {
+        label: label.into(),
+        url: format!("https://lighthouse-keepers.org/{path}"),
+    };
+    site::set_key_pages(
+        &mut keepers,
+        vec![
+            page("Visiting hours", "hours"),
+            page("Wreck maps", "wreck-maps"),
+        ],
+    );
+    let mut cove = site::new("wreckers-cove.org");
+    let mut signals = site::signals(&cove);
+    signals.tranco_rank = Some(4);
+    site::set_signals(&mut cove, &signals);
+    let redirect = plumb_core::Redirect {
+        to: "lighthouse-wreckers.org".into(),
+        at: 1_700_000_000,
+        inner: false,
+    };
+    site::set_redirect(&mut cove, Some(redirect));
+    write_old_lines(
+        &dir.path().join("records.jsonl"),
+        &[
+            ranked("lighthouse-wreckers.org", 1, "Lighthouse Wreckers"),
+            keepers,
+            ranked("lighthouse-beacons.org", 3, "Lighthouse Beacons"),
+            cove,
+        ],
+    );
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![plumb_format::PublicKey::of(&publisher)];
+    // Buckets, as for private search, and feeds to watch.
+    config.private_search = true;
+    config.news_feeds = 10;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Inner::new(config, rank, opened, stopped, None);
+    inner.load_denylist();
+
+    let built = {
+        let _records = inner.hold_records();
+        crate::node::worker::build_from_file(&inner).unwrap()
+    };
+    assert_eq!(built.docs, 3);
+    // The index itself, not searches through the node, which the
+    // denylist would take results off anyway.
+    let searcher = plumb_index::Searcher::open(&built.dir).unwrap();
+    assert!(!searcher.has_domain("lighthouse-wreckers.org"));
+    assert!(searcher.has_domain("lighthouse-beacons.org"));
+    assert!(searcher.has_domain("wreckers-cove.org"), "not folded away");
+    let hit = searcher.site("lighthouse-keepers.org").unwrap().unwrap();
+    let pages: Vec<&str> = hit.key_pages.iter().map(|p| p.url.as_str()).collect();
+    assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
+
+    let table = built.buckets.as_ref().expect("buckets");
+    let mut shared: Vec<Item> = table
+        .ranked(0, table.len())
+        .unwrap()
+        .iter()
+        .map(|line| plumb_core::stored::read_item(line.as_bytes()).unwrap())
+        .collect();
+    shared.sort_by(|a, b| a.id.cmp(&b.id));
+    let domains: Vec<&str> = shared.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        domains,
+        [
+            "lighthouse-beacons.org",
+            "lighthouse-keepers.org",
+            "wreckers-cove.org"
+        ]
+    );
+    let pages: Vec<String> = site::key_pages(&shared[1])
+        .into_iter()
+        .map(|p| p.url)
+        .collect();
+    assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
+    // The keepers' and the beacons' feeds, not the wreckers'; the cove
+    // redirects, and has none to watch.
+    assert_eq!(inner.news.watched().0, 2);
 }

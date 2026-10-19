@@ -110,6 +110,7 @@ impl SearchBackend for Packages {
                     popularity: 1.0,
                     whole: false,
                     learned: None,
+                    meant: false,
                 },
                 under: None,
                 at: 0,
@@ -120,6 +121,8 @@ impl SearchBackend for Packages {
             pages,
             site_search: None,
             spelling: None,
+            meant: Vec::new(),
+            sites_ordered: false,
         })
     }
 
@@ -136,6 +139,7 @@ fn shelved(page: Page) -> plumb_index::pages::PageHit {
         popularity: 0.5,
         whole: false,
         learned: None,
+        meant: false,
     }
 }
 
@@ -195,6 +199,7 @@ fn article(title: &str, site: Option<&str>, website: Option<&str>) -> PlacedPage
             popularity: 0.5,
             whole: true,
             learned: None,
+            meant: false,
         },
         under: None,
         at: 0,
@@ -207,6 +212,8 @@ fn results(hits: Vec<Hit>, pages: Vec<PlacedPage>) -> SearchResults {
         pages,
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     }
 }
 

@@ -2,11 +2,18 @@
 //! directory and driven over HTTP. Nothing here reaches the internet: seed
 //! data comes from the fixtures, served by a stand-in host on a loopback
 //! port, and the tests that run a node with records leave nothing to crawl.
+//! `crawl_golden` checks a crawl round, run on its own, against a golden
+//! file, and `seed_golden` setup and the seed, `plumb ingest` and the
+//! sites a node embeds.
 
 mod agents;
+mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
+mod network_golden;
 mod owner;
+mod pages_golden;
+mod seed_golden;
 mod sets;
 mod setup;
 mod storage;
@@ -20,7 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::site::{self, Item};
+use plumb_core::sites::SiteList;
 use plumb_index::Hit;
 use plumb_ingest::{
     kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,
@@ -32,6 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use super::store::{self, SavedState};
 use super::*;
 use crate::meaning::MeaningModel;
+use crate::test_lines::{item_line, old_line, read_sites, write_old_lines};
 
 /// Writes `articles` as a gzipped articles file, as `plumb-tools fetch-pages`
 /// makes them.
@@ -53,8 +63,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Site records from every fixture, as `plumb ingest` makes them.
-fn fixture_records() -> Vec<SiteRecord> {
+/// Sites from every fixture, as `plumb ingest` makes them.
+fn fixture_sites() -> Vec<Item> {
     let mut builder = Builder::new();
     builder.add_tranco(&load_tranco(&fixture("tranco.csv"), None).unwrap());
     builder.add_cc_ranks(&load_cc_domain_ranks(&fixture("cc-domain-ranks.txt"), None).unwrap());
@@ -64,13 +74,27 @@ fn fixture_records() -> Vec<SiteRecord> {
     builder.add_official_sites(
         &load_wikidata_official_sites(&fixture("wikidata-official-sites.tsv")).unwrap(),
     );
-    builder.finish(None)
+    builder.finish(None).iter().collect()
 }
 
-/// A data directory holding the fixture records, as if put there by hand.
+/// `sites` as the node holds the sites it publishes and takes in from the
+/// network, each as its line.
+fn listed(sites: &[Item]) -> SiteList {
+    sites.iter().cloned().collect()
+}
+
+/// `sites` cleaned, as a node's sets hold them.
+fn stored_items(sites: &[Item]) -> Vec<Item> {
+    let mut sites = sites.to_vec();
+    sites.iter_mut().for_each(plumb_core::site::clean);
+    sites
+}
+
+/// A data directory holding the fixture sites, as if put there by hand, in
+/// the records file of a node of version 0.4.
 fn seeded_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    write_jsonl(&dir.path().join("records.jsonl"), &fixture_records()).unwrap();
+    write_old_lines(&dir.path().join("records.jsonl"), &fixture_sites());
     dir
 }
 
@@ -197,14 +221,18 @@ fn write_page_set(data_dir: &Path, articles: &[plumb_core::Article]) {
 fn recently_crawled_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let now = now_unix();
-    let records: Vec<SiteRecord> = fixture_records()
+    let sites: Vec<Item> = fixture_sites()
         .into_iter()
-        .map(|mut record| {
-            record.crawl_attempted_at = Some(now);
-            record
+        .map(|mut site| {
+            let marks = plumb_core::site::CrawlMarks {
+                tried: Some(now),
+                ..plumb_core::site::crawl_marks(&site)
+            };
+            plumb_core::site::set_crawl_marks(&mut site, marks);
+            site
         })
         .collect();
-    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    write_old_lines(&dir.path().join("records.jsonl"), &sites);
     dir
 }
 

@@ -237,6 +237,8 @@ impl SearchBackend for SongBackend {
             pages: self.pages.clone(),
             site_search: None,
             spelling: None,
+            meant: Vec::new(),
+            sites_ordered: false,
         })
     }
 
@@ -314,6 +316,7 @@ async fn a_songs_title_alone_runs_a_plugin_for_songs() {
             popularity: 0.5,
             whole: false,
             learned: None,
+            meant: false,
         },
         under: None,
         at: 0,

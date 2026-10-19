@@ -304,6 +304,7 @@ fn papers_link_their_free_copy() {
         popularity: 0.5,
         whole: false,
         learned: None,
+        meant: false,
     };
     let mut out = String::new();
     render_page(
@@ -341,6 +342,7 @@ fn paper_dates_and_count_meanings_render_separately() {
         named: true,
         whole: true,
         learned: None,
+        meant: false,
     };
     let mut out = String::new();
     render_page(&mut out, &hit, None);
@@ -483,6 +485,7 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         popularity: 0.5,
         whole: false,
         learned: None,
+        meant: false,
     };
     let results = SearchResults {
         pages: vec![PlacedPage {
@@ -493,6 +496,8 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         hits: vec![scored("cheerz.com", 0.5)],
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let shown = shown_results(&results, 10);
     assert_eq!(shown.len(), 2);
@@ -586,6 +591,7 @@ fn the_part_of_a_site_the_query_names_comes_first() {
         popularity: 0.5,
         whole: false,
         learned: None,
+        meant: false,
     };
     let youtube = hit(
         "youtube.com",

@@ -25,8 +25,11 @@
 //! asks for the same pages either way, so the node it asks learns nothing
 //! of the topics. When the topics change, it first drops the sites below
 //! the best ones that are about none of the new topics
-//! ([`prune_for_topics`], with an index build), so the share is free for
-//! the new topics, then reads on from where the best sites stopped again.
+//! ([`prune_outlines_for_topics`]), reading the records file a record at a
+//! time, and builds the index from the file the same way, so the share is
+//! free for the new topics, then reads on from where the best sites
+//! stopped again. A file that holds a site twice is first written again
+//! with each site on one line ([`crate::outline::outline_merged`]).
 //!
 //! # Blackhole
 //!
@@ -79,9 +82,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::sites::{SiteList, Sites};
 use plumb_format::Item;
-use plumb_net::fill::{accept_record, FillPage, MAX_FILL_SCAN};
+use plumb_net::fill::{accept_site, FillPage, MAX_FILL_SCAN};
 use plumb_net::{NetHandle, PeerId};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -90,7 +94,7 @@ use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::site_set::{self, Fetched, HeldSites, SITES};
 use super::{Inner, Step, Stopped, MB};
 use crate::about::Topics;
-use crate::records::sorted_by_link_score;
+use crate::outline::Outline;
 
 /// Time between two fill rounds.
 #[cfg(not(test))]
@@ -454,14 +458,15 @@ struct SitesPage {
     source: String,
     /// The trusted node that answered; `None` for the set.
     peer: Option<PeerId>,
-    records: Vec<SiteRecord>,
+    /// The sites kept of it, their stored items held as lines.
+    sites: SiteList,
     /// Where to read from next; `total` once the list is done.
     next: u64,
     /// Sites in the list, crawled or not.
     total: u64,
     /// The trusted node was busy and sent nothing; ask again later.
     busy: bool,
-    /// Bytes of the records, for the disk they take.
+    /// Bytes of the sites as sent, for the disk they take.
     bytes: u64,
     /// Bytes downloaded for them: none from the set, whose parts counted
     /// as they were fetched.
@@ -479,7 +484,7 @@ impl From<FillPage> for SitesPage {
         SitesPage {
             source: page.peer.to_string(),
             peer: Some(page.peer),
-            records: page.records,
+            sites: page.sites,
             next: page.next,
             total: page.total,
             busy: page.busy,
@@ -501,7 +506,7 @@ enum FromSet {
 }
 
 /// Up to `count` sites of the set of sites held, from its `from`th on,
-/// kept as a trusted node's would be ([`accept_record`]): the crawled ones
+/// kept as a trusted node's would be ([`accept_site`]): the crawled ones
 /// among the next [`MAX_FILL_SCAN`], or with `all` every one. It stops
 /// once those kept come to `max_bytes`.
 fn read_set(inner: &Inner, from: u64, count: u64, max_bytes: u64, all: bool) -> FromSet {
@@ -525,7 +530,7 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
     let total = held.total();
     let now = now_unix();
     let scan = if all { count } else { MAX_FILL_SCAN as u64 };
-    let (mut records, mut bytes, mut read) = (Vec::new(), 0, 0);
+    let (mut sites, mut bytes, mut read) = (SiteList::new(), 0, 0);
     if from < total {
         for line in held.lines_from(from) {
             let line = match line {
@@ -534,16 +539,16 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
             };
             read += 1;
             let item = serde_json::from_str::<Item>(&line).ok();
-            let record = item
+            let site = item
                 .filter(|item| !item.is_extension() && !item.is_deleted())
                 .filter(|item| held.check(item).is_ok())
-                .and_then(|item| SiteRecord::from_item(&item).ok())
-                .and_then(|record| accept_record(record, now, all).ok());
-            if let Some(record) = record {
+                .and_then(|item| plumb_core::site::from_sent(&item).ok())
+                .and_then(|site| accept_site(site, now, all).ok());
+            if let Some(site) = site {
                 bytes += line.len() as u64;
-                records.push(record);
+                sites.push(site);
             }
-            if records.len() as u64 >= count || read >= scan || bytes >= max_bytes {
+            if sites.len() as u64 >= count || read >= scan || bytes >= max_bytes {
                 break;
             }
         }
@@ -556,7 +561,7 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
     FromSet::Page(SitesPage {
         source: SITES.into(),
         peer: None,
-        records,
+        sites,
         next,
         total,
         busy: false,
@@ -765,11 +770,10 @@ pub(super) fn can_seed_from_network(inner: &Inner) -> bool {
 /// crawled or not, for the first records file, and leaves the rest to
 /// filling. `None` when no trusted node answered in [`SEED_PEER_WAIT`] or
 /// it sent fewer than [`MIN_SEED_SITES`]: the node downloads the seed data
-/// instead. With the records comes the bytes received from trusted nodes;
-/// the set's parts are counted as they are taken.
-pub(super) async fn seed_from_network(
-    inner: &Arc<Inner>,
-) -> Result<Option<(Vec<SiteRecord>, u64)>> {
+/// instead. The sites come best first, each as its stored item held as
+/// its line, with the bytes received from trusted nodes; the set's parts
+/// are counted as they are taken.
+pub(super) async fn seed_from_network(inner: &Arc<Inner>) -> Result<Option<(SiteList, u64)>> {
     let Some(net) = network::handle(inner).cloned() else {
         return Ok(None);
     };
@@ -782,7 +786,7 @@ pub(super) async fn seed_from_network(
         "Waiting for a trusted node in the network to send its sites",
     );
     let want = inner.config.sites.min(QUICK_SEED_SITES);
-    let mut set = RecordSet::new();
+    let mut set = Sites::new();
     let mut state = FillState::default();
     let mut prefer = None;
     let mut busy = 0;
@@ -794,11 +798,7 @@ pub(super) async fn seed_from_network(
         state.peer = Some(page.source);
         state.next = page.next;
         state.total = page.total;
-        let mut records = page.records;
-        inner.drop_denied_records(&mut records);
-        for record in records {
-            set.upsert(record);
-        }
+        take_seed_page(inner, &mut set, page.sites);
     }
     let deadline = Instant::now() + SEED_PEER_WAIT;
     while set.len() < want && state.peer.as_deref() != Some(SITES) {
@@ -838,11 +838,7 @@ pub(super) async fn seed_from_network(
         state.total = page.total;
         bytes += page.downloaded;
         done = page.done();
-        let mut records = page.records;
-        inner.drop_denied_records(&mut records);
-        for record in records {
-            set.upsert(record);
-        }
+        take_seed_page(inner, &mut set, page.sites);
         inner.set_step(
             Step::Downloading,
             "Taking in sites from a trusted node in the network",
@@ -868,12 +864,12 @@ pub(super) async fn seed_from_network(
             .info(format!("Set up from the seed downloads: {why}"));
         return Ok(None);
     }
-    let records = set.into_sorted_vec();
-    state.filled = records.len() as u64;
+    let sites = set.into_sorted();
+    state.filled = sites.len() as u64;
     if done {
         state.done_at = Some(now_unix());
     } else {
-        state.seed = records.len() < inner.config.sites;
+        state.seed = sites.len() < inner.config.sites;
     }
     state.detail = match (state.seed, from_set) {
         (true, true) => "Setting up: taking in the rest of the set of sites",
@@ -891,13 +887,32 @@ pub(super) async fn seed_from_network(
     };
     info!(
         "took {} sites from {source} to set up, without the seed downloads",
-        records.len()
+        sites.len()
     );
     inner.journal.info(format!(
         "Set up from {source}: {} sites, the rest to follow",
-        records.len()
+        sites.len()
     ));
-    Ok(Some((records, bytes)))
+    Ok(Some((sites, bytes)))
+}
+
+/// Adds the sites of a page a node setting up took ([`seed_from_network`])
+/// to `set`, without what the denylist takes off.
+pub(super) fn take_seed_page(inner: &Inner, set: &mut Sites, mut sites: SiteList) {
+    inner.drop_denied_sites(&mut sites);
+    for site in sites {
+        set.upsert(site);
+    }
+}
+
+/// What of `sites`, a page of crawled sites, filling keeps: only those
+/// about `topics` when it keeps only those ([`FillState::focus_from`]),
+/// and not what the denylist takes off.
+pub(super) fn keep_filled(inner: &Inner, sites: &mut SiteList, topics: Option<&Topics>) {
+    if let Some(topics) = topics {
+        sites.retain(|site| topics.matches_site(site));
+    }
+    inner.drop_denied_sites(sites);
 }
 
 /// One round: pages of crawled sites, from the set of sites held or a
@@ -1112,13 +1127,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             }
         }
         let done = page.done();
-        let scanned = page.records.len() as u64;
-        let mut records = page.records;
-        if focus {
-            records.retain(|record| topics.matches(record));
-        }
-        inner.drop_denied_records(&mut records);
-        let n = records.len() as u64;
+        let scanned = page.sites.len() as u64;
+        let mut sites = page.sites;
+        keep_filled(inner, &mut sites, focus.then_some(&topics));
+        let n = sites.len() as u64;
         // The disk the sites kept take: all of the page, or the share kept.
         let bytes = if focus {
             page.bytes.checked_div(scanned).unwrap_or(0) * n
@@ -1127,7 +1139,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         };
         if n > 0 {
             let inner2 = inner.clone();
-            tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &records))
+            tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &sites))
                 .await
                 .context("keeping filled sites")??;
             let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
@@ -1208,34 +1220,54 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     Ok(())
 }
 
-/// Drops the sites of `set` below its best `keep_best` (by link score) that
-/// are about none of `topics`: those kept for topics the node no longer
-/// has. Returns how many.
-pub(super) fn prune_for_topics(set: &mut RecordSet, keep_best: usize, topics: &Topics) -> usize {
-    if set.len() <= keep_best {
-        return 0;
+/// Drops the sites of the records file at `path` below its best
+/// `keep_best` (by link score) that are about none of `topics`: those kept
+/// for topics the node no longer has. The file, whose sites `outlines`
+/// gives ([`crate::outline::outline_merged`]), is read a site at a time:
+/// of each site only its outline is held, and the domains of those about
+/// one of `topics`. Leaves in `outlines` the sites kept, best link score
+/// first, when any went; the caller writes the file again with only them
+/// ([`crate::outline::replace_lines`]). Returns how many went.
+pub(super) fn prune_outlines_for_topics(
+    path: &Path,
+    outlines: &mut Vec<Outline>,
+    keep_best: usize,
+    topics: &Topics,
+) -> Result<usize> {
+    if outlines.len() <= keep_best {
+        return Ok(0);
     }
-    let drop: std::collections::HashSet<String> = sorted_by_link_score(set)
-        .into_iter()
-        .skip(keep_best)
-        .filter(|record| !topics.matches(record))
-        .map(|record| record.domain.clone())
-        .collect();
-    set.retain(|record| !drop.contains(&record.domain));
-    drop.len()
+    let about = crate::outline::domains_where(path, |site| topics.matches_site(site))?;
+    crate::outline::sort(outlines);
+    let before = outlines.len();
+    let mut at = 0;
+    outlines.retain(|outline| {
+        at += 1;
+        at <= keep_best || about.contains(&outline.domain)
+    });
+    Ok(before - outlines.len())
 }
 
 impl Inner {
-    /// Drops the sites kept for old topics from `set`, when the topics
-    /// changed ([`FillState::prune`]); the caller saves it and builds the
-    /// index from what is left. Returns how many were dropped.
-    pub(super) fn prune_for_new_topics(&self, set: &mut RecordSet) -> Result<usize> {
+    /// Drops the sites kept for old topics from the records file, whose
+    /// sites `outlines` gives, when the topics changed ([`FillState::prune`]),
+    /// and notes that room was made. The file is read a record at a time
+    /// ([`prune_outlines_for_topics`]): the caller writes it again with the
+    /// sites left in `outlines` when any went, and builds the index from
+    /// it. Returns how many were dropped.
+    pub(super) fn prune_records_for_new_topics(
+        &self,
+        outlines: &mut Vec<Outline>,
+    ) -> Result<usize> {
         let mut state = self.fill_state();
         // A node with no storage limit never loses sites to make room.
         let dropped = match state.focus_base {
-            Some(base) if self.settings().storage_limit_mb > 0 => {
-                prune_for_topics(set, base as usize, &self.keep_topics())
-            }
+            Some(base) if self.settings().storage_limit_mb > 0 => prune_outlines_for_topics(
+                &self.paths.records,
+                outlines,
+                base as usize,
+                &self.keep_topics(),
+            )?,
             _ => 0,
         };
         state.prune = false;
@@ -1295,7 +1327,10 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::site;
+
     use super::*;
+    use crate::records::{load_sites, replace_sites};
 
     #[test]
     fn fills_up_to_ninety_percent_of_the_storage_limit() {
@@ -1352,26 +1387,65 @@ mod tests {
         );
     }
 
+    fn site(domain: &str, tranco: Option<u32>, title: Option<&str>) -> Item {
+        let mut site = site::new(domain);
+        let mut signals = site::signals(&site);
+        signals.tranco_rank = tranco;
+        site::set_signals(&mut site, &signals);
+        site.title = title.map(Into::into);
+        site
+    }
+
+    /// A records file at `path` of `sites`, as a node writes it: best link
+    /// score first.
+    fn records_file(path: &Path, sites: Vec<Item>) {
+        let set: Sites = sites.into_iter().collect();
+        replace_sites(path, &set.into_sorted()).unwrap();
+    }
+
+    /// Drops the sites of the records file at `path` below its best
+    /// `keep_best` that are about none of `topics`, as making room for new
+    /// topics does (`crate::node::worker::make_room_for_new_topics`): the
+    /// file merged first, then read a record at a time and written again
+    /// with the lines of the sites left. Returns how many went.
+    fn prune_file(path: &Path, keep_best: usize, topics: &Topics) -> usize {
+        let mut outlines = crate::outline::outline_merged(path, None).unwrap();
+        let dropped = prune_outlines_for_topics(path, &mut outlines, keep_best, topics).unwrap();
+        if dropped > 0 {
+            crate::outline::replace_lines(path, &outlines, None).unwrap();
+        }
+        dropped
+    }
+
+    /// The domains of the sites the records file at `path` holds, sorted.
+    fn domains_in(path: &Path) -> Vec<String> {
+        let mut domains: Vec<String> = load_sites(path)
+            .unwrap()
+            .into_iter()
+            .map(|site| site.id)
+            .collect();
+        domains.sort();
+        domains
+    }
+
     #[test]
     fn new_topics_drop_the_sites_kept_for_old_ones_only() {
-        let site = |domain: &str, tranco: u32, title: &str| {
-            let mut r = SiteRecord::new(domain);
-            r.signals.tranco_rank = Some(tranco);
-            r.title = Some(title.into());
-            r
-        };
-        let mut set = RecordSet::new();
-        set.upsert(site("google.com", 1, "Google"));
-        set.upsert(site("youtube.com", 2, "YouTube"));
-        set.upsert(site("chess.com", 5_000, "Play Chess Games"));
-        set.upsert(site("allrecipes.com", 6_000, "Recipes for cooking"));
-        set.upsert(site("seriouseats.com", 7_000, "Serious Eats cooking"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        records_file(
+            &path,
+            vec![
+                site("google.com", Some(1), Some("Google")),
+                site("youtube.com", Some(2), Some("YouTube")),
+                site("chess.com", Some(5_000), Some("Play Chess Games")),
+                site("allrecipes.com", Some(6_000), Some("Recipes for cooking")),
+                site("seriouseats.com", Some(7_000), Some("Serious Eats cooking")),
+            ],
+        );
         let topics = Topics::new(&["cooking".to_owned()]);
-        assert_eq!(prune_for_topics(&mut set, 2, &topics), 1);
-        let mut left: Vec<&str> = set.iter().map(|r| r.domain.as_str()).collect();
-        left.sort();
+        assert_eq!(prune_file(&path, 2, &topics), 1);
         assert_eq!(
-            left,
+            domains_in(&path),
             [
                 "allrecipes.com",
                 "google.com",
@@ -1380,9 +1454,78 @@ mod tests {
             ]
         );
         // The best sites stay whatever the topics.
-        assert_eq!(prune_for_topics(&mut set, 2, &Topics::default()), 2);
-        assert_eq!(set.len(), 2);
-        assert_eq!(prune_for_topics(&mut set, 5, &Topics::default()), 0);
+        assert_eq!(prune_file(&path, 2, &Topics::default()), 2);
+        assert_eq!(domains_in(&path), ["google.com", "youtube.com"]);
+        assert_eq!(prune_file(&path, 5, &Topics::default()), 0);
+        assert_eq!(domains_in(&path).len(), 2);
+    }
+
+    #[test]
+    fn new_topics_drop_the_same_sites_read_a_site_at_a_time() {
+        use crate::records::{journal_path, Change, RecordStore};
+
+        // A records file as a node writes it, and a journal still to fold
+        // in: sites about the topic and others among the lowest-ranked,
+        // one of them made about it by the journal.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        records_file(
+            &path,
+            vec![
+                site("google.com", Some(1), Some("Google")),
+                site("youtube.com", Some(2), Some("YouTube")),
+                site("chess.com", Some(5_000), Some("Play Chess Games")),
+                site("allrecipes.com", Some(6_000), Some("Recipes for cooking")),
+                site("seriouseats.com", Some(7_000), Some("Serious Eats")),
+                site("knitting.example", Some(8_000), Some("Knitting")),
+            ],
+        );
+        let mut crawled = site("seriouseats.com", None, Some("Serious Eats cooking"));
+        site::set_crawled(&mut crawled, Some(1_700_000_000));
+        RecordStore::open(&path)
+            .save(&[
+                Change::Merge { site: crawled },
+                Change::Merge {
+                    site: site("bakery.example", None, Some("Bread and cooking")),
+                },
+                Change::Merge {
+                    site: site("quiet.example", None, None),
+                },
+            ])
+            .unwrap();
+        // The sites as loading the file gives them, its journal replayed.
+        let mut left = load_sites(&path).unwrap();
+        let topics = Topics::new(&["cooking".to_owned()]);
+
+        let drops = ["chess.com", "knitting.example", "quiet.example"];
+        assert_eq!(prune_file(&path, 2, &topics), drops.len());
+        assert!(!journal_path(&path).exists());
+        assert_eq!(
+            domains_in(&path),
+            [
+                "allrecipes.com",
+                "bakery.example",
+                "google.com",
+                "seriouseats.com",
+                "youtube.com"
+            ]
+        );
+        // The file a whole set writes of the sites left, line for line.
+        left.retain_domains(|domain| !drops.contains(&domain));
+        let expected = dir.path().join("expected.jsonl");
+        replace_sites(&expected, &left.into_sorted()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&expected).unwrap());
+        // The best sites stay whatever the topics, and the file is not read
+        // when there are no more.
+        let mut outlines = crate::outline::outline(&path).unwrap().unwrap();
+        assert_eq!(
+            prune_outlines_for_topics(&path, &mut outlines, 5, &topics).unwrap(),
+            0
+        );
+        assert_eq!(
+            prune_outlines_for_topics(Path::new("missing"), &mut outlines, 5, &topics).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1505,13 +1648,13 @@ mod tests {
         let FromSet::Page(page) = read_held(&held, 0, 10, u64::MAX, true) else {
             panic!("the set is here")
         };
-        assert_eq!((page.records.len(), page.next, page.total), (5, 5, 5));
+        assert_eq!((page.sites.len(), page.next, page.total), (5, 5, 5));
         // One site at least, so filling goes on.
         let FromSet::Page(page) = read_held(&held, 1, 10, 1, true) else {
             panic!("the set is here")
         };
-        assert_eq!((page.records.len(), page.next), (1, 2));
-        assert_eq!(page.records[0].domain, "b.org");
+        assert_eq!((page.sites.len(), page.next), (1, 2));
+        assert_eq!(page.sites.domains().collect::<Vec<_>>(), ["b.org"]);
     }
 
     #[test]

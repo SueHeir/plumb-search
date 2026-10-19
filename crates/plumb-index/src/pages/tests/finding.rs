@@ -648,6 +648,7 @@ fn sites_called_like_organizations_stay_first() {
             popularity: 0.9,
             whole: false,
             learned: None,
+            meant: false,
         }],
     );
     assert_eq!(placed[0].at, 0);

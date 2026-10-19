@@ -13,7 +13,8 @@
 //! browsers never send to the server, so back, reload and bookmarks work.
 
 use plumb_core::keys::{pick_buckets, BUCKETS};
-use plumb_core::{display_url, site_initial, truncate_chars, SiteRecord};
+use plumb_core::site::Item;
+use plumb_core::{display_url, site_initial, truncate_chars};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -229,7 +230,7 @@ async fn fetch_buckets(
     window: &Window,
     table: &str,
     buckets: &[u32],
-) -> Result<Vec<Vec<SiteRecord>>, JsValue> {
+) -> Result<Vec<Vec<Item>>, JsValue> {
     let requests = js_sys::Array::new();
     for bucket in buckets {
         let url = format!(
@@ -268,7 +269,7 @@ async fn fetch_buckets(
 /// two nodes when there are two, so that one node alone cannot make a site
 /// look more popular. Fails when this site lists no other node, or when
 /// any request fails.
-async fn fetch_sealed(window: &Window, buckets: &[u32]) -> Result<Vec<Vec<SiteRecord>>, JsValue> {
+async fn fetch_sealed(window: &Window, buckets: &[u32]) -> Result<Vec<Vec<Item>>, JsValue> {
     let listed: Targets =
         serde_json::from_str(&fetch_text(window, "/api/oblivious/targets").await?)
             .map_err(|_| JsValue::from_str("no list of nodes"))?;

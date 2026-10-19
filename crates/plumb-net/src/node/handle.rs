@@ -7,7 +7,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use libp2p::{Multiaddr, PeerId};
 use plumb_core::locks::{Locked, RwLocked};
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::sites::SiteList;
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -73,12 +74,13 @@ impl NetHandle {
         self.status.locked().clone()
     }
 
-    /// Signs `records` (crawl results) as a batch, keeps it and tells the
-    /// network. Records of sites this node was not assigned are sent too but
-    /// other nodes ignore them. `None` when there was nothing to sign.
-    pub async fn publish(&self, records: Vec<SiteRecord>) -> Result<Option<Hash>> {
+    /// Signs `sites` (crawl results, each as its stored item) as a batch,
+    /// keeps it and tells the network. Sites this node was not assigned are
+    /// sent too but other nodes ignore them. `None` when there was nothing
+    /// to sign.
+    pub async fn publish(&self, sites: SiteList) -> Result<Option<Hash>> {
         let (reply, answer) = oneshot::channel();
-        self.send(Command::Publish { records, reply })?;
+        self.send(Command::Publish { sites, reply })?;
         answer.await.context("the network task stopped")?
     }
 

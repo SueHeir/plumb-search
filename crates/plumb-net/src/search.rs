@@ -18,6 +18,10 @@
 //! domain it names. A site is **confirmed** once signed crawls from
 //! [`QUORUM`] different crawlers agree on it ([`crate::agree`]), whether
 //! one answer carried them all or several answers did.
+//!
+//! The sites found are their stored items ([`plumb_core::site`]), each
+//! held as its line ([`SiteLine`]): what the node keeps of one is that
+//! item as it is.
 
 use plumb_core::locks::Locked;
 use std::collections::HashMap;
@@ -29,14 +33,16 @@ use futures::StreamExt;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{relay, Multiaddr, PeerId, StreamProtocol};
-use plumb_core::{canonical_domain, registrable_domain, Signals, SiteRecord};
+use plumb_core::site::{self, Item};
+use plumb_core::sites::SiteLine;
+use plumb_core::{canonical_domain, registrable_domain, Signals};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::agree::{agree, QUORUM};
+use crate::agree::{agree, facts_agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
-use crate::bucket::{bucket_of, matches, query_keys, search_buckets};
+use crate::bucket::{bucket_of, query_keys, search_buckets, site_matches};
 use crate::cache::BucketCache;
 use crate::credits::Wallet;
 use crate::oblivious::{
@@ -112,7 +118,8 @@ pub struct NetSearch {
 /// A site another node had, as checked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FoundSite {
-    pub record: SiteRecord,
+    /// The site as answered and checked, its stored item held as its line.
+    pub site: SiteLine,
     /// The URL, title and description come from a signed crawl whose proof
     /// checked out.
     pub verified: bool,
@@ -138,7 +145,7 @@ pub struct FoundSite {
     /// crawl counts here. One crawler alone can be anyone with a fresh key,
     /// so a node keeps it only when [`FoundSite::keeps`] says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shared: Option<SiteRecord>,
+    pub shared: Option<SiteLine>,
     /// The first proof the answer held that checked out as signed, for
     /// [`crate::NetHandle::search`] to read with this node's trust list.
     #[serde(skip)]
@@ -151,7 +158,7 @@ impl FoundSite {
     /// counts confirmed it, as a published batch's crawls are only folded
     /// in once confirmed (see [`crate::agree`]). Otherwise one throwaway
     /// key assigned the site could rewrite its title for good.
-    pub fn keeps(&self) -> Option<&SiteRecord> {
+    pub fn keeps(&self) -> Option<&SiteLine> {
         self.shared
             .as_ref()
             .filter(|_| self.trusted || self.confirmed)
@@ -349,13 +356,13 @@ async fn round(
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
     let mut add = |checked: Vec<FoundSite>| {
         for site in checked {
-            if !matches(&site.record, keys) {
+            if !site_matches(&site.site.item(), keys) {
                 continue;
             }
-            match merged.get_mut(&site.record.domain) {
+            match merged.get_mut(site.site.domain()) {
                 Some(existing) => merge_site(existing, site),
                 None => {
-                    merged.insert(site.record.domain.clone(), site);
+                    merged.insert(site.site.domain().to_string(), site);
                 }
             }
         }
@@ -409,7 +416,7 @@ async fn round(
         }
     }
     let mut found: Vec<FoundSite> = merged.into_values().collect();
-    found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
+    found.sort_by(|a, b| a.site.domain().cmp(b.site.domain()));
     out.found = found;
     out
 }
@@ -568,13 +575,13 @@ pub(crate) fn cache_search_with_refresh(
             };
             usable = true;
             for site in checked {
-                if !matches(&site.record, &keys) {
+                if !site_matches(&site.site.item(), &keys) {
                     continue;
                 }
-                match merged.get_mut(&site.record.domain) {
+                match merged.get_mut(site.site.domain()) {
                     Some(existing) => merge_site(existing, site),
                     None => {
-                        merged.insert(site.record.domain.clone(), site);
+                        merged.insert(site.site.domain().to_string(), site);
                     }
                 }
             }
@@ -592,7 +599,7 @@ pub(crate) fn cache_search_with_refresh(
     }
     out.found = merged.into_values().collect();
     out.found
-        .sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
+        .sort_by(|a, b| a.site.domain().cmp(b.site.domain()));
     (out, refresh)
 }
 
@@ -646,63 +653,56 @@ async fn ask_bucket(
 }
 
 /// The records of one answer, checked, or `None` when a proof in it fails.
+/// Each site is the stored item [`site::from_line`] reads of its line,
+/// as the node would keep it.
 pub(crate) fn check_answer(
     records: Vec<crate::proto::BucketRecord>,
     now: u64,
 ) -> Option<Vec<FoundSite>> {
     let mut out = Vec::new();
-    for item in records.into_iter().take(MAX_BUCKET_RECORDS) {
-        if item.record.len() > MAX_RECORD_BYTES {
+    for answered in records.into_iter().take(MAX_BUCKET_RECORDS) {
+        if answered.record.len() > MAX_RECORD_BYTES {
             continue;
         }
-        let Ok(mut record) = serde_json::from_str::<SiteRecord>(&item.record) else {
+        let Ok(mut site) = site::from_line(&answered.record) else {
             continue;
         };
-        let Some(domain) = canonical_domain(&record.domain) else {
+        let Some(domain) = canonical_domain(&site.id) else {
             continue;
         };
-        record.domain = domain;
-        // Local bookkeeping of the node answering, of no use here.
-        record.crawl_attempted_at = None;
-        record.crawl_failures = 0;
-        if record
+        site.id = domain;
+        if site
             .url
             .as_deref()
-            .is_some_and(|url| registrable_domain(url).as_deref() != Some(record.domain.as_str()))
+            .is_some_and(|url| registrable_domain(url).as_deref() != Some(site.id.as_str()))
         {
-            record.url = None;
+            site.url = None;
         }
-        let mut site = FoundSite {
-            record,
-            verified: false,
-            crawler: None,
-            answers: 1,
-            crawlers: Vec::new(),
-            confirmed: false,
-            trusted: false,
-            shared: None,
-            proof: None,
-        };
+        // The signed crawl that counts here, its crawler and the other
+        // crawlers that agree with it, and the first proof that checked
+        // out as signed.
+        let mut signed_by: Option<(Item, String, Vec<String>)> = None;
+        let mut proof_kept = None;
         // A proof only too old to check out says nothing either way (nodes
         // hold crawls longer than proofs last), so the site is just not
         // verified; nor does a real signed crawl this node's rules do not
         // count (one its crawler was not assigned, which a node on another
         // version may offer). Any other bad proof, a forgery, means the
         // answer is not to be trusted.
-        if let Some(proof) = item.proof.as_ref().filter(|p| !p.header.expired(now)) {
+        if let Some(proof) = answered.proof.as_ref().filter(|p| !p.header.expired(now)) {
             match proof.verify(now) {
-                Ok((signed, crawler)) if signed.domain == site.record.domain => {
+                Ok((signed, crawler)) if signed.id == site.id => {
                     // Other crawlers' proofs must check out too, and count
                     // only when they agree with the first.
                     let mut agreeing = Vec::new();
-                    for other in item
+                    for other in answered
                         .also
                         .iter()
                         .filter(|p| !p.header.expired(now))
                         .take(MAX_EXTRA_PROOFS)
                     {
                         match other.verify(now) {
-                            Ok((theirs, by)) if theirs.domain == signed.domain => {
+                            Ok((theirs, by)) if theirs.id == signed.id => {
                                 if agree(&signed, &theirs) {
                                     agreeing.push(by.to_string());
                                 }
@@ -714,26 +714,17 @@ pub(crate) fn check_answer(
                             }
                         }
                     }
-                    site.record.url = signed.url.clone();
-                    site.record.title = signed.title.clone();
-                    site.record.description = signed.description.clone();
-                    site.record.crawled_at = signed.crawled_at;
-                    site.shared = Some(signed);
-                    site.proof = Some(proof.clone());
-                    site.verified = true;
-                    site.crawler = Some(crawler.to_string());
-                    site.add_crawler(crawler.to_string());
-                    for by in agreeing {
-                        site.add_crawler(by);
-                    }
+                    site.url = signed.url.clone();
+                    site.title = signed.title.clone();
+                    site.about = signed.about.clone();
+                    site::set_crawled(&mut site, site::crawled(&signed));
+                    proof_kept = Some(proof.clone());
+                    signed_by = Some((signed, crawler.to_string(), agreeing));
                 }
                 Err(_) if proof.check_signed(now).is_ok() => {
-                    debug!(
-                        "a signed crawl of {} that does not count here",
-                        site.record.domain
-                    );
+                    debug!("a signed crawl of {} that does not count here", site.id);
                     // It may still count for a node that trusts its crawler.
-                    site.proof = Some(proof.clone());
+                    proof_kept = Some(proof.clone());
                 }
                 Ok(_) | Err(_) => {
                     warn!("a node answered with a proof that does not check out");
@@ -743,14 +734,36 @@ pub(crate) fn check_answer(
         }
         // A bot check a node crawled in place of the homepage, signed or
         // not, says nothing about the site: neither shown nor kept.
-        if site.record.drop_bot_check() {
-            site.shared = None;
-            site.proof = None;
-            site.verified = false;
-            site.crawler = None;
-            site.crawlers.clear();
+        let bot_check = site::drop_bot_check(&mut site);
+        let mut found = FoundSite {
+            site: SiteLine::of(site),
+            verified: false,
+            crawler: None,
+            answers: 1,
+            crawlers: Vec::new(),
+            confirmed: false,
+            trusted: false,
+            shared: None,
+            proof: proof_kept,
+        };
+        if let Some((signed, crawler, agreeing)) = signed_by {
+            found.shared = Some(SiteLine::of(signed));
+            found.verified = true;
+            found.crawler = Some(crawler.clone());
+            found.add_crawler(crawler);
+            for by in agreeing {
+                found.add_crawler(by);
+            }
         }
-        out.push(site);
+        if bot_check {
+            // Whether crawlers confirmed it stays as it was.
+            found.shared = None;
+            found.proof = None;
+            found.verified = false;
+            found.crawler = None;
+            found.crawlers.clear();
+        }
+        out.push(found);
     }
     Some(out)
 }
@@ -773,13 +786,23 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
             fact_agrees,
         }
     };
-    let signals = worse(existing.record.signals.clone(), &other.record.signals);
+    let (ours, theirs) = (existing.site.item(), other.site.item());
+    let signals = worse(site::signals(&ours), &site::signals(&theirs));
     let other_proof = existing
         .proof
         .is_none()
         .then(|| other.proof.clone())
         .flatten();
-    if other.verified && existing.verified && agree(&existing.record, &other.record) {
+    fn facts(site: &Item) -> [Option<&str>; 3] {
+        [
+            site.url.as_deref(),
+            site.title.as_deref(),
+            site.about.as_deref(),
+        ]
+    }
+    let agreeing = facts_agree(facts(&ours), facts(&theirs));
+    drop((ours, theirs));
+    if other.verified && existing.verified && agreeing {
         for crawler in other.crawlers {
             existing.add_crawler(crawler);
         }
@@ -790,7 +813,9 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
         let answers = existing.answers;
         *existing = FoundSite { answers, ..other };
     }
-    existing.record.signals = signals;
+    existing
+        .site
+        .update(|site| site::set_signals(site, &signals));
     if existing.proof.is_none() {
         existing.proof = other_proof;
     }
@@ -1098,10 +1123,16 @@ mod tests {
     use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
+    use plumb_core::sites::SiteList;
 
-    fn item(record: &SiteRecord) -> BucketRecord {
+    /// `sites` as a node holds its crawls to sign.
+    fn listed(sites: &[Item]) -> SiteList {
+        sites.iter().cloned().collect()
+    }
+
+    fn item(record: &Item) -> BucketRecord {
         BucketRecord {
-            record: serde_json::to_string(record).unwrap(),
+            record: site::to_line(record).unwrap(),
             proof: None,
             also: Vec::new(),
         }
@@ -1125,17 +1156,17 @@ mod tests {
 
     #[test]
     fn unproven_records_link_only_to_their_own_site_and_drop_bookkeeping() {
-        let mut lying = SiteRecord::new("usbank.com");
+        let mut lying = site::new("usbank.com");
         lying.url = Some("https://usbank-login.example/".into());
-        lying.crawl_failures = 4;
-        let checked = check_answer(
-            vec![item(&lying), item(&SiteRecord::new("not a domain"))],
-            0,
-        )
-        .unwrap();
+        let mut marks = site::crawl_marks(&lying);
+        marks.failures = 4;
+        site::set_crawl_marks(&mut lying, marks);
+        let checked =
+            check_answer(vec![item(&lying), item(&site::new("not a domain"))], 0).unwrap();
         assert_eq!(checked.len(), 1);
-        assert_eq!(checked[0].record.url, None);
-        assert_eq!(checked[0].record.crawl_failures, 0);
+        let site = checked[0].site.item();
+        assert_eq!(site.url, None);
+        assert_eq!(site::crawl_marks(&site).failures, 0);
     }
 
     #[test]
@@ -1147,12 +1178,12 @@ mod tests {
             .map(|i| format!("bank{i}.com"))
             .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
+        let mut record = site::new(domain.as_str());
         record.title = Some("Real Bank".into());
-        record.crawled_at = Some(now);
+        site::set_crawled(&mut record, Some(now));
         let batch = Batch::sign(
             &key,
-            std::slice::from_ref(&record),
+            &listed(std::slice::from_ref(&record)),
             epoch_of(now),
             MAX_SHARE_PPM,
             now,
@@ -1164,26 +1195,26 @@ mod tests {
         let mut shown = record.clone();
         shown.title = Some("Log in here".into());
         let forged = BucketRecord {
-            record: serde_json::to_string(&shown).unwrap(),
+            record: site::to_line(&shown).unwrap(),
             proof: Some(forged_proof),
             also: Vec::new(),
         };
-        assert!(check_answer(vec![item(&SiteRecord::new("other.com")), forged], now).is_none());
+        assert!(check_answer(vec![item(&site::new("other.com")), forged], now).is_none());
 
         let honest = BucketRecord {
-            record: serde_json::to_string(&shown).unwrap(),
+            record: site::to_line(&shown).unwrap(),
             proof: Some(batch.proof(0)),
             also: Vec::new(),
         };
         let checked = check_answer(vec![honest], now).unwrap();
         assert!(checked[0].verified);
-        assert_eq!(checked[0].record.title.as_deref(), Some("Real Bank"));
+        assert_eq!(checked[0].site.item().title.as_deref(), Some("Real Bank"));
     }
 
     #[test]
     fn only_an_answer_with_a_signed_crawl_earns_credits() {
         assert!(!earns(&check_answer(Vec::new(), 0).unwrap()));
-        let unsigned = check_answer(vec![item(&SiteRecord::new("a.com"))], 0).unwrap();
+        let unsigned = check_answer(vec![item(&site::new("a.com"))], 0).unwrap();
         assert!(!earns(&unsigned));
         let mut signed = unsigned;
         signed[0].verified = true;
@@ -1192,13 +1223,17 @@ mod tests {
 
     #[test]
     fn two_answers_keep_the_less_favorable_popularity() {
-        let mut boosted = SiteRecord::new("phish.com");
-        boosted.signals.tranco_rank = Some(1);
-        boosted.signals.official_site = true;
-        let mut honest = SiteRecord::new("phish.com");
-        honest.signals.tranco_rank = Some(900_000);
-        let site = |record| FoundSite {
-            record,
+        let mut boosted = site::new("phish.com");
+        let mut signals = site::signals(&boosted);
+        signals.tranco_rank = Some(1);
+        signals.official_site = true;
+        site::set_signals(&mut boosted, &signals);
+        let mut honest = site::new("phish.com");
+        let mut signals = site::signals(&honest);
+        signals.tranco_rank = Some(900_000);
+        site::set_signals(&mut honest, &signals);
+        let site = |record: Item| FoundSite {
+            site: SiteLine::of(record),
             verified: false,
             crawler: None,
             answers: 1,
@@ -1210,8 +1245,9 @@ mod tests {
         };
         let mut merged = site(boosted);
         merge_site(&mut merged, site(honest));
-        assert_eq!(merged.record.signals.tranco_rank, Some(900_000));
-        assert!(!merged.record.signals.official_site);
+        let signals = site::signals(&merged.site.item());
+        assert_eq!(signals.tranco_rank, Some(900_000));
+        assert!(!signals.official_site);
         assert_eq!(merged.answers, 2);
     }
 
@@ -1228,10 +1264,10 @@ mod tests {
         keys.iter()
             .zip(titles)
             .map(|(key, title)| {
-                let mut record = SiteRecord::new(domain.as_str());
+                let mut record = site::new(domain.as_str());
                 record.title = Some(title.to_string());
-                record.crawled_at = Some(now);
-                Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                site::set_crawled(&mut record, Some(now));
+                Batch::sign(key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
                     .unwrap()
                     .unwrap()
             })
@@ -1283,7 +1319,7 @@ mod tests {
         };
         let checked = check_answer(vec![disagreeing], now).unwrap();
         assert!(checked[0].verified && !checked[0].confirmed);
-        assert_eq!(checked[0].record.title.as_deref(), Some("Real Bank"));
+        assert_eq!(checked[0].site.item().title.as_deref(), Some("Real Bank"));
 
         let repeated = BucketRecord {
             record: shown.clone(),
@@ -1314,7 +1350,7 @@ mod tests {
             proof: Some(batches[0].proof(0)),
             also: vec![batches[1].proof(0)],
         };
-        let checked = check_answer(vec![old, item(&SiteRecord::new("other.com"))], now).unwrap();
+        let checked = check_answer(vec![old, item(&site::new("other.com"))], now).unwrap();
         assert_eq!(checked.len(), 2);
         assert!(!checked[0].verified && !checked[0].confirmed);
 
@@ -1340,10 +1376,10 @@ mod tests {
             .map(|i| format!("bank{i}.com"))
             .find(|d| !is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
+        let mut record = site::new(domain.as_str());
         record.title = Some("Real Bank".into());
-        record.crawled_at = Some(now);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+        site::set_crawled(&mut record, Some(now));
+        let batch = Batch::sign(&key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
             .unwrap()
             .unwrap();
         let unassigned = BucketRecord {
@@ -1351,7 +1387,7 @@ mod tests {
             proof: Some(batch.proof(0)),
             also: Vec::new(),
         };
-        let checked = check_answer(vec![unassigned, item(&SiteRecord::new("other.com"))], now)
+        let checked = check_answer(vec![unassigned, item(&site::new("other.com"))], now)
             .expect("the answer is kept");
         assert_eq!(checked.len(), 2);
         assert!(!checked[0].verified);
@@ -1376,7 +1412,7 @@ mod tests {
         let now = 1_790_000_000;
         let dir = tempfile::tempdir().unwrap();
         let cache = BucketCache::open(dir.path(), now);
-        let record = SiteRecord::new("acme.com");
+        let record = site::new("acme.com");
         cache.put(bucket_of("acme"), vec![vec![item(&record)]], now);
         let stale = cache_search("acme", &cache, now + crate::cache::FRESH_FOR);
         assert_eq!(stale.found.len(), 1);

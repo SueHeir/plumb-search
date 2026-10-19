@@ -83,6 +83,14 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(crate::embed::EmbedArgs),
+    /// Make a vector of each page of a page set from its title,
+    /// description and snippet (an article's lead), keyed by its URL (an
+    /// experiment: nodes find pages by their words only).
+    EmbedPages(crate::embed_pages::EmbedPagesArgs),
+    /// Which pages searches find by meaning alone, with the vectors
+    /// `embed-pages` made: where each search's wanted article comes among
+    /// the nearest pages.
+    PageMeaning(crate::embed_pages::PageMeaningArgs),
     /// Count the sites in a node's records that look dead, the ones
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
@@ -564,6 +572,18 @@ pub struct EvalArgs {
     /// more than once.
     #[arg(long, value_name = "DIR", requires = "features_out")]
     pub rerank_model: Vec<PathBuf>,
+    /// Write each query's deep site candidates to this JSON-lines file,
+    /// with the raw signals a first stage could score them by (which of the
+    /// query's words each field has, how long the fields are, how rare each
+    /// word is) and which sites are expected: for designing the first stage
+    /// offline. Only queries with an expected site.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["sweep", "facts", "features_out", "recall"])]
+    pub candidates_out: Option<PathBuf>,
+    /// With --candidates-out, how far down each list of candidates goes:
+    /// today's first stage, the sites with every main word, and the sites
+    /// nearest in meaning.
+    #[arg(long, value_name = "N", default_value_t = 500, value_parser = parse_positive)]
+    pub candidates_depth: usize,
     /// Results fetched per query; an expected site further down counts as not found.
     #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
     pub limit: usize,

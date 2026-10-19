@@ -135,6 +135,7 @@ fn answer_entity(title: &str, item: &str, description: &str) -> PageHit {
         score: 1.0,
         popularity: 0.9,
         learned: None,
+        meant: false,
     }
 }
 
@@ -161,7 +162,7 @@ async fn facts_resolve_japan_when_who_takes_the_displayed_result() {
     assert_eq!(json["answer"]["note"], "Counted in 2024, from Wikidata");
     assert_eq!(json["assembled"]["answer"], json["answer"]);
     assert_eq!(
-        json["pages"][0]["page"]["url"],
+        json["pages"][0]["item"]["url"],
         "https://www.who.int/countries/jpn/"
     );
     let (status, _, body) = send(app, "/search?q=japan+population&limit=1").await;
@@ -338,6 +339,7 @@ impl SearchBackend for BeastBackend {
                     popularity: 0.9,
                     whole: false,
                     learned: None,
+                    meant: false,
                 },
                 under: None,
                 at: 0,
@@ -408,6 +410,7 @@ fn an_article_the_query_names_gets_an_info_box() {
         popularity: 0.9,
         whole: false,
         learned: None,
+        meant: false,
     };
     let results = SearchResults {
         pages: vec![PlacedPage {
@@ -418,6 +421,8 @@ fn an_article_the_query_names_gets_an_info_box() {
         hits: vec![scored("mariecurie.org.uk", 0.5)],
         site_search: None,
         spelling: None,
+        meant: Vec::new(),
+        sites_ordered: false,
     };
     let page = render_results(
         "marie curie",

@@ -8,10 +8,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
-use plumb_core::{
-    keys::{slim_record, BUCKETS},
-    SiteRecord,
-};
+use plumb_core::keys::{slim_site, BUCKETS};
+use plumb_core::stored;
 use serde::Serialize;
 
 use crate::cli::StorageArgs;
@@ -197,7 +195,7 @@ pub fn inspect(data: &Path) -> Result<StorageReport> {
         records: None, bucket_tables: Vec::new(), omission_count: 0, omissions: Vec::new(),
         notes: [
             "Logical lengths exclude filesystem allocation overhead; hard links count once per directory entry.",
-            "Slim sizing uses keys::slim_record on records.jsonl only; no journal replay, compression, transport framing or authentication overhead.",
+            "Record sizing reads records.jsonl only, each site as its record's JSON, whole and cut down by keys::slim_site; no journal replay, compression, transport framing or authentication overhead.",
             "A running node can change during the scan; measurements are not an atomic snapshot. Only aggregate record statistics are emitted.",
         ],
     };
@@ -415,16 +413,22 @@ fn size_records(path: &Path, source: &Path) -> Result<RecordSizing> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let record = match serde_json::from_slice::<SiteRecord>(&line) {
-            Ok(record) => record,
+        // Each site is sized as its record's JSON, the shape these figures
+        // have always measured, whole and cut down for private search.
+        let sized = stored::read_item(&line).and_then(|site| {
+            let slim = stored::record_json_of(&slim_site(site.clone()))?;
+            Ok((stored::record_json_of(&site)?, slim))
+        });
+        let (record, slim) = match sized {
+            Ok(sized) => sized,
             Err(_) => {
                 sizing.invalid_records += 1;
                 continue;
             }
         };
         sizing.valid_records += 1;
-        sizing.full_json_payload_bytes += serde_json::to_vec(&record)?.len() as u64;
-        sizing.slim_json_payload_bytes += serde_json::to_vec(&slim_record(record))?.len() as u64;
+        sizing.full_json_payload_bytes += record.len() as u64;
+        sizing.slim_json_payload_bytes += slim.len() as u64;
     }
     Ok(sizing)
 }
@@ -584,6 +588,8 @@ fn distribution(mut values: Vec<u64>, total: u64) -> Distribution {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::site;
+
     use super::*;
 
     fn put(dir: &Path, name: &str, bytes: &[u8]) {
@@ -652,10 +658,8 @@ mod tests {
         ] {
             put(dir.path(), path, b"secret");
         }
-        let mut record = SiteRecord::new("example.com");
-        record.crawled_at = Some(123);
-        let bytes = serde_json::to_vec(&record).unwrap();
-        put(dir.path(), "records.jsonl", &bytes);
+        let bytes = br#"{"domain":"example.com","signals":{},"crawled_at":123}"#;
+        put(dir.path(), "records.jsonl", bytes);
         let report = inspect(dir.path()).unwrap();
         assert!(report.complete);
         assert_eq!(report.categories["indexes"].logical_bytes, 6);
@@ -671,12 +675,49 @@ mod tests {
         assert!(!json.contains("example.com"));
     }
 
+    /// What `plumb-tools storage` reports of a data directory holding the
+    /// tools' test sites and their bucket table, against
+    /// `storage_golden.txt` beside this file: every figure of the report,
+    /// with the directory's own path and the report's notes, fixed text,
+    /// left out. Written while the sizing read records, before it moved
+    /// onto sites' items (step 10 of the data format plan), so that the
+    /// sizing of items is checked against it. Never written again to make
+    /// a test pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-tools
+    /// storage_golden` writes it.
+    #[test]
+    fn storage_golden() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sites = crate::test_sites::sites();
+        sites.extend(crate::test_sites::bucket_sites());
+        let file = dir.path().join("records.jsonl");
+        crate::test_sites::write(&file, &sites);
+        let table = dir.path().join("indexes/000001/buckets");
+        let sites: Vec<site::Item> = fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(|line| stored::read_item(line.as_bytes()).unwrap())
+            .collect();
+        plumb_net::BucketTable::build(&table, &sites).unwrap();
+        let report = inspect(dir.path()).unwrap();
+        let mut json = serde_json::to_value(&report).unwrap();
+        let report = json.as_object_mut().unwrap();
+        report.remove("data");
+        report.remove("notes");
+        let text = format!(
+            "# What plumb-tools storage reports of its test sites: see storage_golden\n\
+             # in storage.rs before writing it again. Written on records.\n{}\n",
+            serde_json::to_string_pretty(&json).unwrap()
+        );
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage_golden.txt");
+        crate::test_sites::check_golden(&path, &text);
+    }
+
     #[test]
     fn bucket_statistics_match_real_table() {
         let dir = tempfile::tempdir().unwrap();
         let table = dir.path().join("indexes/000001/buckets");
-        let records = [SiteRecord::new("example.com"), SiteRecord::new("other.com")];
-        plumb_net::BucketTable::build(&table, &records).unwrap();
+        let sites = [site::new("example.com"), site::new("other.com")];
+        plumb_net::BucketTable::build(&table, &sites).unwrap();
         let report = inspect(dir.path()).unwrap();
         assert!(report.complete);
         let sizing = &report.bucket_tables[0];
@@ -842,7 +883,7 @@ mod tests {
     fn damaged_offsets_are_reported_without_attempting_large_allocations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("indexes/000001/buckets");
-        plumb_net::BucketTable::build(&path, &[SiteRecord::new("example.com")]).unwrap();
+        plumb_net::BucketTable::build(&path, &[site::new("example.com")]).unwrap();
         let mut offsets = fs::read(path.join("buckets.idx")).unwrap();
         offsets[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
         fs::write(path.join("buckets.idx"), offsets).unwrap();

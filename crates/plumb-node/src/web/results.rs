@@ -158,14 +158,15 @@ pub(crate) fn fill_from_network(hit: &Hit, result: &NetworkResult) -> Hit {
     let mut hit = hit.clone();
     let blank = |text: &Option<String>| text.as_deref().is_none_or(|t| t.trim().is_empty());
     if let Some(shared) = &result.shared {
+        let shared = shared.item();
         if blank(&hit.title) && !blank(&shared.title) {
             hit.title.clone_from(&shared.title);
         }
-        if blank(&hit.description) && !blank(&shared.description) {
-            hit.description.clone_from(&shared.description);
+        if blank(&hit.description) && !blank(&shared.about) {
+            hit.description.clone_from(&shared.about);
         }
         if hit.key_pages.is_empty() {
-            hit.key_pages.clone_from(&shared.key_pages);
+            hit.key_pages = plumb_core::site::key_pages(&shared);
         }
     }
     if !result.hit.missing_words {

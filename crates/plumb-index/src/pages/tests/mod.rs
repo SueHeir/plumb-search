@@ -4,6 +4,8 @@
 mod articles;
 mod docs;
 mod finding;
+mod golden;
+mod linking;
 mod media;
 mod named_site;
 mod papers_and_entities;
@@ -86,6 +88,16 @@ fn titles(hits: &[PageHit]) -> Vec<&str> {
     hits.iter().map(|h| h.page.title.as_str()).collect()
 }
 
+/// A page meaning found at `cosine`, standing well out of its set.
+fn meant_page(url: &str, cosine: f32) -> crate::MeantPage {
+    crate::MeantPage {
+        url: url.into(),
+        cosine,
+        gap: 0.2,
+        sites: None,
+    }
+}
+
 fn package(registry: &str, name: &str, views: u64) -> Page {
     let registry = plumb_core::packages::registry(registry).unwrap();
     Page::from_package(Article {
@@ -142,6 +154,7 @@ fn found(title: &str, site: Option<&str>, named: bool, score: f32) -> PageHit {
         popularity: score,
         whole: false,
         learned: None,
+        meant: false,
     }
 }
 

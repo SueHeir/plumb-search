@@ -1,9 +1,12 @@
 //! `plumb-tools crawl`: one crawl of a records file by hand, through the
 //! same choice of homepages and saving as a node's rounds
-//! ([`plumb_node::crawl`]). A batch that looks offline is fetched again
-//! after 30 seconds, then 1, 2 and 4 minutes ([`OFFLINE_WAITS`]), since a
-//! home router that was swamped usually recovers; when it still looks
-//! offline, the crawl stops with an error.
+//! ([`plumb_node::crawl`]). The file is held whole as a set of sites
+//! ([`plumb_core::sites::Sites`], each site as its stored line), which the
+//! crawl's changes are made to and which is written back at the end. A
+//! batch that looks offline is fetched again after 30 seconds, then 1, 2
+//! and 4 minutes ([`OFFLINE_WAITS`]), since a home router that was swamped
+//! usually recovers; when it still looks offline, the crawl stops with an
+//! error.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,9 +17,9 @@ use plumb_core::now_unix;
 use plumb_crawl::{CrawlConfig, HomepageCrawler};
 use plumb_node::cli::parse_positive;
 use plumb_node::crawl::{
-    crawl_rolling, select_targets, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_rolling, select_site_targets, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
-use plumb_node::records::{load_records, RecordStore};
+use plumb_node::records::{load_sites, RecordStore};
 use tracing::info;
 
 #[derive(Debug, Args)]
@@ -89,26 +92,26 @@ fn crawl_file_with(
     offline_waits: &[Duration],
     fetcher: &mut impl Fetcher,
 ) -> Result<()> {
-    let mut set = load_records(&args.records)?;
+    let mut sites = load_sites(&args.records)?;
     let out = args.out.as_deref().unwrap_or(&args.records);
     let mut store = RecordStore::open(out);
     if out != args.records {
         // The journal of `out` holds changes to `out`, which starts as what
         // was read.
-        store.compact(&set)?;
+        store.compact(&sites)?;
     }
     let window = args
         .skip_crawled_within_days
         .saturating_mul(SECONDS_PER_DAY);
-    let targets = select_targets(set.iter(), args.top, now_unix(), window);
+    let targets = select_site_targets(&sites, args.top, now_unix(), window);
     info!(
         "crawling {} of {} homepages, {} at a time",
         targets.len(),
-        set.len(),
+        sites.len(),
         args.concurrency
     );
     let totals = crawl_rolling(
-        &mut set,
+        &mut sites,
         &targets,
         CRAWL_BATCH_SIZE,
         &mut store,
@@ -116,7 +119,7 @@ fn crawl_file_with(
         fetcher,
         |_| Ok(()),
     )?;
-    let written = store.compact(&set)?;
+    let written = store.compact(&sites)?;
 
     let o = &totals.outcomes;
     println!(
@@ -153,7 +156,7 @@ fn crawl_file_with(
 mod tests {
     use std::path::Path;
 
-    use plumb_core::{read_jsonl, write_jsonl, SiteRecord};
+    use plumb_core::site::{self, Item};
     use plumb_crawl::{CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage, PageMeta};
     use plumb_node::records::{journal_path, Change};
 
@@ -190,13 +193,22 @@ mod tests {
     }
 
     /// Sites `site00.com`, `site01.com`... never tried, best first.
-    fn sites(n: u32) -> Vec<SiteRecord> {
+    fn sites(n: u32) -> Vec<Item> {
         (0..n)
             .map(|i| {
-                let mut r = SiteRecord::new(format!("site{i:02}.com"));
-                r.signals.tranco_rank = Some(i + 1);
+                let mut r = site::new(format!("site{i:02}.com"));
+                crate::test_sites::ranks(&mut r, |signals| signals.tranco_rank = Some(i + 1));
                 r
             })
+            .collect()
+    }
+
+    /// Every site of the records file at `path`, in file order.
+    fn read(path: &Path) -> Vec<Item> {
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines = text.lines().filter(|line| !line.trim().is_empty());
+        lines
+            .map(|line| plumb_core::stored::read_item(line.as_bytes()).unwrap())
             .collect()
     }
 
@@ -243,14 +255,15 @@ mod tests {
     fn plumb_crawl_writes_the_whole_file_at_the_end() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        write_jsonl(&path, &sites(30)).unwrap();
+        crate::test_sites::write(&path, &sites(30));
         crawl_file(&crawl_args(&path, None, 10), |batch| {
             batch.iter().map(|t| fetched(&t.domain, 1)).collect()
         })
         .unwrap();
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-        assert_eq!(file.iter().filter(|r| r.crawled_at.is_some()).count(), 10);
+        let file = read(&path);
+        let crawled = |sites: &[Item]| sites.iter().filter(|s| site::crawled(s).is_some()).count();
+        assert_eq!(crawled(&file), 10);
 
         // To another file, which starts from the records read.
         let out = dir.path().join("out.jsonl");
@@ -260,28 +273,25 @@ mod tests {
         })
         .unwrap();
         assert!(!journal_path(&out).exists());
-        let copy: Vec<SiteRecord> = read_jsonl(&out).unwrap();
-        assert_eq!(copy.iter().filter(|r| r.crawled_at.is_some()).count(), 15);
-        let input: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-        assert_eq!(input, file, "the input is left alone");
+        assert_eq!(crawled(&read(&out)), 15);
+        assert_eq!(read(&path), file, "the input is left alone");
 
         // An interrupted crawl's journal is picked up and folded in.
         let mut store = RecordStore::open(&path);
-        let mut late = SiteRecord::new("late.com");
+        let mut late = site::new("late.com");
         late.title = Some("Saved before a crash".into());
-        store.save(&[Change::Merge { record: late }]).unwrap();
+        store.save(&[Change::Merge { site: late }]).unwrap();
         drop(store);
         crawl_file(&crawl_args(&path, None, 0), |_| unreachable!()).unwrap();
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-        assert!(file.iter().any(|r| r.domain == "late.com"));
+        assert!(read(&path).iter().any(|s| s.id == "late.com"));
     }
 
     #[test]
     fn plumb_crawl_stops_when_the_network_is_down() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        write_jsonl(&path, &sites(30)).unwrap();
+        crate::test_sites::write(&path, &sites(30));
         let err = crawl_file(&crawl_args(&path, None, 30), |batch| {
             batch.iter().map(|t| failed(&t.domain)).collect()
         })
@@ -297,8 +307,7 @@ mod tests {
         assert!(err.contains("--use-system-proxy"), "{err}");
         // Nothing was marked, and the file is whole.
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-        assert_eq!(file, sites(30));
+        assert_eq!(read(&path), sites(30));
 
         let mut args = crawl_args(&path, None, 30);
         args.use_system_proxy = true;

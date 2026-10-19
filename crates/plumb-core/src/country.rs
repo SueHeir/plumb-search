@@ -1,6 +1,5 @@
-//! Which country a site belongs to, for the "your country" setting.
-
-use crate::SiteRecord;
+//! Which country a site belongs to, for the "your country" setting
+//! ([`crate::site::site_country`]).
 
 /// Country-code top-level domains that are sold and used worldwide, like a
 /// `.com`, so their sites belong to no country in particular: `.io`, `.co`,
@@ -36,15 +35,13 @@ pub fn tld_country(domain: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// The country a site belongs to: its [`SiteRecord::country`] from
-/// Wikidata when it has one, otherwise its domain ending's
-/// ([`tld_country`]). `None` for global sites such as most `.com`s.
-pub fn site_country(record: &SiteRecord) -> Option<String> {
-    record
-        .country
-        .as_deref()
+/// The country of the site `domain`, which Wikidata says is of `country`:
+/// that country when it is one, otherwise the domain ending's
+/// ([`tld_country`]) ([`crate::site::site_country`]).
+pub(crate) fn country_of(country: Option<&str>, domain: &str) -> Option<String> {
+    country
         .and_then(normalize_country)
-        .or_else(|| tld_country(&record.domain).map(str::to_string))
+        .or_else(|| tld_country(domain).map(str::to_string))
 }
 
 /// `us`, ` US ` -> `US`; `UK` -> `GB`. `None` unless it is a two-letter
@@ -407,14 +404,11 @@ mod tests {
 
     #[test]
     fn wikidata_country_beats_the_domain_ending() {
-        let mut record = SiteRecord::new("nestle.com");
-        assert_eq!(site_country(&record), None);
-        record.country = Some("ch".into());
-        assert_eq!(site_country(&record).as_deref(), Some("CH"));
-        let mut record = SiteRecord::new("americanairlines.fr");
-        assert_eq!(site_country(&record).as_deref(), Some("FR"));
-        record.country = Some("bogus".into());
-        assert_eq!(site_country(&record).as_deref(), Some("FR"));
+        assert_eq!(country_of(None, "nestle.com"), None);
+        assert_eq!(country_of(Some("ch"), "nestle.com").as_deref(), Some("CH"));
+        let airline = "americanairlines.fr";
+        assert_eq!(country_of(None, airline).as_deref(), Some("FR"));
+        assert_eq!(country_of(Some("bogus"), airline).as_deref(), Some("FR"));
     }
 
     #[test]

@@ -212,6 +212,9 @@ pub struct NodeConfig {
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
+    /// Page vectors searches take the page nearest them in meaning from,
+    /// files or directories of them ([`crate::meaning::MeaningIndex::load_pages`]).
+    pub page_vectors: Vec<std::path::PathBuf>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
     /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
@@ -358,6 +361,7 @@ impl NodeConfig {
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
+            page_vectors: Vec::new(),
             seed_from_network: true,
             set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
@@ -2212,6 +2216,19 @@ impl SearchBackend for Inner {
         self.search_with_rank(query, limit, options, Some(rank))
     }
 
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let rank = RankConfig {
+            learned_sites: false,
+            ..self.rank
+        };
+        self.search_with_rank(query, limit, options, Some(&rank))
+    }
+
     fn places(
         &self,
         query: &str,
@@ -2393,8 +2410,8 @@ impl StatusSource for Inner {
         Inner::denies(self, url)
     }
 
-    fn allows_record(&self, record: &mut plumb_core::SiteRecord) -> bool {
-        Inner::allows_record(self, record)
+    fn allows_site(&self, site: &mut plumb_format::Item) -> bool {
+        Inner::allows_site(self, site)
     }
 
     fn searched(&self, query: &str, results: &SearchResults) {
@@ -2453,8 +2470,8 @@ impl StatusSource for Inner {
         self.grades_in_force()
     }
 
-    fn keep_from_network(&self, records: Vec<plumb_core::SiteRecord>) {
-        network::keep_found(self, records);
+    fn keep_from_network(&self, sites: plumb_core::sites::SiteList) {
+        network::keep_found(self, sites);
     }
 
     fn icon(&self, domain: &str) -> Option<Vec<u8>> {

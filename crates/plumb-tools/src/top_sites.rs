@@ -13,7 +13,8 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::SiteRecord;
+use plumb_core::site;
+use plumb_format::Item;
 
 use crate::cli::TopSitesArgs;
 use plumb_node::web::group_thousands;
@@ -31,14 +32,11 @@ enum Kind {
 }
 
 impl Kind {
-    fn of(record: &SiteRecord) -> Kind {
-        if record.gone_at.is_some() {
+    fn of(site: &Item) -> Kind {
+        if site::crawl_marks(site).gone.is_some() {
             Kind::Gone
-        } else if record
-            .title
-            .as_deref()
-            .is_some_and(|t| !t.trim().is_empty())
-            || !record.aliases.is_empty()
+        } else if site.title.as_deref().is_some_and(|t| !t.trim().is_empty())
+            || !site.names.is_empty()
         {
             Kind::Named
         } else {
@@ -90,12 +88,14 @@ pub fn run(args: &TopSitesArgs) -> Result<()> {
     };
     let mut seen = Vec::new();
     let mut failed = None;
-    plumb_node::outline::for_each_record(&read_from, |record| match serde_json::to_vec(&record) {
+    plumb_node::outline::for_each_site(&read_from, |site| match plumb_core::stored::item_as_line(
+        &site,
+    ) {
         Ok(line) => seen.push(Seen {
-            score: record.link_score(),
-            domain: record.domain.as_str().into(),
+            score: site::link_score(&site),
+            domain: site.id.as_str().into(),
             bytes: line.len() as u64 + 1,
-            kind: Kind::of(&record),
+            kind: Kind::of(&site),
         }),
         Err(err) => {
             failed.get_or_insert(err);
@@ -124,17 +124,15 @@ pub fn run(args: &TopSitesArgs) -> Result<()> {
     let mut writer = BufWriter::new(file);
     let mut written = Tally::default();
     let mut failed = None;
-    plumb_node::outline::for_each_record(&read_from, |record| {
-        if failed.is_some() || !kept.contains(record.domain.as_str()) {
+    plumb_node::outline::for_each_site(&read_from, |site| {
+        if failed.is_some() || !kept.contains(site.id.as_str()) {
             return;
         }
-        let line = serde_json::to_vec(&record)
-            .map_err(anyhow::Error::from)
-            .and_then(|line| {
-                writer.write_all(&line)?;
-                writer.write_all(b"\n")?;
-                Ok(line.len() as u64 + 1)
-            });
+        let line = plumb_core::stored::item_as_line(&site).and_then(|line| {
+            writer.write_all(&line)?;
+            writer.write_all(b"\n")?;
+            Ok(line.len() as u64 + 1)
+        });
         match line {
             Ok(bytes) => written.add(bytes),
             Err(err) => failed = Some(err),
@@ -219,14 +217,14 @@ fn megabytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::write_jsonl;
+    use plumb_core::site::{self, Item};
 
     use super::*;
-    use plumb_node::records::load_records;
+    use plumb_node::records::load_sites;
 
-    fn site(domain: &str, tranco: u32, title: Option<&str>) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+    fn ranked(domain: &str, tranco: u32, title: Option<&str>) -> Item {
+        let mut r = site::new(domain);
+        crate::test_sites::ranks(&mut r, |signals| signals.tranco_rank = Some(tranco));
         r.title = title.map(str::to_string);
         r
     }
@@ -235,21 +233,24 @@ mod tests {
     fn the_best_named_sites_are_cut_out_and_sized() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let mut gone = site("gone.com", 1, None);
-        gone.gone_at = Some(5);
-        let mut aliased = site("aliased.org", 4, None);
-        aliased.aliases = vec!["Aliased".into()];
-        write_jsonl(
+        let mut gone = ranked("gone.com", 1, None);
+        let marks = site::CrawlMarks {
+            gone: Some(5),
+            ..site::CrawlMarks::default()
+        };
+        site::set_crawl_marks(&mut gone, marks);
+        let mut aliased = ranked("aliased.org", 4, None);
+        aliased.names = vec!["Aliased".into()];
+        crate::test_sites::write(
             &path,
             &[
                 gone,
-                site("best.com", 2, Some("Best")),
-                site("stub.net", 3, None),
+                ranked("best.com", 2, Some("Best")),
+                ranked("stub.net", 3, None),
                 aliased,
-                site("tail.com", 900, Some("Tail")),
+                ranked("tail.com", 900, Some("Tail")),
             ],
-        )
-        .unwrap();
+        );
         let out = dir.path().join("top.jsonl");
         let args = TopSitesArgs {
             records: path.clone(),
@@ -258,8 +259,8 @@ mod tests {
             named_only: true,
         };
         run(&args).unwrap();
-        let kept = load_records(&out).unwrap();
-        let mut domains: Vec<&str> = kept.iter().map(|r| r.domain.as_str()).collect();
+        let kept = load_sites(&out).unwrap();
+        let mut domains: Vec<String> = kept.iter().map(|s| s.id).collect();
         domains.sort_unstable();
         assert_eq!(domains, ["aliased.org", "best.com"]);
         assert!(path.is_file(), "the records are left alone");
@@ -270,7 +271,58 @@ mod tests {
             ..args
         };
         run(&args).unwrap();
-        assert_eq!(load_records(&out).unwrap().len(), 4, "all but the gone one");
+        assert_eq!(load_sites(&out).unwrap().len(), 4, "all but the gone one");
+    }
+
+    #[test]
+    fn a_cut_holds_each_kept_site_s_line_as_it_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        crate::test_sites::write(&path, &crate::test_sites::sites());
+        // Each site as read off its line: its score, domain, whether it is
+        // named or gone, and its line.
+        let mut sites = Vec::new();
+        plumb_node::outline::for_each_site(&path, |site| {
+            let named = site.title.as_deref().is_some_and(|t| !t.trim().is_empty())
+                || !site.names.is_empty();
+            let mut line = plumb_core::stored::item_as_line(&site).unwrap();
+            line.push(b'\n');
+            sites.push((
+                site::link_score(&site),
+                site.id.clone(),
+                named,
+                site::crawl_marks(&site).gone.is_some(),
+                line,
+            ));
+        })
+        .unwrap();
+        let out = dir.path().join("top.jsonl");
+        for (top, named_only) in [(None, false), (Some(3), true), (Some(5), false)] {
+            let args = TopSitesArgs {
+                records: path.clone(),
+                out: Some(out.clone()),
+                top,
+                named_only,
+            };
+            run(&args).unwrap();
+            let mut best: Vec<_> = sites
+                .iter()
+                .filter(|(_, _, named, gone, _)| !gone && (*named || !named_only))
+                .collect();
+            best.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            best.truncate(top.unwrap_or(usize::MAX));
+            let kept: HashSet<&str> = best.iter().map(|site| site.1.as_str()).collect();
+            let expected: Vec<u8> = sites
+                .iter()
+                .filter(|site| kept.contains(site.1.as_str()))
+                .flat_map(|site| site.4.clone())
+                .collect();
+            assert_eq!(
+                String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
+                String::from_utf8(expected).unwrap(),
+                "{top:?} {named_only}"
+            );
+        }
     }
 
     #[test]

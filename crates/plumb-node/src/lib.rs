@@ -18,11 +18,10 @@
 
 use std::fs::File;
 use std::future::Future;
-use std::io::{BufWriter, IsTerminal, Write};
+use std::io::{BufWriter, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use plumb_core::SiteRecord;
 use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -168,15 +167,18 @@ pub fn rank_config(alpha: Option<f32>) -> RankConfig {
     cfg
 }
 
-/// Writes records as JSON lines to a temporary file next to `path`, flushes
-/// it to disk, renames it over `path` and flushes the directory too (on
-/// Unix), so an interrupted run, a crash or a power cut leaves the old file
-/// or the new one, never a half-written or empty one. Creates the parent
-/// directory when missing.
-pub(crate) fn write_records_atomically<'a, I>(path: &Path, records: I) -> Result<usize>
-where
-    I: IntoIterator<Item = &'a SiteRecord>,
-{
+/// Writes the lines `write` writes, each with its line break, such as
+/// sites' stored lines ([`plumb_core::stored::write_item`]) or the lines
+/// of another records file copied as they are, to a temporary file next to
+/// `path`, flushes it to disk, renames it over `path` and flushes the
+/// directory too (on Unix), so an interrupted run, a crash or a power cut
+/// leaves the old file or the new one, never a half-written or empty one.
+/// Creates the parent directory when missing. Returns what `write`
+/// returns: the number of sites written.
+pub(crate) fn write_lines_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<usize>,
+) -> Result<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -184,7 +186,7 @@ where
         }
     }
     let tmp = temp_path_for(path);
-    let written = match write_lines_durably(&tmp, records) {
+    let written = match write_lines_durably(&tmp, write) {
         Ok(n) => n,
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
@@ -199,19 +201,14 @@ where
     Ok(written)
 }
 
-/// Writes one JSON line per record to a new file at `path` and flushes it to
-/// disk. Returns the number of records written.
-fn write_lines_durably<'a, I>(path: &Path, records: I) -> Result<usize>
-where
-    I: IntoIterator<Item = &'a SiteRecord>,
-{
+/// Writes the lines `write` writes to a new file at `path` and flushes it
+/// to disk. Returns what `write` returns.
+fn write_lines_durably(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<usize>,
+) -> Result<usize> {
     let mut writer = BufWriter::with_capacity(1 << 20, File::create(path)?);
-    let mut written = 0;
-    for record in records {
-        serde_json::to_writer(&mut writer, record)?;
-        writer.write_all(b"\n")?;
-        written += 1;
-    }
+    let written = write(&mut writer)?;
     let file = writer.into_inner().map_err(|err| err.into_error())?;
     file.sync_all()?;
     Ok(written)
@@ -375,8 +372,52 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
 }
 
+/// Lines of a records file for the tests, in either shape a node reads.
+#[cfg(test)]
+pub(crate) mod test_lines {
+    use std::path::Path;
+
+    use plumb_core::stored;
+    use plumb_format::Item;
+
+    /// The line of `site` as a node writes it now: its stored item.
+    pub(crate) fn item_line(site: &Item) -> String {
+        String::from_utf8(stored::item_as_line(site).unwrap()).unwrap()
+    }
+
+    /// The line of `site` as versions up to 0.4 wrote it: the record's own
+    /// JSON, which a node still reads and `/plumb/fill/1` still sends, of
+    /// the site as it is.
+    pub(crate) fn old_line(site: &Item) -> String {
+        stored::record_json_of(site).unwrap()
+    }
+
+    /// Writes `sites` to `path` as versions up to 0.4 wrote a records
+    /// file, a line of each one's [`old_line`].
+    pub(crate) fn write_old_lines(path: &Path, sites: &[Item]) {
+        let lines: String = sites.iter().map(|site| old_line(site) + "\n").collect();
+        std::fs::write(path, lines).unwrap();
+    }
+
+    /// Every site of the file at `path`, in file order, each line read as
+    /// it is ([`stored::read_item`]): trimmed, and blank ones skipped.
+    pub(crate) fn read_sites(path: &Path) -> Vec<Item> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| stored::read_item(line.as_bytes()).unwrap())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use plumb_core::site;
+
     use super::*;
 
     #[test]
@@ -394,10 +435,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         std::fs::write(&path, "old contents\n").unwrap();
-        let records = vec![SiteRecord::new("usbank.com"), SiteRecord::new("chase.com")];
-        assert_eq!(write_records_atomically(&path, &records).unwrap(), 2);
-        let back: Vec<SiteRecord> = plumb_core::read_jsonl(&path).unwrap();
-        assert_eq!(back, records);
+        let sites = [site::new("usbank.com"), site::new("chase.com")];
+        let written = write_lines_atomically(&path, |out| {
+            for site in &sites {
+                plumb_core::stored::write_item(&mut *out, site)?;
+                out.write_all(b"\n")?;
+            }
+            Ok(sites.len())
+        });
+        assert_eq!(written.unwrap(), 2);
+        assert_eq!(test_lines::read_sites(&path), sites);
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())

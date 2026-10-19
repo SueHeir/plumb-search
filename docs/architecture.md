@@ -204,7 +204,7 @@ Everything a node keeps is in its data folder (`--data`). The main parts:
 
 | Path | What it holds |
 | --- | --- |
-| `records.jsonl` | One JSON line per site: what the node knows about it |
+| `records.jsonl` | One JSON line per site: what the node knows about it, as a `site` item of the data format. Lines written by versions up to 0.4 hold the site's record instead; they are still read, and become items as the node writes the file again |
 | `records.jsonl.journal` | Crawl results not yet folded into `records.jsonl` |
 | `indexes/NNNNNN/` | The site index, with `buckets/` for other nodes' searches |
 | `pages/` | Page set files and the page and place indexes |

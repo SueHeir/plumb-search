@@ -10,14 +10,25 @@
 //!   when it is about one of the node's topics or an official website
 //!   ([`takes_new_sites`], [`keeps_new_site`]).
 //! * When the data folder is over the limit anyway, the least useful sites
-//!   go ([`pick_drops`]), lowest link score first, until the node is back
-//!   at [`TRIM_TO_PERCENT`] of it, and the index is built without them.
-//!   When the rest of the folder takes that much by itself, no site goes:
-//!   dropping them could not help, and the node says so instead.
+//!   go ([`pick_outline_drops`]), lowest link score first, until the node
+//!   is back at [`TRIM_TO_PERCENT`] of it, and the index is built without
+//!   them. When the rest of the folder takes that much by itself, no site
+//!   goes: dropping them could not help, and the node says so instead.
 //!   Never dropped: the best [`MIN_SITES_KEPT`] sites, sites about the
 //!   node's topics (its focus and the About pages' interests), sites an
 //!   About page always puts first or a searcher opened from the results,
 //!   official websites (Wikidata), and the network's own site.
+//!
+//! Choosing the sites to drop reads the records file a site at a time
+//! ([`crate::outline`]): what is held of each site is its outline (where
+//! its line is, its link score, its domain), and the domains of those the
+//! node keeps, judged on each site's stored item ([`Keep::keeps`]), not
+//! their whole records. The file is then written again
+//! without the sites dropped, the other lines copied as they are, and the
+//! index built from it a site at a time. A file that holds a site twice,
+//! which only a whole set can merge, is first read whole once and written
+//! again with each site on one line ([`outline::outline_merged`]); the
+//! sites to drop are then chosen from it in the same way.
 //!
 //! Dropping a site only takes it out of this node's index. The batches this
 //! node signed and published stay in `net/batches/` for as long as they
@@ -26,19 +37,22 @@
 //! first (see super::network::start).
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::Result;
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::storage::StorageBudget;
+use plumb_core::{now_unix, site};
+use plumb_format::Item;
 use tracing::info;
 
 use super::fill::FILL_UP_TO_PERCENT;
 use super::store;
 use super::{Inner, Step, MB};
 use crate::about::Topics;
-use crate::records::{
-    journal_path, load_records, replace_records_with_budget, sorted_by_link_score,
-};
+use crate::outline::{self, Outline};
+use crate::records::journal_path;
 use crate::web::group_thousands;
 
 /// Trimming starts once the data folder is over this share of the storage
@@ -117,10 +131,10 @@ pub(super) fn takes_new_sites(inner: &Inner) -> bool {
     limit == 0 || inner.disk_used() < share(limit, FILL_UP_TO_PERCENT)
 }
 
-/// Whether a full node still takes in `record`, a site it does not hold:
-/// one about its topics, or an official website.
-pub(super) fn keeps_new_site(record: &SiteRecord, topics: &Topics) -> bool {
-    record.signals.official_site || topics.matches(record)
+/// Whether a full node still takes in `site`, the stored item of a site
+/// it does not hold: one about its topics, or an official website.
+pub(super) fn keeps_new_site(site: &Item, topics: &Topics) -> bool {
+    site::signals(site).official_site || topics.matches_site(site)
 }
 
 fn share(limit: u64, percent: u64) -> u64 {
@@ -151,25 +165,34 @@ impl Keep {
         }
     }
 
-    pub(super) fn keeps(&self, record: &SiteRecord) -> bool {
-        record.signals.official_site
-            || self.domains.contains(&record.domain)
-            || self.topics.matches(record)
+    /// Whether the node keeps `site`, its stored item, whatever the room:
+    /// an official website, one of [`Keep::domains`], or one about its
+    /// topics.
+    pub(super) fn keeps(&self, site: &Item) -> bool {
+        site::signals(site).official_site
+            || self.domains.contains(&site.id)
+            || self.topics.matches_site(site)
     }
 }
 
-/// The domains to drop from `set` to free `bytes`, at `per_site` bytes a
-/// site: the lowest link scores first, never the best [`MIN_SITES_KEPT`]
-/// nor what `keep` keeps.
-pub(super) fn pick_drops(set: &RecordSet, bytes: u64, per_site: u64, keep: &Keep) -> Vec<String> {
+/// The domains to drop of the sites `sorted` outlines, best link score
+/// first ([`outline::sort`]), to free `bytes` at `per_site` bytes a site:
+/// the lowest link scores first, never the best [`MIN_SITES_KEPT`] nor one
+/// in `kept`, the domains of those [`Keep::keeps`].
+pub(super) fn pick_outline_drops(
+    sorted: &[Outline],
+    bytes: u64,
+    per_site: u64,
+    kept: &HashSet<Box<str>>,
+) -> Vec<String> {
     let wanted = bytes.div_ceil(per_site.max(1));
-    sorted_by_link_score(set)
-        .into_iter()
+    sorted
+        .iter()
         .skip(MIN_SITES_KEPT)
         .rev()
-        .filter(|record| !keep.keeps(record))
+        .filter(|outline| !kept.contains(&outline.domain))
         .take(wanted.try_into().unwrap_or(usize::MAX))
-        .map(|record| record.domain.clone())
+        .map(|outline| outline.domain.to_string())
         .collect()
 }
 
@@ -203,10 +226,14 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
         Step::Indexing,
         "Over the storage limit: choosing sites to drop",
     );
-    let mut set = load_records(&inner.paths.records)?;
-    inner.check_stop()?;
-    let per_site = sites / (set.len() as u64).max(1);
-    let drops = pick_drops(&set, free, per_site, &Keep::of(inner));
+    let drops = drop_sites(
+        &inner.paths.records,
+        sites,
+        free,
+        &Keep::of(inner),
+        inner.storage.as_ref(),
+        || inner.check_stop(),
+    )?;
     if drops.is_empty() {
         inner.journal.warning_daily(
             "Over the storage limit, and every site left is one this node keeps: \
@@ -214,14 +241,6 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
         );
         return Ok(None);
     }
-    let drop: HashSet<&str> = drops.iter().map(String::as_str).collect();
-    set.retain(|record| !drop.contains(record.domain.as_str()));
-    let sorted = sorted_by_link_score(&set);
-    replace_records_with_budget(
-        &inner.paths.records,
-        sorted.iter().copied(),
-        inner.storage.as_ref(),
-    )?;
     info!(
         "over the storage limit ({} MB of {} MB): dropped {} sites",
         used / MB,
@@ -234,9 +253,55 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
         group_thousands(drops.len() as u64)
     ));
     inner.rest_fill();
-    let built = super::worker::build(inner, &sorted)?;
+    let built = super::worker::build_from_file(inner)?;
     inner.recount_disk();
     Ok(Some(built))
+}
+
+/// Drops sites from the records file at `path`, which take `sites` bytes,
+/// to free `free` bytes (see [`trim`]), never one `keep` keeps, and writes
+/// the file again without them, reading it a record at a time
+/// ([`drop_from_file`]). A file only a whole set can merge is first written
+/// again with each site on one line ([`outline::outline_merged`]). `check`
+/// is called once the file is read, before anything is dropped. Returns
+/// the domains dropped, lowest link score first; the index is then built
+/// from the file ([`super::worker::build_from_file`]).
+fn drop_sites(
+    path: &Path,
+    sites: u64,
+    free: u64,
+    keep: &Keep,
+    budget: Option<&Arc<StorageBudget>>,
+    check: impl Fn() -> Result<()>,
+) -> Result<Vec<String>> {
+    let outlines = outline::outline_merged(path, budget.cloned())?;
+    check()?;
+    drop_from_file(path, outlines, sites, free, keep, budget)
+}
+
+/// [`drop_sites`] of the records file at `path`, whose sites `outlines`
+/// gives ([`outline::outline_merged`]), read a site at a time: of each
+/// site only its outline is held, and the domains of those `keep` keeps.
+/// The lines of the sites left are copied as the file holds them
+/// ([`outline::replace_lines`]).
+fn drop_from_file(
+    path: &Path,
+    mut outlines: Vec<Outline>,
+    sites: u64,
+    free: u64,
+    keep: &Keep,
+    budget: Option<&Arc<StorageBudget>>,
+) -> Result<Vec<String>> {
+    let kept = outline::domains_where(path, |site| keep.keeps(site))?;
+    let per_site = sites / (outlines.len() as u64).max(1);
+    outline::sort(&mut outlines);
+    let drops = pick_outline_drops(&outlines, free, per_site, &kept);
+    if !drops.is_empty() {
+        let drop: HashSet<&str> = drops.iter().map(String::as_str).collect();
+        outlines.retain(|outline| !drop.contains(&*outline.domain));
+        outline::replace_lines(path, &outlines, budget)?;
+    }
+    Ok(drops)
 }
 
 /// The bytes to free by dropping sites, with `used` bytes in the data
@@ -265,17 +330,45 @@ fn site_usage(inner: &Inner) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use plumb_core::sites::Sites;
 
-    fn set_of(n: usize) -> RecordSet {
-        let mut set = RecordSet::new();
+    use super::*;
+    use crate::records::{load_sites, replace_sites};
+
+    fn set_of(n: usize) -> Sites {
+        let mut set = Sites::new();
         for i in 0..n {
-            let mut record = SiteRecord::new(format!("site{i}.com"));
+            let mut site = site::new(format!("site{i}.com"));
             // Lower numbers rank higher.
-            record.signals.linking_domains = (n - i) as u32;
-            set.upsert(record);
+            let mut signals = site::signals(&site);
+            signals.linking_domains = (n - i) as u32;
+            site::set_signals(&mut site, &signals);
+            set.upsert(site);
         }
         set
+    }
+
+    /// A records file at `path` of the sites of [`set_of`]`(n)`, as a node
+    /// writes it, once `change` has changed them.
+    fn file_of(path: &Path, n: usize, change: impl FnOnce(&mut Sites)) {
+        let mut set = set_of(n);
+        change(&mut set);
+        replace_sites(path, &set.into_sorted()).unwrap();
+    }
+
+    /// The records file a whole set writes at `path` of the sites `left`
+    /// holds but `drops`: best link score first, each site on one line.
+    fn expected_file(path: &Path, mut left: Sites, drops: &[String]) -> Vec<u8> {
+        left.retain_domains(|domain| !drops.iter().any(|drop| drop == domain));
+        replace_sites(path, &left.into_sorted()).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    /// Makes `site` an official website.
+    fn official(site: &mut Item) {
+        let mut signals = site::signals(site);
+        signals.official_site = true;
+        site::set_signals(site, &signals);
     }
 
     fn keep_nothing() -> Keep {
@@ -287,34 +380,57 @@ mod tests {
 
     #[test]
     fn drops_the_lowest_ranked_sites_first_and_keeps_the_best() {
+        let dir = tempfile::tempdir().unwrap();
         let n = MIN_SITES_KEPT + 10;
-        let set = set_of(n);
-        let drops = pick_drops(&set, 3_000, 1_000, &keep_nothing());
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            file_of(&path, n, |_| {});
+            path
+        };
+        let sites_in = |path: &Path| outline::outline(path).unwrap().unwrap().len();
+        // 1,000 bytes a site, 3,000 to free.
+        let path = file("records.jsonl");
+        let sites = 1_000 * n as u64;
+        let drops = drop_sites(&path, sites, 3_000, &keep_nothing(), None, || Ok(())).unwrap();
         assert_eq!(
             drops,
             [n - 1, n - 2, n - 3]
                 .map(|i| format!("site{i}.com"))
                 .to_vec()
         );
-        // Never below the floor, however much is asked.
-        let all = pick_drops(&set, u64::MAX, 1, &keep_nothing());
+        assert_eq!(sites_in(&path), n - 3);
+        // Never below the floor, however much is asked: a byte a site, and
+        // every byte to free.
+        let path = file("all.jsonl");
+        let all = drop_sites(&path, n as u64, u64::MAX, &keep_nothing(), None, || Ok(())).unwrap();
         assert_eq!(all.len(), 10);
-        assert!(pick_drops(&set_of(MIN_SITES_KEPT), 10_000, 1, &keep_nothing()).is_empty());
+        assert_eq!(sites_in(&path), MIN_SITES_KEPT);
+        let sites = MIN_SITES_KEPT as u64;
+        let none = drop_sites(&path, sites, 10_000, &keep_nothing(), None, || Ok(())).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(sites_in(&path), MIN_SITES_KEPT);
     }
 
     #[test]
     fn never_drops_interests_opened_or_official_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
         let n = MIN_SITES_KEPT + 4;
-        let mut set = set_of(n);
         let last = |k: usize| format!("site{}.com", n - 1 - k);
-        set.entry(&last(0)).title = Some("Woodworking tools".into());
-        set.entry(&last(1)).signals.official_site = true;
+        file_of(&path, n, |set| {
+            set.update(&last(0), |site| {
+                site.title = Some("Woodworking tools".into());
+            });
+            set.update(&last(1), official);
+        });
         let keep = Keep {
             topics: Topics::new(&["woodworking".to_owned()]),
             domains: HashSet::from([last(2)]),
         };
-        // Only the one unprotected site of the four lowest goes first.
-        assert_eq!(pick_drops(&set, 1, 1, &keep), vec![last(3)]);
+        // Only the one unprotected site of the four lowest goes first: a
+        // byte a site, and a byte to free.
+        let drops = drop_sites(&path, n as u64, 1, &keep, None, || Ok(())).unwrap();
+        assert_eq!(drops, vec![last(3)]);
     }
 
     #[test]
@@ -347,12 +463,140 @@ mod tests {
     #[test]
     fn a_full_node_takes_new_sites_only_about_its_topics_or_official() {
         let topics = Topics::new(&["chess".to_owned()]);
-        let mut chess = SiteRecord::new("chess.example");
+        let mut chess = site::new("chess.example");
         chess.title = Some("Play chess online".into());
-        let mut official = SiteRecord::new("bank.example");
-        official.signals.official_site = true;
+        let mut bank = site::new("bank.example");
+        official(&mut bank);
         assert!(keeps_new_site(&chess, &topics));
-        assert!(keeps_new_site(&official, &topics));
-        assert!(!keeps_new_site(&SiteRecord::new("other.example"), &topics));
+        assert!(keeps_new_site(&bank, &topics));
+        assert!(!keeps_new_site(&site::new("other.example"), &topics));
+    }
+
+    /// A records file of a few sites more than [`MIN_SITES_KEPT`], as a
+    /// node writes it, and a journal still to fold into it, with sites the
+    /// node keeps among the lowest-ranked: one official, one opened, one
+    /// about its topic in the file and one about it in the journal. Returns
+    /// what keeps them.
+    fn file_to_trim(path: &Path) -> Keep {
+        let n = MIN_SITES_KEPT + 20;
+        let last = |k: usize| format!("site{}.com", n - 1 - k);
+        file_of(path, n, |set| {
+            set.update(&last(0), official);
+            set.update(&last(2), |site| {
+                site.title = Some("Woodworking tools".into());
+            });
+        });
+        let mut crawled = site::new(last(4));
+        crawled.title = Some("Woodworking club".into());
+        site::set_crawled(&mut crawled, Some(1_700_000_000));
+        crate::records::RecordStore::open(path)
+            .save(&[
+                // A site below them all.
+                crate::records::Change::Merge {
+                    site: site::new("unlinked.example"),
+                },
+                crate::records::Change::Merge { site: crawled },
+                crate::records::Change::Gone {
+                    domain: last(6),
+                    at: 1_700_000_000,
+                },
+            ])
+            .unwrap();
+        Keep {
+            topics: Topics::new(&["woodworking".to_owned()]),
+            domains: HashSet::from([last(1)]),
+        }
+    }
+
+    #[test]
+    fn dropping_sites_a_site_at_a_time_drops_what_the_whole_set_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let streamed = dir.path().join("streamed").join("records.jsonl");
+        std::fs::create_dir_all(streamed.parent().unwrap()).unwrap();
+        let keep = file_to_trim(&streamed);
+        assert!(journal_path(&streamed).exists());
+        // The sites as loading the file gives them, its journal replayed.
+        let left = load_sites(&streamed).unwrap();
+        // 1,000 bytes a site, 4,500 to free: five sites.
+        let (sites, free) = (1_000 * (MIN_SITES_KEPT as u64 + 21), 4_500);
+
+        let budget = StorageBudget::open(streamed.parent().unwrap(), u64::MAX).unwrap();
+        let drops = drop_sites(&streamed, sites, free, &keep, Some(&budget), || Ok(())).unwrap();
+        // The lowest-ranked, but those the node keeps.
+        let n = MIN_SITES_KEPT + 20;
+        let last = |k: usize| format!("site{}.com", n - 1 - k);
+        assert_eq!(
+            drops,
+            [
+                "unlinked.example".to_owned(),
+                last(3),
+                last(5),
+                last(6),
+                last(7)
+            ]
+        );
+        // The file a whole set writes of the sites left, line for line,
+        // and its journal folded in.
+        let expected = expected_file(&dir.path().join("expected.jsonl"), left, &drops);
+        assert_eq!(std::fs::read(&streamed).unwrap(), expected);
+        assert!(!journal_path(&streamed).exists());
+        // The new file was admitted and is charged as it is.
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(streamed.parent().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_file_holding_a_site_twice_is_merged_then_trimmed() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let n = MIN_SITES_KEPT + 5;
+        file_of(&path, n, |_| {});
+        // The best site again, on a line of its own.
+        let mut again = site::new("site0.com");
+        again.title = Some("Site zero".into());
+        // As versions up to 0.4 wrote it: the record's own JSON.
+        let append = |site: &Item| {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", crate::test_lines::old_line(site)).unwrap();
+        };
+        append(&again);
+        assert_eq!(outline::outline(&path).unwrap(), None);
+        // Loading merges the two lines.
+        let left = load_sites(&path).unwrap();
+        assert_eq!(left.len(), n);
+        assert_eq!(left.get("site0.com").unwrap().title, again.title);
+
+        let (sites, free) = (1_000 * n as u64, 2_000);
+        let drops = drop_sites(&path, sites, free, &keep_nothing(), None, || Ok(())).unwrap();
+        assert_eq!(
+            drops,
+            [format!("site{}.com", n - 1), format!("site{}.com", n - 2)]
+        );
+        // Merged first, each site on one line, then trimmed a record at a
+        // time: the file a whole set writes of the sites left, which the
+        // index is built from a record at a time.
+        let outlines = outline::outline(&path).unwrap().expect("each site once");
+        assert_eq!(outlines.len(), n - 2);
+        let expected = expected_file(&dir.path().join("expected.jsonl"), left, &drops);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+
+        // Stopping once the file is read drops no site. The file may be
+        // merged by then, written again with each site on one line, which
+        // drops none either.
+        append(&again);
+        assert_eq!(outline::outline(&path).unwrap(), None);
+        let stopped = drop_sites(&path, sites, free, &keep_nothing(), None, || {
+            Err(anyhow::anyhow!("stopped"))
+        });
+        assert!(stopped.is_err());
+        assert_eq!(load_sites(&path).unwrap().len(), n - 2);
     }
 }

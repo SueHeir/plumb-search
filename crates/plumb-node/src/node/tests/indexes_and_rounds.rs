@@ -60,9 +60,10 @@ async fn lists_wikipedia_articles_with_the_sites() {
         "{body}"
     );
     let (_, _, json) = get(addr, "/api/search?q=marie+curie&full=1").await;
-    let results: SearchResults = serde_json::from_str(&json).unwrap();
-    assert_eq!(results.pages[0].hit.page.title, "Marie Curie");
-    assert!(results.pages[0].hit.named);
+    let results: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(results["pages"][0]["item"]["title"], "Marie Curie");
+    assert_eq!(results["pages"][0]["set"], "wikipedia-en");
+    assert_eq!(results["pages"][0]["named"], true);
 
     // Turned off, the articles go.
     let mut settings = node.inner.settings();
@@ -165,7 +166,7 @@ async fn serves_a_records_file_put_there_by_hand() {
 
     let status = wait_for(addr, "the first index", ready_and_idle).await;
     assert_eq!(status.index.as_deref(), Some("000001"));
-    assert_eq!(status.sites, fixture_records().len() as u64);
+    assert_eq!(status.sites, fixture_sites().len() as u64);
     assert_eq!(status.last_error, None);
     assert_eq!(status.progress, None);
     assert!(status.last_refresh.is_some_and(|t| t <= now_unix()));
@@ -231,25 +232,94 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     let dir = seeded_dir();
     let records = dir.path().join("records.jsonl");
     // A crawl that stopped before folding its journal into the records.
-    let mut found = SiteRecord::new("plumbline-example.com");
+    let mut found = site::new("plumbline-example.com");
     found.title = Some("Plumbline Example Widgets".into());
-    found.crawled_at = Some(now_unix());
+    site::set_crawled(&mut found, Some(now_unix()));
     let mut store = crate::records::RecordStore::open(&records);
     store
-        .save(&[crate::records::Change::Merge { record: found }])
+        .save(&[crate::records::Change::Merge { site: found }])
         .unwrap();
     drop(store);
 
     let node = start(test_config(dir.path())).await.unwrap();
     let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
-    assert_eq!(status.sites, fixture_records().len() as u64 + 1);
+    assert_eq!(status.sites, fixture_sites().len() as u64 + 1);
     let hits = search(node.addr(), "plumbline+example+widgets").await;
     assert_eq!(hits[0].domain, "plumbline-example.com");
     node.shutdown().await.unwrap();
     // Building the index folded it into the records file.
     assert!(!dir.path().join("records.jsonl.journal").exists());
-    let set = crate::records::load_records(&records).unwrap();
-    assert!(set.get("plumbline-example.com").is_some());
+    let sites = crate::records::load_sites(&records).unwrap();
+    assert!(sites.contains("plumbline-example.com"));
+}
+
+/// A records file that holds a site on two lines, as one put together by
+/// hand can, is merged once and written again with each site on one line;
+/// the index is then built from it a record at a time, of the sites merged.
+#[test]
+fn an_index_build_merges_a_site_the_records_file_holds_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    let ranked = |domain: &str, tranco: u32, title: &str| {
+        let mut record = site::new(domain);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut record, &signals);
+        record.title = Some(title.into());
+        record
+    };
+    let mut again = site::new("chase.com");
+    again.about = Some("Credit cards, mortgages and checking accounts".into());
+    write_old_lines(
+        &path,
+        &[
+            ranked("usbank.com", 1, "U.S. Bank"),
+            ranked("chase.com", 2, "Chase Bank"),
+            ranked("wellsfargo.com", 3, "Wells Fargo"),
+            again,
+        ],
+    );
+    // And a journal still to fold in.
+    crate::records::RecordStore::open(&path)
+        .save(&[crate::records::Change::Merge {
+            site: ranked("pnc.com", 4, "PNC Bank"),
+        }])
+        .unwrap();
+    assert!(
+        crate::outline::outline_copy(&path, &dir.path().join("copy"))
+            .unwrap()
+            .is_none()
+    );
+    let config = test_config(dir.path());
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Inner::new(config, rank, opened, stopped, None);
+
+    let built = {
+        let _records = inner.hold_records();
+        crate::node::worker::build_from_file(&inner).unwrap()
+    };
+    assert_eq!(built.docs, 4);
+    let searcher = plumb_index::Searcher::open(&built.dir).unwrap();
+    let chase = searcher.site("chase.com").unwrap().unwrap();
+    assert_eq!(chase.title.as_deref(), Some("Chase Bank"));
+    assert_eq!(
+        chase.description.as_deref(),
+        Some("Credit cards, mortgages and checking accounts")
+    );
+    assert!(searcher.has_domain("pnc.com"));
+    // Each site once in the file now, the journal folded in.
+    let outlines = crate::outline::outline(&path)
+        .unwrap()
+        .expect("each site once");
+    let mut domains: Vec<&str> = outlines.iter().map(|o| &*o.domain).collect();
+    domains.sort_unstable();
+    assert_eq!(
+        domains,
+        ["chase.com", "pnc.com", "usbank.com", "wellsfargo.com"]
+    );
+    assert!(!crate::records::journal_path(&path).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -299,11 +369,12 @@ async fn swaps_in_a_new_index_and_deletes_the_old_one_once_unused() {
 async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
     let dir = seeded_dir();
     let paths = store::Paths::new(dir.path());
-    let records = fixture_records();
+    let records = fixture_sites();
     // Two indexes of earlier runs, a newer one that is broken, and what
     // interrupted work leaves: a staging directory and temporary files.
-    plumb_index::build_index(&paths.index(2), &records[..5]).unwrap();
-    plumb_index::build_index(&paths.index(4), &records[..10]).unwrap();
+    let sites = stored_items(&records);
+    plumb_index::build_index(&paths.index(2), &sites[..5]).unwrap();
+    plumb_index::build_index(&paths.index(4), &sites[..10]).unwrap();
     std::fs::create_dir_all(paths.index(7)).unwrap();
     std::fs::write(paths.index(7).join("meta.json"), "not an index").unwrap();
     std::fs::create_dir_all(paths.indexes.join(".000008.new-1-0")).unwrap();
@@ -457,7 +528,7 @@ async fn a_node_that_only_crawls_builds_no_index_until_it_searches_again() {
     assert_eq!(status.last_error, None);
     assert_eq!(
         node.inner.held_sites(),
-        fixture_records().len() as u64,
+        fixture_sites().len() as u64,
         "counted for filling"
     );
     node.shutdown().await.unwrap();
@@ -469,7 +540,7 @@ async fn a_node_that_only_crawls_builds_no_index_until_it_searches_again() {
     // Without the flag again, the node builds its index.
     let node = start(test_config(dir.path())).await.unwrap();
     let status = wait_for(node.addr(), "the index", ready_and_idle).await;
-    assert_eq!(status.sites, fixture_records().len() as u64);
+    assert_eq!(status.sites, fixture_sites().len() as u64);
     assert_eq!(search(node.addr(), "chase").await[0].domain, "chase.com");
     node.shutdown().await.unwrap();
 }

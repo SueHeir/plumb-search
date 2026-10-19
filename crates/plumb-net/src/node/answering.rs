@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use libp2p::request_response::{self, OutboundRequestId};
 use libp2p::PeerId;
 use plumb_core::locks::Locked;
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
 use tracing::{debug, warn};
 
 use super::{Answer, Asker, Relayed, Reply, Task, MAX_RELAYING};
@@ -19,29 +19,36 @@ use crate::proto::*;
 use crate::scope::{SearchScope, MAX_SHARED_TRUST};
 use crate::store::BatchStore;
 
-/// Bucket `bucket` of `source`, each site with the proof of its signed
-/// crawl when `store` holds one.
-fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> BucketResponse {
+/// Bucket `bucket` of `source`, each site as its item, with the proof of
+/// its signed crawl when `store` holds one that has not expired by `now`.
+pub(super) fn lookup(
+    source: &dyn BucketSource,
+    store: &Mutex<BatchStore>,
+    bucket: u32,
+    now: u64,
+) -> BucketResponse {
     let records = source.bucket(bucket).map(|lines| {
-        let now = now_unix();
+        let sites: Vec<(String, String)> = lines
+            .iter()
+            .filter_map(|line| {
+                let site = plumb_core::stored::read_item(line.as_bytes()).ok()?;
+                Some((plumb_core::site::to_line(&site).ok()?, site.id))
+            })
+            .collect();
         // Where each site's proofs are is in memory; the batches are read
         // after the lock is let go, so gossip and fetches aren't held up.
         let (sources, mut reader) = {
             let store = store.locked();
-            let sources: Vec<Vec<(Hash, usize)>> = lines
+            let sources: Vec<Vec<(Hash, usize)>> = sites
                 .iter()
-                .map(|record| {
-                    serde_json::from_str::<SiteRecord>(record)
-                        .map(|r| store.proof_sources(&r.domain, now))
-                        .unwrap_or_default()
-                })
+                .map(|(_, domain)| store.proof_sources(domain, now))
                 .collect();
             (sources, store.reader())
         };
-        lines
+        sites
             .into_iter()
             .zip(sources)
-            .map(|(record, sources)| {
+            .map(|((record, _), sources)| {
                 let mut proofs = reader
                     .proofs(&sources, 1 + MAX_EXTRA_PROOFS)
                     .unwrap_or_default()
@@ -80,16 +87,22 @@ pub(super) fn holds_denied(source: &dyn BucketSource, lines: &[String]) -> bool 
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         };
-        let sites = ["domain", "icon_of", "news_of"]
+        let list = |key: &str| {
+            let list = line.get(key).and_then(serde_json::Value::as_array);
+            list.into_iter().flatten()
+        };
+        // A site's item names it by its id, and its key pages by edges.
+        let sites = ["id", "icon_of", "news_of"]
             .iter()
             .filter_map(|key| text(&line, key))
             .map(|domain| format!("https://{domain}/"));
-        let pages = ["key_pages", "items"]
-            .iter()
-            .filter_map(|key| line.get(*key)?.as_array())
-            .flatten()
-            .filter_map(|page| text(page, "url"));
-        let mut urls = sites.chain(text(&line, "url")).chain(pages);
+        let key_pages = list("edges")
+            .filter_map(|edge| Some(text(edge, "to")?.strip_prefix("url:")?.to_string()));
+        let headlines = list("items").filter_map(|headline| text(headline, "url"));
+        let mut urls = sites
+            .chain(text(&line, "url"))
+            .chain(key_pages)
+            .chain(headlines);
         urls.any(|url| source.denies(&url))
     })
 }
@@ -128,7 +141,7 @@ impl Task {
         let store = self.store.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let response = lookup(&*source, &store, request.bucket);
+            let response = lookup(&*source, &store, request.bucket, now_unix());
             let _ = tx.send(Answer::Bucket(channel, response));
         });
     }
@@ -164,7 +177,7 @@ impl Task {
         }
     }
 
-    /// A request on `/plumb/oblivious/1`, from another node or our own
+    /// A request on `/plumb/oblivious/2`, from another node or our own
     /// handle (see [`crate::oblivious`]).
     pub(super) fn on_oblivious_request(
         &mut self,
@@ -290,7 +303,7 @@ impl Task {
         let store = self.store.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let response = lookup(&*source, &store, request.bucket);
+            let response = lookup(&*source, &store, request.bucket, now_unix());
             let sealed = match seal_response(sealer, &response) {
                 Ok(sealed) => Some(serde_bytes::ByteBuf::from(sealed)),
                 Err(err) => {

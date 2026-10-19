@@ -33,7 +33,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | [node/task.rs](src/node/task.rs) | The swarm task: commands from handles, `Answer`s from blocking work, swarm events, the one-minute maintenance tick |
 | [node/swarm.rs](src/node/swarm.rs) | Building the swarm: transports, behaviors, per-protocol size caps, connection and relay limits |
 | [node/handle.rs](src/node/handle.rs) | The `NetHandle` methods the rest of the program calls |
-| [node/batches.rs](src/node/batches.rs) | Publishing, hearing of, fetching and holding batches; `RecordDelivery` of agreed records |
+| [node/batches.rs](src/node/batches.rs) | Publishing, hearing of, fetching and holding batches; `RecordDelivery` of agreed sites, as their stored items |
 | [node/answering.rs](src/node/answering.rs) | Answering bucket and sealed requests, relaying, and who may search this node |
 | [node/serving.rs](src/node/serving.rs) | Serving fills, page files, signed sets and profiles, a few at a time |
 | [node/gossip.rs](src/node/gossip.rs) | Popularity reports and leads, over gossip and by asking |
@@ -47,19 +47,19 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | Module | What it does |
 | --- | --- |
 | [assign.rs](src/assign.rs) | Which sites a node may crawl each day (`is_assigned`, `MAX_SHARE_PPM`), and slices for `--crawl-any-site` groups |
-| [batch.rs](src/batch.rs) | Signed batches: `check`, `accept_batch`, `accept_trusted_batch`, `mostly_kept`, `RecordProof` |
+| [batch.rs](src/batch.rs) | Signed batches of sites' items: `check`, `accept_batch`, `accept_trusted_batch`, `mostly_kept`, `RecordProof` |
 | [hash.rs](src/hash.rs) | SHA-256 and the Merkle tree over a batch's records |
 | [store.rs](src/store.rs) | Batches held on disk, pruning, proofs for search answers, `CrawlerView` |
 | [agree.rs](src/agree.rs) | Agreement between crawlers: quorum, vouching, disputes and rechecks |
-| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first; `accept_record`, the checks on a site from elsewhere, which reading the set of sites shares |
+| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first, sent as records' JSON and taken in as sites' stored items; `accept_site`, the checks on a site from elsewhere, which reading the set of sites shares |
 
 **Network search**
 
 | Module | What it does |
 | --- | --- |
-| [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk |
-| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` |
-| [oblivious.rs](src/oblivious.rs) | Sealed requests through a relay over `/plumb/oblivious/1`: signed keys and padding |
+| [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk, written from sites' stored items |
+| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` and its `FoundSite`s, each site's stored item held as its line |
+| [oblivious.rs](src/oblivious.rs) | Sealed requests through a relay over `/plumb/oblivious/2`: signed keys and padding |
 | [rounds.rs](src/rounds.rs) | Scheduled background rounds and the queue of buckets they fetch |
 | [cache.rs](src/cache.rs) | The bucket cache that searches read |
 | [scope.rs](src/scope.rs) | `SearchScope`: which nodes a search asks |
@@ -81,7 +81,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 
 ### One swarm on one task
 
-`start` loads or creates the node key (`node.key` in `NetConfig::dir`), opens the report and lead stores on a blocking thread, builds the swarm and spawns `Task::run`. It returns a `NetHandle` and a receiver of `RecordDelivery`: records that agreement released, each with a storage reservation and an acknowledgment. plumb-node saves them to its inbox and calls `acknowledge()`. Deliveries not acknowledged are sent again after a restart, without awarding credits twice.
+`start` loads or creates the node key (`node.key` in `NetConfig::dir`), opens the report and lead stores on a blocking thread, builds the swarm and spawns `Task::run`. It returns a `NetHandle` and a receiver of `RecordDelivery`: the sites agreement released, as a `SiteList` of their stored items, each delivery with a storage reservation and an acknowledgment. plumb-node saves them to its inbox and calls `acknowledge()`. Deliveries not acknowledged are sent again after a restart, without awarding credits twice.
 
 ```mermaid
 flowchart LR
@@ -101,7 +101,7 @@ Every minute the task dials more nodes while it has fewer than `TARGET_PEERS` (8
 
 ### Searches go out on other swarms
 
-The node's own swarm never asks for a bucket. Each bucket request goes out from a throwaway swarm ([throwaway.rs](src/throwaway.rs)) with a new key, sealed to the answering node's key and passed on by a relay picked at random ([oblivious.rs](src/oblivious.rs)). The node's swarm only answers `/plumb/bucket/1` and `/plumb/oblivious/1`, and only when `NetConfig::answer_searches` is on.
+The node's own swarm never asks for a bucket. Each bucket request goes out from a throwaway swarm ([throwaway.rs](src/throwaway.rs)) with a new key, sealed to the answering node's key and passed on by a relay picked at random ([oblivious.rs](src/oblivious.rs)). The node's swarm only answers `/plumb/bucket/2` and `/plumb/oblivious/2`, and only when `NetConfig::answer_searches` is on.
 
 With rounds on (`NetConfig::round_every`, `ROUND_EVERY` 10 minutes by default), `NetHandle::search` reads only the bucket cache and queues the bucket numbers it lacks. A separate loop in [node.rs](src/node.rs) sends a round of exactly `BUCKETS_PER_SEARCH` (4) buckets at each slot, whether anyone searched or not. With `round_every` set to `None` (`--round-minutes 0`), a search asks the network at once. See [cache-first-search.md](../../docs/cache-first-search.md).
 
@@ -116,8 +116,8 @@ With rounds on (`NetConfig::round_every`, `ROUND_EVERY` 10 minutes by default), 
 
 ### Invariants a change must keep
 
-- **Released nodes read every message.** Add only optional fields (`#[serde(default)]`) that older nodes skip. Do not rename a protocol, topic or field; a new kind of message gets a new protocol name. Requests and responses are CBOR, gossip messages are JSON.
-- **Signed bytes do not move.** A batch header is signed over fixed-width fields after the context `plumb-batch-v1\0`, and its Merkle leaves are the record lines exactly as sent. A lead is signed over length-prefixed fields after `plumb-lead-v1\0`. Changing either breaks every signature already made.
+- **Released nodes read every message.** Add only optional fields (`#[serde(default)]`) that older nodes skip. Do not rename a protocol, topic or field; a new kind of message gets a new protocol name, and a message whose shape changes a new version, which older nodes neither ask nor answer (batches and bucket answers went to `/2` at v0.4.0, when their sites became items). Requests and responses are CBOR, gossip messages are JSON.
+- **Signed bytes do not move.** A batch header is signed over fixed-width fields after the context `plumb-batch-v2\0` (`v1` before v0.4.0), and its Merkle leaves are the record lines, each a site's item, exactly as sent. A lead is signed over length-prefixed fields after `plumb-lead-v1\0`. Changing either breaks every signature already made, so it takes a new context.
 - **Shared hashes are part of the protocol.** Assignment (`plumb-assign-v1\0`), buckets (`plumb-bucket-v1\0`, in plumb-core), crawl-group slices (`plumb-slice-v1\0`) and lead word keys (`plumb-lead-word-v1\0`) must come out the same on every node.
 - **Sizes are capped before decoding.** Each protocol's codec has a request and response cap in [node/swarm.rs](src/node/swarm.rs), records are at most `MAX_RECORD_BYTES` (16 KiB), and lists and stores have counts per peer.
 - **Nothing is passed on unchecked.** Gossipsub runs in strict mode with manual validation, so a batch header, report or lead is forwarded only after the task accepted it. A batch that names a site the node's denylist takes off is not relayed (`BucketSource::denies`).

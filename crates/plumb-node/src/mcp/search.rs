@@ -243,6 +243,7 @@ impl Mcp {
                     popularity: 0.0,
                     whole: false,
                     learned: None,
+                    meant: false,
                 },
                 under: None,
                 at: if promote_package {

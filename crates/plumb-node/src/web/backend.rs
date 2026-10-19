@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use plumb_core::SiteRecord;
+use plumb_core::sites::SiteList;
+use plumb_format::Item;
 use plumb_index::pages::PageHit;
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_net::NetHandle;
@@ -29,9 +30,7 @@ pub trait SearchBackend: Send + Sync {
         let _ = options;
         Ok(SearchResults {
             hits: self.search(query, limit)?,
-            pages: Vec::new(),
-            site_search: None,
-            spelling: None,
+            ..SearchResults::default()
         })
     }
     /// [`SearchBackend::search_full`] ranked with `rank` instead of the
@@ -45,6 +44,19 @@ pub trait SearchBackend: Send + Sync {
         rank: &RankConfig,
     ) -> Result<SearchResults> {
         let _ = rank;
+        self.search_full(query, limit, options)
+    }
+    /// [`SearchBackend::search_full`] to find whose site a name or domain
+    /// is (`official_site`, `check_lookalike`, `site_info`): without the
+    /// site model ([`RankConfig::learned_sites`]), which orders sites by how
+    /// well they serve a search, not by whose they are. By default the same
+    /// as `search_full`.
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
         self.search_full(query, limit, options)
     }
     /// Number of sites that can be found.
@@ -251,6 +263,19 @@ impl SearchBackend for IndexBackend {
         self.search_full_with(query, limit, options, meaning.as_deref(), Some(rank))
     }
 
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let rank = RankConfig {
+            learned_sites: false,
+            ..self.rank
+        };
+        self.search_ranked(query, limit, options, &rank)
+    }
+
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
     }
@@ -321,11 +346,11 @@ pub trait StatusSource: Send + Sync {
         let _ = url;
         false
     }
-    /// False when the node's denylist takes off the site `record`
-    /// describes; else true, with the key pages and headlines it denies
-    /// taken off `record`. For the sites other nodes answer with.
-    fn allows_record(&self, record: &mut SiteRecord) -> bool {
-        let _ = record;
+    /// False when the node's denylist takes off the site of the stored
+    /// item `site`; else true, with the key pages and headlines it denies
+    /// taken off `site`. For the sites other nodes answer with.
+    fn allows_site(&self, site: &mut Item) -> bool {
+        let _ = site;
         true
     }
     /// Told what a person searched for here and what was found, so the
@@ -339,8 +364,9 @@ pub trait StatusSource: Send + Sync {
     fn bucket_table(&self) -> Option<String> {
         None
     }
-    /// Bucket `bucket` of table `table`, its records as JSON; `None` when
-    /// that table is not the one served (any more).
+    /// Bucket `bucket` of table `table`, its records as stored lines
+    /// ([`plumb_core::stored`]); `None` when that table is not the one
+    /// served (any more).
     fn bucket(&self, _table: &str, _bucket: u32) -> Option<Result<Vec<String>>> {
         None
     }
@@ -369,8 +395,10 @@ pub trait StatusSource: Send + Sync {
         None
     }
 
-    fn keep_from_network(&self, records: Vec<SiteRecord>) {
-        let _ = records;
+    /// Keeps the signed crawls a network search found, their stored
+    /// items held as lines.
+    fn keep_from_network(&self, sites: SiteList) {
+        let _ = sites;
     }
 
     /// The icon of `domain` as a small PNG, when a crawl found one.

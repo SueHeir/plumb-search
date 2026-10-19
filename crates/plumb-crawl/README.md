@@ -1,6 +1,6 @@
 # plumb-crawl
 
-The crawler: it fetches one homepage per site, after robots.txt, and reads the site's names, text and links into site records. It also reads sites' feeds, follows a site's links toward the inner pages a node's searches want, and reads single pages as text for AI assistants. plumb-node runs it in its crawl rounds; plumb-tools uses it to crawl by hand and to build page sets.
+The crawler: it fetches one homepage per site, after robots.txt, and reads the site's names, text and links into sites, each the stored item a node keeps of it. It also reads sites' feeds, follows a site's links toward the inner pages a node's searches want, and reads single pages as text for AI assistants. plumb-node runs it in its crawl rounds; plumb-tools uses it to crawl by hand and to build page sets.
 
 Part of [Plumb Search](../../README.md). See [the architecture](../../docs/architecture.md) for how the crates fit together.
 
@@ -49,7 +49,7 @@ flowchart LR
 
 | Module | What it does |
 | --- | --- |
-| [records.rs](src/records.rs) | `to_records`: crawl results as plumb-core `SiteRecord`s; `CRAWL_VERSION`, `REREAD_BELOW` |
+| [records.rs](src/records.rs) | `to_items`: crawl results as sites, plumb-core's site items (`plumb_core::site`); `CRAWL_VERSION`, `REREAD_BELOW`, `CHARSETS_READ_SINCE` |
 | [lib.rs](src/lib.rs) | `CrawlConfig`, `CrawlTarget`, `PageMeta`, `CrawlOutcome`, the user agents |
 | [test_alloc.rs](src/test_alloc.rs) | Test builds only: an allocator that counts a thread's heap, so tests can hold parsing to a memory budget |
 
@@ -80,7 +80,7 @@ sequenceDiagram
   C->>S: GET the page's icon, then /favicon.ico
   S-->>C: icon, scaled to a 32 px PNG
   C-->>N: CrawlOutcome Fetched
-  N->>N: to_records, merged into records
+  N->>N: to_items, merged into its sites
 ```
 
 1. **robots.txt** is asked of every origin (scheme, host and port) before the first request to it, as RFC 9309 scopes it. A 2xx is parsed up to 500 KiB and obeyed for the product token `PlumbSearch`. A 4xx other than 429 means no rules. A 5xx, a 429 or no answer means the site is not crawled. A file whose `$` rules would take more than 16 MiB to compile (`MAX_ROBOTS_REGEX_BYTES`) is not parsed and the site is not crawled either.
@@ -108,13 +108,13 @@ The crawl fetches nothing else. Feeds are checked by a separate node job through
 | `key_pages` | Links to the site's own pages, picked by plumb-core's `pick_key_pages`, at most 6 | `key_pages` |
 | `search_url` | The first GET form with a search box that submits to the same site | `search_url` |
 | `language` | `<html lang>`, then Content-Language metadata, then `og:locale` | `language` |
-| `links` | Links to other registrable domains, at most `MAX_OUT_LINKS` (500), with their text (or an image's `alt`, `aria-label` or `title`) | `links_to` (at most 50), and link text on the sites they point to |
+| `links` | Links to other registrable domains under a top-level domain there is (not `//index_.shtml`), at most `MAX_OUT_LINKS` (500), with their text (or an image's `alt`, `aria-label` or `title`) | `links_to` (at most 50), and link text on the sites they point to |
 | `feed` | The first `<link rel="alternate">` to an RSS or Atom feed | The node's news watcher |
 | `icons` | `<link rel="icon">` and Apple touch icons, best first, at most 3, no SVG | The icon fetch |
 
-A byte order mark decides the charset. Without one, a page that is valid UTF-8 is read as UTF-8 whatever the server says, and any other page in the charset its `Content-Type` header or its first 1,024 bytes declare. Boilerplate is judged a block at a time (the text between two elements that start a new line), after the rules used to clean the C4 corpus, kept conservative so brief facts stay.
+A byte order mark decides the charset. Without one, a page that is valid UTF-8 is read as UTF-8 whatever the server says, and any other page in the charset its `Content-Type` header, its first 1,024 bytes or the rest of its `<head>` declare, as browsers do (smbc.co.jp declares Shift_JIS at byte 1,027). ISO-2022-JP is all ASCII, so a page of ASCII with escape bytes is read in the charset it declares too. A page that declares none, or says UTF-8 and is not (budget.gov.hk is Big5 under `<meta charset="utf-8">`), is read as UTF-8 when more of its text is UTF-8 than not, else in the charset Firefox's detector ([chardetng](https://crates.io/crates/chardetng)) guesses from its bytes and top-level domain. Boilerplate is judged a block at a time (the text between two elements that start a new line), after the rules used to clean the C4 corpus, kept conservative so brief facts stay.
 
-`to_records` turns results into records: one per fetched homepage, stamped with `crawled_at` and `crawl_version`, and one per linked domain, carrying the texts of links to its front page and `signals.linking_domains`. Link text counts once per linking site, only on links to a front page (text on a deeper link names that page), and never when generic ("click here", "official website"). A domain seen only as a link target gets a record of its own, which is how a node discovers new sites. An `OffsiteRedirect` marks the domain with a `Redirect` and adds an empty record for where it points.
+`to_items` turns results into sites, each the stored item a node keeps of it (`plumb_core::site`): one per fetched homepage, stamped with when it was crawled and its `crawl_version`, and one per linked domain, carrying the texts of links to its front page and `linking_domains` in its signals. Link text counts once per linking site, only on links to a front page (text on a deeper link names that page), and never when generic ("click here", "official website"). A domain seen only as a link target gets a site of its own, which is how a node discovers new sites. An `OffsiteRedirect` marks the domain with a `Redirect` and adds an empty site for where it points. Sites of one domain are merged with `site::merge`, homepages first, so a homepage's names stay as the page wrote them: the journal changes and shared crawls a node makes of them are the same, byte for byte, as when crawls made records.
 
 ### Staying off private networks
 
@@ -131,7 +131,7 @@ A node's plugins fetch from the hosts their `plugin.json` names, which may be th
 
 ### Crawl versions
 
-Every record a crawl writes carries `crawl_version`, set to `CRAWL_VERSION` (2): version 1 added the search terms, version 2 leaves boilerplate out of the body text. Raise it when a change to what crawls read makes sites read before worth reading again. Nodes crawl sites last read by a version below `REREAD_BELOW` (1) ahead of their turn, best link score first; the rest get the new reading when they come due, about once a month. `REREAD_BELOW` stays at 1 for now: raising it makes an upgraded node read every site it has again at once, and makes a fresher crawl by a trusted older crawler look due again on every newer node.
+Every site a crawl reads carries `crawl_version`, set to `CRAWL_VERSION` (3): version 1 added the search terms, version 2 leaves boilerplate out of the body text, and version 3 reads every page in its charset. Raise it when a change to what crawls read makes sites read before worth reading again. Nodes crawl sites last read by a version below `REREAD_BELOW` (1) ahead of their turn, best link score first; the rest get the new reading when they come due, about once a month. `REREAD_BELOW` stays at 1 for now: raising it makes an upgraded node read every site it has again at once, and makes a fresher crawl by a trusted older crawler look due again on every newer node. Only the sites an older crawler misread are read again ahead of their turn: those read before `CHARSETS_READ_SINCE` (3) whose title or description has a `�` or an escape byte.
 
 ### User agents
 
@@ -154,7 +154,7 @@ Every record a crawl writes carries `crawl_version`, set to `CRAWL_VERSION` (2):
 
 ## Using it
 
-- `HomepageCrawler::new(cfg)`, then `push(targets)` and `next().await` until it returns `None`; `to_records(&results)` for the records.
+- `HomepageCrawler::new(cfg)`, then `push(targets)` and `next().await` until it returns `None`; `to_items(&results)` for the sites.
 - `extract_page_meta(&url, html)` reads one page; `extract_inner_page_meta` with `InnerPageExtraction::Docs` keeps more of a documentation page.
 - `check_feeds(targets, &cfg)` for each site's recent headlines, asking only for a feed changed since its last `ETag` or `Last-Modified`.
 - `follow_links(targets, &cfg, &allowed)` for the inner pages searches want; `allowed` is the caller's check (the node's denylist).

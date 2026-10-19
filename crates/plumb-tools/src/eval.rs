@@ -29,6 +29,7 @@ use tracing::info;
 use crate::cli::{EvalArgs, Half};
 use plumb_node::meaning::MeaningIndex;
 
+mod candidates;
 pub mod contracts;
 mod rerank;
 
@@ -259,6 +260,9 @@ pub fn run(args: EvalArgs) -> Result<()> {
         None => Vec::new(),
     };
     let setup = open_setup(&args)?;
+    if let Some(path) = &args.candidates_out {
+        return candidates::write(&args, &setup, &suites, &cfg, path);
+    }
     if args.recall {
         for suite in &suites {
             if suites.len() > 1 {
@@ -567,33 +571,28 @@ fn format_recall(stages: &[Stage], limit: usize) -> String {
 
 /// The address of every page in the sets of `--pages`.
 fn page_urls(args: &EvalArgs) -> Result<HashSet<String>> {
-    let mut urls = HashSet::new();
-    for file in &args.pages {
-        let reader = plumb_ingest::open_maybe_gz(file)?;
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let set = set_of_file(name);
-        for article in plumb_core::article::read_articles(reader, args.pages_top)? {
-            if let Some(page) = Page::from_set(&set, article) {
-                urls.insert(page.url);
-            }
-        }
-    }
-    Ok(urls)
+    Ok(set_pages(args)?.map(|page| page.url).collect())
 }
 
 /// Builds the page index of `--pages` in `dir`.
 fn build_pages(args: &EvalArgs, dir: &Path) -> Result<()> {
-    let mut all: Vec<Page> = Vec::new();
-    for file in &args.pages {
-        let reader = plumb_ingest::open_maybe_gz(file)?;
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
-        info!("indexing {} pages of {}", articles.len(), file.display());
-        let set = set_of_file(name);
-        all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
-    }
-    plumb_index::pages::build_page_index(dir, all)?;
+    plumb_index::pages::build_page_index(dir, set_pages(args)?)?;
     Ok(())
+}
+
+/// The pages of the sets of `--pages`, `--pages-top` of each, read a line
+/// at a time as a node reads them ([`plumb_node::pages::read_set`]), so
+/// that none are held: all of hpc's sets at once took more than 14 GB.
+fn set_pages(args: &EvalArgs) -> Result<impl Iterator<Item = Page>> {
+    let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
+    for file in &args.pages {
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let set = set_of_file(name);
+        info!("reading the {set} pages of {}", file.display());
+        let read = plumb_node::pages::read_set(&set, file, args.pages_top as u64)?;
+        pages = Box::new(pages.chain(read));
+    }
+    Ok(pages)
 }
 
 /// `--pages-cache`: page indexes kept between runs, one folder each, named
@@ -758,6 +757,12 @@ fn evaluate(
     } else {
         args.limit
     };
+    // --features-out writes the hand-made order of sites the site model
+    // is trained to improve, as it does the rows (below).
+    let search_cfg = plumb_index::RankConfig {
+        learned_sites: cfg.learned_sites && features.is_none(),
+        ..*cfg
+    };
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in queries {
@@ -781,7 +786,7 @@ fn evaluate(
                 .search_meaning(
                     query,
                     fetched + grades_margin(args, setup),
-                    cfg,
+                    &search_cfg,
                     &options,
                     query_meaning
                         .as_ref()
@@ -865,6 +870,7 @@ fn evaluate(
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
                 pages.add_other_number(&searched, &hits, &mut found, 10)?;
+                let meant = pages.add_meant(&results.meant, &mut found)?;
                 let mut lifted = hits.clone();
                 if cfg.add_named_site {
                     add_named_site(&mut lifted, &found, |domain| {
@@ -881,10 +887,12 @@ fn evaluate(
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
                 // ranking is trained to improve.
-                if cfg.learned && features.is_none() {
-                    plumb_index::learned::reorder(
-                        plumb_index::learned::Model::builtin(),
+                if features.is_none() {
+                    plumb_index::learned::reorder_results(
+                        cfg,
                         &searched,
+                        results.sites_ordered,
+                        meant.as_deref(),
                         &mut lifted,
                         &mut placed,
                     );
@@ -1310,7 +1318,8 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     listed
 }
 
-/// Most listed rows of a query `--features-out` writes.
+/// Most listed rows of a query `--features-out` writes, unless more sites
+/// were asked for (`--limit`), to train a model that reads deeper.
 const FEATURE_ROWS: usize = 30;
 
 /// One query's listed rows with everything that ranked them, for
@@ -1388,7 +1397,7 @@ fn feature_rows(
                 row
             }),
     );
-    rows.truncate(FEATURE_ROWS);
+    rows.truncate(FEATURE_ROWS.max(hits.len()));
     json!({
         "line": q.line,
         "query": q.query,
@@ -1643,6 +1652,7 @@ mod tests {
             popularity: 0.9,
             whole: false,
             learned: None,
+            meant: false,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(

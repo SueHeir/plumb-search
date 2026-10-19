@@ -516,9 +516,11 @@ fn observe(
     } else {
         Vec::new()
     };
+    let mut meant = None;
     if typed.is_none() && !ops.any() {
         if let Some(pages) = &scoped_pages {
             pages.add_other_number(words, &found.hits, &mut raw_pages, 10)?;
+            meant = pages.add_meant(&found.meant, &mut raw_pages)?;
         }
     }
     let mut filtered: Vec<_> = raw_pages
@@ -568,10 +570,12 @@ fn observe(
         .iter()
         .map(|p| p.hit.page.url.clone())
         .collect::<Vec<_>>();
-    if cfg.learned && typed.is_none() && !ops.any() {
-        plumb_index::learned::reorder(
-            plumb_index::learned::Model::builtin(),
+    if typed.is_none() && !ops.any() {
+        plumb_index::learned::reorder_results(
+            cfg,
             words,
+            found.sites_ordered,
+            meant.as_deref(),
             &mut found.hits,
             &mut placed,
         );
@@ -1031,9 +1035,10 @@ mod tests {
         use clap::Parser;
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("sites");
-        let mut alpha = plumb_core::SiteRecord::new("alpha.org");
+        let mut alpha = plumb_core::site::new("alpha.org");
         alpha.title = Some("Alpha".into());
-        alpha.aliases.push("Alpha".into());
+        alpha.names.push("Alpha".into());
+        plumb_core::site::clean(&mut alpha);
         plumb_index::build_index(&index, &[alpha]).unwrap();
         let pages = dir.path().join("wikipedia-fr.tsv");
         let mut file = File::create(&pages).unwrap();

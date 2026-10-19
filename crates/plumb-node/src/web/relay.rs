@@ -129,7 +129,7 @@ async fn forward(State(state): State<AppState>, Path(peer): Path<String>, body: 
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{now_unix, SiteRecord};
+    use plumb_core::{now_unix, site};
     use plumb_net::oblivious::{seal_response, Gateway, Opened};
     use plumb_net::proto::{BucketRecord, BucketResponse};
     use plumb_private::sealed::{self, Target};
@@ -157,19 +157,19 @@ mod tests {
         let (asked, reply) = gateway.open(&request).unwrap();
         assert!(matches!(asked, Opened::Bucket(asked) if asked.bucket == 1234));
 
-        let mut usbank = SiteRecord::new("usbank.com");
+        let mut usbank = site::new("usbank.com");
         usbank.url = Some("https://www.usbank.com/".into());
-        let mut lying = SiteRecord::new("Chase.com");
+        let mut lying = site::new("Chase.com");
         lying.url = Some("https://chase-login.example/".into());
         let answer = BucketResponse {
             records: Some(vec![
                 BucketRecord {
-                    record: serde_json::to_string(&usbank).unwrap(),
+                    record: site::to_line(&usbank).unwrap(),
                     proof: None,
                     also: Vec::new(),
                 },
                 BucketRecord {
-                    record: serde_json::to_string(&lying).unwrap(),
+                    record: site::to_line(&lying).unwrap(),
                     proof: None,
                     also: Vec::new(),
                 },
@@ -184,7 +184,7 @@ mod tests {
         let sites = sealed::open(opener, &seal_response(reply, &answer).unwrap()).unwrap();
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0].url.as_deref(), Some("https://www.usbank.com/"));
-        assert_eq!(sites[1].domain, "chase.com");
+        assert_eq!(sites[1].id, "chase.com");
         assert_eq!(sites[1].url, None, "a URL off the site's own domain");
 
         // Keys of another node, or expired ones, are refused.

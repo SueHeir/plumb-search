@@ -282,22 +282,22 @@ mod tests {
     fn a_build_past_the_limit_completes_and_the_old_searcher_keeps_its_bytes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("index");
-        let mut protected = plumb_core::SiteRecord::new("protected.example");
+        let mut protected = plumb_core::site::new("protected.example");
         protected.title = Some("Protected Search".into());
         crate::build_index(&path, &[protected]).unwrap();
         let old = crate::Searcher::open(&path).unwrap();
         let baseline = directory_bytes(root.path()).unwrap();
         let budget = StorageBudget::open(root.path(), baseline + 64 * 1024).unwrap();
-        let records: Vec<_> = (0..2000)
+        let sites: Vec<_> = (0..2000)
             .map(|i| {
-                let mut record = plumb_core::SiteRecord::new(format!("fresh-{i}.example"));
-                record.title = Some(format!("Fresh Index Content {i}"));
-                record.description = Some(format!("Unique tokens for domain {i} {}", i * 7919));
-                record
+                let mut site = plumb_core::site::new(format!("fresh-{i}.example"));
+                site.title = Some(format!("Fresh Index Content {i}"));
+                site.about = Some(format!("Unique tokens for domain {i} {}", i * 7919));
+                site
             })
             .collect();
         // The limit is a target: the build goes past it, and crawls pause.
-        crate::build_index_with_budget(&path, &records, Some(budget.clone())).unwrap();
+        crate::build_index_with_budget(&path, &sites, Some(budget.clone())).unwrap();
         assert!(budget.status().backpressure);
         assert_eq!(budget.status().rejected_writes, 0);
         assert_eq!(

@@ -1,6 +1,6 @@
 # plumb-core
 
-The types and helpers every other Plumb crate shares: the site record (`SiteRecord`) and record set (`RecordSet`), text normalization, domain and site helpers, the popularity prior, bucket keys, the node's lock and storage helpers, and the small tables behind page sets and instant answers. It has no async runtime and no network client, so the browser's private search compiles it to WebAssembly.
+The types and helpers every other Plumb crate shares: a site as an item of Plumb's data format (`site`) and a node's sites together (`Sites`), text normalization, domain and site helpers, the popularity prior, bucket keys, the node's lock and storage helpers, and the small tables behind page sets and instant answers. It has no async runtime and no network client, so the browser's private search compiles it to WebAssembly.
 
 Part of [Plumb Search](../../README.md). See [the architecture](../../docs/architecture.md) for how the crates fit together.
 
@@ -36,8 +36,10 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 
 | Module | What it does |
 | --- | --- |
-| [lib.rs](src/lib.rs) | `SiteRecord`, `Signals`, `LinkText`, `Redirect`, `RecordSet`; `link_score`; domain helpers (`registrable_domain`, `canonical_domain`, `host_of`, `is_homepage_path`); text helpers (`normalize_text`, `joined`, `site_language`, `unmangled`); `read_jsonl` and `write_jsonl` |
-| [site_item.rs](src/site_item.rs) | A `SiteRecord` as an item of the data format, kind `site` (`to_item`, `from_item`), and the fields of a set of sites (`site_fields`) |
+| [lib.rs](src/lib.rs) | `Signals`, `LinkText`, `Redirect`, the values a site's parts are read as and set from; `link_score`; domain helpers (`registrable_domain`, `canonical_domain`, `host_of`, `is_homepage_path`); text helpers (`normalize_text`, `joined`, `site_language`, `unmangled`); `read_jsonl` and `write_jsonl` |
+| [site.rs](src/site.rs) | A site's stored item, read and set a part at a time (`signals`, `crawl_marks`, `link_texts` and the rest). Merging (`merge`, `merge_shared`), cleaning (`clean`), gone sites, bot checks, the item it sends (`to_item`) and takes in (`from_sent`), the line crawl batches carry (`to_line`, `from_line`), its country (`site_country`) and adult level |
+| [sites.rs](src/sites.rs) | `Sites`: sites' stored items by domain, merged on insert (`upsert`, `upsert_shared`, `update`, `split_subdomain_sites`, `take_back_official_site`, `into_sorted`). Each site is held as its stored line with its link score, read when asked for (`get`, `iter`) and written again when it changes, so a set takes little more memory than the lines it holds. `SiteList`: sites in order, as lines written as they are, and `lines_by_link_score`, the set's lines in that order without moving them, which compaction writes; and `sort_by_link_score` for items |
+| [site_item.rs](src/site_item.rs) | The rules a site's item keeps, kind `site`: the fields of a set of sites (`site_fields`), what makes text and addresses fit for an item, and reading a line's domain and crawl time without reading it whole (`crawl_of_line`) |
 | [subsites.rs](src/subsites.rs) | Subdomains that are sites of their own (`SUBDOMAIN_SITES`, `UMBRELLA_DOMAINS`), the built-in site rules with the Public Suffix List in [data/](data/public_suffix_list.dat), and `use_site_rules` to swap in signed ones |
 | [keys.rs](src/keys.rs) | Bucket keys: how a search asks for sites without saying what it looks for |
 | [kinds.rs](src/kinds.rs) | Kinds of site from Wikidata ("bank", "airline"), plurals and generic kinds |
@@ -72,48 +74,49 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 | --- | --- |
 | [locks.rs](src/locks.rs) | `Locked` and `RwLocked`: take a std lock whatever happened to its last holder |
 | [storage.rs](src/storage.rs) | The storage budget and the write helpers that charge it |
+| [stored.rs](src/stored.rs) | A site as a node keeps it on disk (records file, journal, inbox, bucket table): every read and write of those goes through `read_item`, `write_item`, `item_as_line`, `head` and `stored::item`, so their shape can change in one place. A line is the site's stored item, written as it is; versions up to 0.4 wrote a record's JSON, which is still read, so a file can hold both. `record_json` is the record's JSON of a line, which `/plumb/fill/1` sends. [stored/old_record.rs](src/stored/old_record.rs) holds that old record, serde only, until the last reader and writer of it go |
 | [oblivious.rs](src/oblivious.rs) | The asker's half of sealed bucket requests (feature `oblivious`) |
 
 ## How it works
 
-### The site record
+### A site
 
-Plumb keeps one `SiteRecord` per site, keyed by its registrable domain in lowercase ASCII (punycode for international names). A record holds:
+Plumb keeps one item of kind `site` per site ([site.rs](src/site.rs)), its id the registrable domain in lowercase ASCII (punycode for international names). It holds:
 
-- **Page fields** from the latest homepage crawl: `url`, `title`, `description`, `headings`, `body_text`, `terms`, `key_pages`, `links_to`, `language`, `search_url`.
-- **Names**: `aliases` and `link_texts` (the words other sites link to it with).
-- **What Wikidata and Wikipedia say**: `country`, `kinds`, `about`, `intro`, and `summary` for a well-known site with no words of its own.
-- **`signals`**: Tranco, harmonic-centrality and PageRank ranks, `linking_domains`, `official_site`, `sitelinks`, and checked facts.
-- **Crawl bookkeeping**: `crawled_at`, `crawl_attempted_at`, `crawl_failures`, `crawl_version`, `gone_at`, `redirect`.
+- **Page fields** from the latest homepage crawl: `url`, `title`, `about` (the description), `text`, `lang`, and the fields `headings`, `terms` and `search_url`; key pages and the sites it links to are its edges (`key_page`, `links_to`).
+- **Names**: `names` and the field `link_texts` (the words other sites link to it with).
+- **What Wikidata and Wikipedia say**: the field `wikidata` (country, what it is about, whether it is an official site, sitelinks), `kinds`, `intro`, and `summary` for a well-known site with no words of its own.
+- **Signals**: the field `ranks` (Tranco, harmonic centrality, PageRank), the weight (linking domains), and `fact_checks`; `signals` reads them all together.
+- **Crawl bookkeeping**: the fields `crawled`, `crawl` (last try, failures since a success, when it was found gone), `crawl_version` and `redirect`.
 - **`icon` and `news`**, which only travel between nodes and are never kept in a records file.
 
-Lists are capped: `MAX_LINK_TEXTS` (32), `MAX_ALIASES` (16), `MAX_HEADINGS` (8) of at most `MAX_HEADING_WORDS` (60) words, `MAX_TERMS` (100), `MAX_LINKS_TO` (50), `MAX_KINDS` (6), `MAX_KEY_PAGES` (6), and `MAX_TEXT_CHARS` (300) per title, description, alias or link text.
+Each part is read and set by a function of its own in `site` (`title` is the item's, `crawl_marks`, `set_crawl_marks`, `link_texts`, `set_link_texts` and the rest), so no caller writes a field's JSON. Lists are capped: `MAX_LINK_TEXTS` (32), `MAX_ALIASES` (16), `MAX_HEADINGS` (8) of at most `MAX_HEADING_WORDS` (60) words, `MAX_TERMS` (100), `MAX_LINKS_TO` (50), `MAX_KINDS` (6), `MAX_KEY_PAGES` (6), and `MAX_TEXT_CHARS` (300) per title, description, name or link text.
 
 > [!IMPORTANT]
-> Records travel between nodes in crawl batches, and released nodes read them. A new field must be optional (`#[serde(default)]`, skipped when empty), so older nodes keep reading records from newer ones.
+> Sites travel between nodes in crawl batches, and released nodes read them. A new field must be optional and left out when empty, so older nodes keep reading sites from newer ones.
 
-### Merging records
+### Merging sites
 
-`RecordSet` maps domains to boxed records. Boxing matters: a record is several hundred bytes even when nearly empty, and a hash table keeps room for about twice its entries. `RecordSet::upsert` makes the domain canonical (`canonical_domain`), drops page fields read off a bot check, and merges into any record already there with `SiteRecord::merge`:
+`Sites` keeps a node's sites by domain. `Sites::upsert` makes the domain canonical (`canonical_domain`), drops page fields read off a bot check, and merges into any site already there with `site::merge`:
 
-| Field | Rule |
+| Part | Rule |
 | --- | --- |
-| Page fields | From the record crawled more recently; the older one only fills gaps |
+| Page fields | From the site crawled more recently; the older one only fills gaps |
 | Ranks | Best (lowest) wins |
-| `linking_domains`, `sitelinks` | Larger count wins (sources overlap, so adding would double count) |
-| `official_site` | OR-ed |
-| Link texts, aliases, kinds | Unioned; link texts by their sets of linking sites |
-| `crawl_attempted_at` | Later wins, with the failure count of that attempt |
-| `redirect` | Kept only while no successful crawl came after it |
-| A gone record | Takes only ranks and crawl marks until a newer crawl reaches the site |
+| Linking domains, sitelinks | Larger count wins (sources overlap, so adding would double count) |
+| Official site | OR-ed |
+| Link texts, names, kinds | Unioned; link texts by their sets of linking sites |
+| Last try | Later wins, with the failure count of that attempt |
+| Redirect | Kept only while no successful crawl came after it |
+| A gone site | Takes only ranks and crawl marks until a newer crawl reaches the site |
 
-`RecordSet::upsert_shared` merges a crawl another node shared with `SiteRecord::merge_shared`: a field the shared crawl leaves empty (it carries no search box, and page text only from trusted crawlers) keeps what this node has.
+`Sites::upsert_shared` merges a crawl another node shared with `site::merge_shared`: a part the shared crawl leaves empty (it carries no search box, and page text only from trusted crawlers) keeps what this node has.
 
 Link texts count each linking site once. `LinkText::linkers` is a 64-bit set with one bit per linking site (`linker_bit`, FNV-1a with a splitmix64 finish, the same on every machine), so merging is a bitwise OR and a site seen twice never counts twice. `linker_count` estimates the count by linear counting: exact for one site, within about 10% up to 100, and `MAX_LINKER_ESTIMATE` (300) once all 64 bits are set.
 
 ### The popularity prior
 
-`link_score` gives each site a prior from 0 to 1 from its signals alone. `sort_by_link_score` and `RecordSet::into_sorted_vec` order by it, the seed builder keeps the best sites by it, and the index stores it with each site for ranking.
+`link_score` gives each site a prior from 0 to 1 from its signals alone. `sort_by_link_score` and `Sites::into_sorted` order by it, the seed builder keeps the best sites by it, and the index stores it with each site for ranking.
 
 ```text
 rank   = best of the Tranco, harmonic and PageRank ranks, as 1 - ln(rank) / ln(1e8)
@@ -135,7 +138,7 @@ score  = 0.75 * rank + 0.25 * links
 
 ### Bucket keys
 
-[keys.rs](src/keys.rs) lets a search ask other nodes, or a browser ask a node, for sites without sending the query. Every name a site goes by (domain label, title and its parts, aliases, its top `KEY_LINK_TEXTS` link texts) gives keys: each word and the whole name joined. A key falls in one of `BUCKETS` (16,384) buckets by `bucket_of`, a SHA-256 under `plumb-bucket-v1\0`. A node keeps the best `KEY_CAP` (32) sites of every key. A search fetches `BUCKETS_PER_SEARCH` (4) buckets, its own padded with random ones (`pick_buckets`), then keeps the sites that `matches` its keys and ranks them itself. `piece_of` cuts each bucket into `PIECES_PER_BUCKET` (4) pieces for private retrieval. `slim_record` and `lean_record` cut records down to what a bucket answer or a PIR table needs.
+[keys.rs](src/keys.rs) lets a search ask other nodes, or a browser ask a node, for sites without sending the query. Every name a site goes by (domain label, title and its parts, aliases, its top `KEY_LINK_TEXTS` link texts) gives keys: each word and the whole name joined. `site_keys` gives the keys of a site's stored item, which a node's index build files its buckets by. A key falls in one of `BUCKETS` (16,384) buckets by `bucket_of`, a SHA-256 under `plumb-bucket-v1\0`. A node keeps the best `KEY_CAP` (32) sites of every key. A search fetches `BUCKETS_PER_SEARCH` (4) buckets, its own padded with random ones (`pick_buckets`), then keeps the sites that `site_matches` its keys and ranks them itself. `piece_of` cuts each bucket into `PIECES_PER_BUCKET` (4) pieces for private retrieval. `slim_site` and `lean_site` cut a site's item down to what a bucket answer or a PIR table needs.
 
 > [!WARNING]
 > `bucket_of` and `piece_of` must give the same numbers on every node, in every browser and in every version. Changing them splits the network. The test `buckets_never_change` pins them.
@@ -167,10 +170,10 @@ plumb-net turns it on and adds the relay and the answering side; plumb-private t
 
 ## Using it
 
-- `SiteRecord::new`, `add_alias`, `add_kind`, `add_link_text`, `merge`; `RecordSet::upsert`, `upsert_shared`, `into_sorted_vec`.
+- `site::new`, `add_alias`, `add_kind`, `add_link_text`, `merge`; `Sites::upsert`, `upsert_shared`, `into_sorted`.
 - `link_score`, `sort_by_link_score`.
 - `normalize_text`, `joined`, `registrable_domain`, `canonical_domain`, `is_homepage_path`, `is_useful_anchor`.
-- `keys::record_keys`, `keys::query_keys`, `keys::pick_buckets`, `keys::bucket_of`.
+- `keys::site_keys`, `keys::query_keys`, `keys::pick_buckets`, `keys::bucket_of`.
 - `locks::{Locked, RwLocked}`; `storage::{StorageBudget, write_atomic, write_atomic_private, replace_file, remove_file, create_directory}`.
 - `read_jsonl` and `write_jsonl` for one JSON value per line.
 

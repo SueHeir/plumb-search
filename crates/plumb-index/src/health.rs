@@ -1303,6 +1303,7 @@ mod tests {
             popularity: 0.5,
             whole: true,
             learned: None,
+            meant: false,
         };
         let offer = page(
             "https://quick-meds.info/viagra/",
@@ -1612,6 +1613,7 @@ mod tests {
                 popularity: 0.5,
                 whole: false,
                 learned: Some(LearnedPlace::Before("clevelandclinic.org".to_string())),
+                meant: false,
             },
             at: 0,
             under: None,

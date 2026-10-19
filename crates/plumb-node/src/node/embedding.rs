@@ -136,7 +136,17 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             let embedder = load_embedder(&model_dir)?;
             let vectors = load_vectors_for(&vectors_path, &embedder)?;
             info!("search by meaning: {} site vectors loaded", vectors.len());
-            let meaning = Arc::new(MeaningIndex::new(embedder, vectors));
+            let mut meaning = MeaningIndex::new(embedder, vectors);
+            for pages in &inner.config.page_vectors {
+                // Sites are still searched by meaning without them.
+                if let Err(err) = meaning.load_pages(pages) {
+                    warn!(
+                        "search by meaning: no page vectors from {}: {err:#}",
+                        pages.display()
+                    );
+                }
+            }
+            let meaning = Arc::new(meaning);
             inner.meaning.set(Arc::clone(&meaning));
             inner.set_meaning_work(None);
             meaning

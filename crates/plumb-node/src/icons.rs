@@ -17,8 +17,9 @@ use std::path::PathBuf;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use plumb_core::SiteRecord;
+use plumb_core::site;
 use plumb_crawl::{normalize_icon, CrawlOutcome, CrawlResult};
+use plumb_format::Item;
 
 /// Icon files larger than this are not shown.
 const MAX_ICON_BYTES: u64 = 16 * 1024;
@@ -142,9 +143,9 @@ pub(crate) fn to_shared(icon: &[u8]) -> Option<String> {
     (text.len() <= MAX_SHARED_ICON_CHARS).then_some(text)
 }
 
-/// Puts each fetched homepage's icon on its record, for sharing a crawl
-/// with the network (see [`SiteRecord::icon`]).
-pub(crate) fn attach(records: &mut [SiteRecord], results: &[CrawlResult]) {
+/// Puts each fetched homepage's icon on its site ([`site::icon`]), for
+/// sharing a crawl with the network.
+pub(crate) fn attach(sites: &mut [Item], results: &[CrawlResult]) {
     let icons: HashMap<&str, &[u8]> = results
         .iter()
         .filter_map(|result| match &result.outcome {
@@ -152,9 +153,9 @@ pub(crate) fn attach(records: &mut [SiteRecord], results: &[CrawlResult]) {
             _ => None,
         })
         .collect();
-    for record in records {
-        if let Some(icon) = icons.get(record.domain.as_str()) {
-            record.icon = to_shared(icon);
+    for site in sites {
+        if let Some(icon) = icons.get(site.id.as_str()) {
+            site::set_icon(site, to_shared(icon));
         }
     }
 }
@@ -242,13 +243,13 @@ pub(crate) mod tests {
                 icon,
             }),
         };
-        let mut records = vec![SiteRecord::new("a.com"), SiteRecord::new("b.com")];
+        let mut sites = vec![site::new("a.com"), site::new("b.com")];
         attach(
-            &mut records,
+            &mut sites,
             &[page("a.com", Some(icon.clone())), page("b.com", None)],
         );
-        let shared = records[0].icon.as_deref().expect("shared");
-        assert!(records[1].icon.is_none());
+        let shared = site::icon(&sites[0]).expect("shared");
+        assert!(site::icon(&sites[1]).is_none());
         let taken = from_shared(shared).expect("taken in");
         assert!(taken.starts_with(b"\x89PNG"));
         assert_eq!(from_shared("not base64!"), None);

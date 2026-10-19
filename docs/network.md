@@ -25,10 +25,10 @@ Each day every node is assigned a random eighth of all sites, by a hash of the d
 
 ```mermaid
 flowchart LR
-  crawler["Crawling node"] -->|"signed batches<br/>plumb/batches/1, /plumb/batch/1"| node["Your node"]
+  crawler["Crawling node"] -->|"signed batches<br/>plumb/batches/2, /plumb/batch/2"| node["Your node"]
   trusted["Trusted node<br/>plumbsearch.org by default"] -->|"crawled sites, page files, trust list<br/>/plumb/fill/1, /plumb/pages/1, /plumb/trust/1"| node
   anynode["Any node"] -->|"signed sets, reports, leads<br/>/plumb/sets/1, gossip"| node
-  node -->|"sealed bucket requests<br/>/plumb/oblivious/1"| relay["Relay node"]
+  node -->|"sealed bucket requests<br/>/plumb/oblivious/2"| relay["Relay node"]
   relay -->|"sealed request, from the relay"| answerer["Answering node"]
   answerer -->|"sealed bucket with proofs"| relay
   relay -->|"sealed answer"| node
@@ -43,12 +43,12 @@ Every protocol and gossip topic plumb-net defines, from [proto.rs](../crates/plu
 | --- | --- | --- | --- | --- |
 | `/plumb/kad/1.0.0` | Kademlia | Where other nodes are | libp2p's | Refreshed every 5 minutes |
 | `/plumb/id/1.0.0` | Identify | Addresses, protocols, agent `plumb/<version>` | libp2p's | Pushes address changes |
-| `plumb/batches/1` | Gossip | A new batch's signed header | 16 KiB a message | Checked before it is passed on |
+| `plumb/batches/2` | Gossip | A new batch's signed header | 16 KiB a message | Checked before it is passed on |
 | `plumb/reports/1` | Gossip | A popularity report | 16 KiB a message, 1,024 B a report | 200,000 held a week |
 | `plumb/leads/1` | Gossip | A signed lead | 16 KiB a message | 50 a day and 500 held per reporter |
-| `/plumb/batch/1` | Request | A batch by id, or the headers since an epoch | 4 KiB / 20 MiB | 4 batch and report requests answered at once; 10,000 headers a list |
-| `/plumb/bucket/1` | Request | One bucket's records with proofs, or busy | 1 KiB / 64 MiB | 8 at once free plus 8 for tokens; 120 a minute per source |
-| `/plumb/oblivious/1` | Request | Relay keys; sealed requests passed on and answered | 8 KiB / 48 MiB + 1 KiB | 32 passed on at once |
+| `/plumb/batch/2` | Request | A batch by id, or the headers since an epoch | 4 KiB / 20 MiB | 4 batch and report requests answered at once; 10,000 headers a list |
+| `/plumb/bucket/2` | Request | One bucket's sites, as items, with proofs, or busy | 1 KiB / 64 MiB | 8 at once free plus 8 for tokens; 120 a minute per source |
+| `/plumb/oblivious/2` | Request | Relay keys; sealed requests passed on and answered | 8 KiB / 48 MiB + 1 KiB | 32 passed on at once |
 | `/plumb/report/1` | Request | Hand in a report, or list a week's | 8 KiB / 64 MiB | 50,000 reports a list |
 | `/plumb/credits/1` | Request | Blinded tokens to sign, or the balance | 16 KiB / 16 KiB | 64 tokens a request |
 | `/plumb/fill/1` | Request | Sites from the answerer's ranked list | 1 KiB / 64 MiB | 2 at once, 6 a minute per node; 1,000 sites a page (5,000 with `all`) |
@@ -58,7 +58,7 @@ Every protocol and gossip topic plumb-net defines, from [proto.rs](../crates/plu
 | `/plumb/profile/1` | Request | A searcher's profile between linked nodes | 8 MiB / 8 MiB | 4 at once |
 | `/plumb/leads/1` | Request | The newest leads the answerer holds | 64 B / 16 MiB | 2,000 leads a list |
 
-A node that does not answer searches (`--crawl-only`) offers neither `/plumb/bucket/1` nor `/plumb/oblivious/1`, and its own swarm never asks for a bucket: bucket requests come from throwaway identities (see [Network search](#network-search)).
+A node that does not answer searches (`--crawl-only`) offers neither `/plumb/bucket/2` nor `/plumb/oblivious/2`, and its own swarm never asks for a bucket: bucket requests come from throwaway identities (see [Network search](#network-search)).
 
 ## Getting connected
 
@@ -87,11 +87,12 @@ By default a node holds its list of sites steady: its crawls refresh the sites i
 
 ## Crawl batches
 
-[batch.rs](../crates/plumb-net/src/batch.rs), [hash.rs](../crates/plumb-net/src/hash.rs). After each crawl batch of 500 homepages (`CRAWL_BATCH_SIZE` in plumb-node), the node signs the records it produced and publishes them:
+[batch.rs](../crates/plumb-net/src/batch.rs), [hash.rs](../crates/plumb-net/src/hash.rs). After each crawl batch of 500 homepages (`CRAWL_BATCH_SIZE` in plumb-node), the node signs the sites it crawled, each as the item it sends of the site, and publishes them:
 
-- A batch holds up to 4,096 lines (`MAX_BATCH_RECORDS`), each at most 16 KiB (`MAX_RECORD_BYTES`), at most 16 MiB in all (`MAX_BATCH_BYTES`). Each line is kept as the exact JSON bytes that were hashed.
-- The signed header holds the crawler's public key, the epoch, its share, the time made, the line count and the Merkle root over the lines (SHA-256 with RFC 6962 leaf and node prefixes). It is signed over fixed-width fields after the context `plumb-batch-v1\0`, and the batch id is the hash of those bytes.
-- A site's icon and recent headlines travel on lines of their own (`IconLine`, `NewsLine`), which older nodes skip.
+- A batch holds up to 4,096 lines (`MAX_BATCH_RECORDS`), each at most 16 KiB (`MAX_RECORD_BYTES`), at most 16 MiB in all (`MAX_BATCH_BYTES`). Each record is a `site` item of the data format ([site_item.rs](../crates/plumb-core/src/site_item.rs)) on one line, kept as the exact JSON bytes that were hashed.
+- The signed header holds the crawler's public key, the epoch, its share, the time made, the line count and the Merkle root over the lines (SHA-256 with RFC 6962 leaf and node prefixes). It is signed over fixed-width fields after the context `plumb-batch-v2\0`, and the batch id is the hash of those bytes.
+- A site's icon and recent headlines travel on lines of their own (`IconLine`, `NewsLine`).
+- Nodes before v0.4.0 sign batches under `plumb-batch-v1\0`, with each site in its own JSON, over `plumb/batches/1`, `/plumb/batch/1`, `/plumb/bucket/1` and `/plumb/oblivious/1`. The two versions neither exchange batches nor answer each other's searches, and a node removes the version 1 batches and bucket answers it holds when it starts.
 
 A node refuses a batch whose epoch is more than 7 days old (`MAX_BATCH_AGE_EPOCHS`) or more than a day ahead, whose time is more than an hour ahead, whose count or size is out of bounds, whose share is over the cap, or whose lines do not hash to the root.
 
@@ -119,9 +120,9 @@ sequenceDiagram
   participant N as Your node
   participant P as plumb-node
   Note over C: crawls 500 homepages<br/>assigned to it today
-  C->>G: SignedHeader on plumb/batches/1
+  C->>G: SignedHeader on plumb/batches/2
   G->>N: SignedHeader, checked at every hop
-  N->>G: Get id on /plumb/batch/1, from the node that passed it on or the crawler
+  N->>G: Get id on /plumb/batch/2, from the node that passed it on or the crawler
   G-->>N: Batch
   Note over N: checks signature, epoch, count, root<br/>keeps what accept_batch allows<br/>holds it in net/batches/
   Note over N: agreement waits for a second<br/>counting crawler, or none if trusted
@@ -133,7 +134,7 @@ sequenceDiagram
 - A node fetches at most 16 batches at once (`MAX_FETCHES`), 2 from any one node, and keeps at most 50,000 batch ids waiting.
 - A node answers at most 4 batch and report requests of other nodes at once (`MAX_LISTS_SERVING`); more get an empty answer.
 - When two nodes meet, each asks the other for the headers of the batches it holds from the last 3 epochs (`CATCH_UP_EPOCHS`) and fetches what it missed. Every 30 minutes (`RELIST_MINUTES`) a node asks the nodes it is connected to again for this epoch's and the last epoch's headers.
-- Records agreement releases reach plumb-node as a `RecordDelivery`. It appends them to `DATA/net/inbox.jsonl`, folds the inbox into its records file through the same journal crawls use, and rebuilds its index once 2,000 records came in (`REBUILD_AFTER_RECORDS`), at most every 30 minutes. A delivery not yet saved is sent again after a restart.
+- The sites agreement releases reach plumb-node as a `RecordDelivery`, each as the stored item the node keeps of it. It appends them to `DATA/net/inbox.jsonl`, folds the inbox into its records file through the same journal crawls use, and rebuilds its index once 2,000 records came in (`REBUILD_AFTER_RECORDS`), at most every 30 minutes. A delivery not yet saved is sent again after a restart.
 - A node keeps the batches it holds for 35 days (`RETAIN_EPOCHS`, `--keep-batches-days`) in `DATA/net/batches/`, serves them to others, and uses them to prove its search answers. With a storage limit, it keeps 14 days unless `--keep-batches-days` sets another number, and other crawlers' batches may take at most 20% of the limit, oldest out first; its own batches always stay.
 - `--publish-records PATH` also publishes the homepages crawled into another records file (such as one `plumb-tools crawl` fills): every 30 minutes, those crawled since the last time and within the last 6 days.
 
@@ -180,7 +181,7 @@ When a trusted node connects, the node asks it on `/plumb/trust/1` which nodes i
 
 ## Filling free space
 
-A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). It takes at most 50,000 a round and stops at:
+A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). An answer carries each site as its record's JSON, as every version has, and the asker keeps the stored item of what it accepts of it. It takes at most 50,000 a round and stops at:
 
 - 90% of the storage limit (`FILL_UP_TO_PERCENT`), so its own crawling keeps room;
 - the day's download limit;
@@ -249,7 +250,7 @@ sequenceDiagram
   participant Q as Searching node, throwaway identity
   participant R as Relay, picked at random
   participant T as Answering node
-  Q->>R: Keys for T on /plumb/oblivious/1
+  Q->>R: Keys for T on /plumb/oblivious/2
   R->>T: OwnKeys, over the relay's own connection
   T-->>R: SignedKeys, signed with the node key of T
   Note over R: hands the same keys to every<br/>asker for 10 minutes
@@ -268,7 +269,7 @@ sequenceDiagram
 - Keys use HPKE with X25519, HKDF-SHA256 and AES-128-GCM or ChaCha20-Poly1305 (the `ohttp` crate). The answering node makes them in memory, never on disk, and makes a new one daily; a key expires two days after it was made. The keys are signed with the node key, so a relay cannot swap in its own.
 - Every node that answers searches also relays, at most 32 requests at once. A relay that cannot reach the target gets one stand-in (`RELAY_TRIES`). Requests go only to nodes that take them sealed once there are 2 such nodes; a request goes straight to a node only when no other node can relay it, and `direct` counts those.
 - What is sealed is Plumb's own CBOR bucket request and answer (or a popularity report), not Binary HTTP, so this is RFC 9458's encapsulation rather than full Oblivious HTTP. The asker's half is `plumb_core::oblivious`, which also builds for WebAssembly: `NetHandle::oblivious_keys` and `NetHandle::oblivious_forward` let a node's web server relay sealed requests from private search in the browser ([private-search.md](private-search.md)).
-- **Checking answers.** For every site the answering node holds a signed crawl of, it attaches a record proof: the signed header, the record and its Merkle path, plus a second agreeing crawler's proof when it has one (`also`). The asker checks the signature, the path and the assignment. An answer with a forged proof is dropped whole. An expired proof leaves the site unverified. A site without a proof is shown as unsigned, its link always goes to the domain it names, and its popularity signals are the worst any node reported. Only the first 20,000 records of an answer are read (`MAX_BUCKET_RECORDS`).
+- **Checking answers.** An answer carries each site as its item, one line of JSON. For every site the answering node holds a signed crawl of, it attaches a record proof: the signed header, the record and its Merkle path, plus a second agreeing crawler's proof when it has one (`also`). The asker checks the signature, the path and the assignment. An answer with a forged proof is dropped whole. An expired proof leaves the site unverified. A site without a proof is shown as unsigned, its link always goes to the domain it names, and its popularity signals are the worst any node reported. Only the first 20,000 records of an answer are read (`MAX_BUCKET_RECORDS`).
 - **Confirmed.** A site is confirmed once signed crawls from 2 crawlers this node counts agree, whether one answer carried both or two answers carried one each. Crawls signed by a trusted node are taken whole.
 - **Ranking locally.** The asker keeps the sites that match the query's keys, builds a small temporary index of them and ranks them with its own ranking (see [search.md](search.md)). Signed crawls of sites it holds also fill in what its own records lack.
 

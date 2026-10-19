@@ -1335,22 +1335,20 @@ pub const FIRST_SITES: u64 = 50_000;
 pub const SITES_A_PART: u64 = 200_000;
 
 /// Writes the sites of `args.records` as items of kind `site`
-/// ([`SiteRecord::to_item`]), best-ranked first as nodes fill from them:
-/// the first [`FIRST_SITES`] in a part a node sets up with, then
+/// ([`plumb_core::site::to_item`]), best-ranked first as nodes fill from
+/// them: the first [`FIRST_SITES`] in a part a node sets up with, then
 /// [`SITES_A_PART`] a part. Sites the node judged
-/// gone are left out, and so is a record too big to be an item, counted
+/// gone are left out, and so is a site too big to be an item, counted
 /// in [`Written::left_out`].
-///
-/// [`SiteRecord::to_item`]: plumb_core::SiteRecord::to_item
 pub fn sites(args: &SitesArgs) -> Result<Written> {
     ensure!(
         is_set_name(&args.name),
         "{:?} is not <scope>/<name>",
         args.name
     );
-    let records = plumb_node::records::load_records(&args.records)?;
+    let sites = plumb_node::records::load_sites(&args.records)?;
     ensure!(
-        !records.is_empty(),
+        !sites.is_empty(),
         "{} holds no sites",
         args.records.display()
     );
@@ -1360,13 +1358,14 @@ pub fn sites(args: &SitesArgs) -> Result<Written> {
     manifest.insert("generation".into(), json!(now()));
     manifest.insert("license".into(), json!(args.license));
     manifest.insert("attribution".into(), json!(args.attribution));
-    let part_ends: Vec<u64> = (0..=records.len() as u64 / SITES_A_PART)
+    let part_ends: Vec<u64> = (0..=sites.len() as u64 / SITES_A_PART)
         .map(|n| FIRST_SITES + n * SITES_A_PART)
         .collect();
-    let items = plumb_node::records::sorted_by_link_score(&records)
+    let items = sites
+        .into_sorted()
         .into_iter()
-        .filter(|record| record.gone_at.is_none())
-        .map(|record| record.to_item().ok());
+        .filter(|site| plumb_core::site::crawl_marks(site).gone.is_none())
+        .map(|site| plumb_core::site::to_item(&site).ok());
     write_set(
         items,
         plumb_core::site_item::site_fields(),
@@ -2106,17 +2105,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (file, dir) = (temp.path().join("records.jsonl"), temp.path().join("set"));
         let site = |domain: &str, tranco: u32| {
-            let mut record = plumb_core::SiteRecord::new(domain);
-            record.url = Some(format!("https://{domain}/"));
-            record.title = Some(format!("{domain} home"));
-            record.signals.tranco_rank = Some(tranco);
-            record.crawled_at = Some(1_791_605_520);
-            record
+            let mut site = plumb_core::site::new(domain);
+            site.url = Some(format!("https://{domain}/"));
+            site.title = Some(format!("{domain} home"));
+            crate::test_sites::ranks(&mut site, |signals| signals.tranco_rank = Some(tranco));
+            plumb_core::site::set_crawled(&mut site, Some(1_791_605_520));
+            site
         };
         let mut gone = site("gone.example", 1);
-        gone.gone_at = Some(1_791_000_000);
+        let marks = plumb_core::site::CrawlMarks {
+            gone: Some(1_791_000_000),
+            ..plumb_core::site::CrawlMarks::default()
+        };
+        plumb_core::site::set_crawl_marks(&mut gone, marks);
         let mut too_big = site("big.example", 5);
-        too_big.aliases = (0..16)
+        too_big.names = (0..16)
             .map(|i| format!("{i} {}", "x".repeat(1_100)))
             .collect();
         let records = [
@@ -2126,7 +2129,7 @@ mod tests {
             too_big,
             site("second.example", 40),
         ];
-        plumb_core::write_jsonl(&file, &records).unwrap();
+        crate::test_sites::write(&file, &records);
         let args = SitesArgs {
             records: file,
             name: "plumb/sites".into(),
@@ -2148,10 +2151,46 @@ mod tests {
             domains,
             ["first.example", "second.example", "third.example"]
         );
-        assert_eq!(
-            plumb_core::SiteRecord::from_item(&items[0]).unwrap(),
-            site("first.example", 2)
-        );
+        let first = plumb_core::site::to_item(&site("first.example", 2)).unwrap();
+        assert_eq!(items[0], first);
+    }
+
+    #[test]
+    fn a_set_of_sites_holds_the_items_its_sites_send() {
+        let temp = tempfile::tempdir().unwrap();
+        let (file, dir) = (temp.path().join("records.jsonl"), temp.path().join("set"));
+        let mut sites = crate::test_sites::sites();
+        let mut too_big = plumb_core::site::new("big.example");
+        crate::test_sites::ranks(&mut too_big, |signals| signals.tranco_rank = Some(5));
+        too_big.names = (0..16)
+            .map(|i| format!("{i} {}", "x".repeat(1_100)))
+            .collect();
+        sites.push(too_big);
+        crate::test_sites::write(&file, &sites);
+        let args = SitesArgs {
+            records: file.clone(),
+            name: "plumb/sites".into(),
+            out: dir.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        let written = super::sites(&args).unwrap();
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        let (_, items) = plumb_node::sets::read_items(&dir).unwrap();
+
+        // The items of the sites loaded, best first, the gone left out.
+        let loaded = plumb_node::records::load_sites(&file).unwrap();
+        let sent: Vec<_> = loaded
+            .by_link_score()
+            .filter(|site| plumb_core::site::crawl_marks(site).gone.is_none())
+            .map(|site| plumb_core::site::to_item(&site).ok())
+            .collect();
+        let expected: Vec<Item> = sent.iter().flatten().cloned().collect();
+        assert_eq!(written.items, expected.len() as u64);
+        assert_eq!(written.left_out, 1);
+        assert_eq!(items, expected);
     }
 
     #[test]

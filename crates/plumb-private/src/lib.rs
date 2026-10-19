@@ -6,6 +6,7 @@
 //! ([`plumb_core::keys`]), pads them with random buckets, fetches those
 //! buckets of sites from the node (`GET /api/buckets/{table}/{bucket}`),
 //! keeps the sites that match the keys and ranks them itself ([`rank`]).
+//! It holds each site as its item ([`plumb_core::site`]), as a node does.
 //! The node only learns [`BUCKETS_PER_SEARCH`] bucket numbers, each shared
 //! by a few hundred keys. `docs/private-search.md` has the details and the
 //! build steps.
@@ -20,8 +21,9 @@ pub mod sealed;
 mod browser;
 
 pub use plumb_core::keys::BUCKETS_PER_SEARCH;
-use plumb_core::keys::{matches, query_keys};
-use plumb_core::SiteRecord;
+use plumb_core::keys::{query_keys, site_matches};
+use plumb_core::site::{self, Item};
+use plumb_core::stored::old_record;
 pub use rank::{rank, Options, Ranked};
 use sha2::{Digest, Sha256};
 
@@ -30,35 +32,49 @@ pub const LIMIT: usize = 10;
 /// Largest bucket answer accepted, in bytes.
 pub const MAX_BUCKET_BYTES: usize = 16 << 20;
 
-/// The sites of `answers` (one list of records per bucket answer) that
+/// The sites of `answers` (one list of sites per bucket answer) that
 /// match `keys`, each once ([`rank::merge_copies`]), ranked for `query`.
 pub fn search(
     query: &str,
     keys: &[String],
-    answers: Vec<Vec<SiteRecord>>,
+    answers: Vec<Vec<Item>>,
     options: &Options,
     limit: usize,
 ) -> Vec<Ranked> {
-    let found: Vec<SiteRecord> = answers
+    let found: Vec<Item> = answers
         .into_iter()
         .flatten()
-        .filter(|site| matches(site, keys))
+        .filter(|site| site_matches(site, keys))
         .collect();
     rank(query, &rank::merge_copies(found), options, limit)
 }
 
-/// Reads one bucket answer: a JSON list of site records. Records that do
-/// not read are skipped.
-pub fn read_bucket(json: &str) -> Result<Vec<SiteRecord>, String> {
+/// Reads one bucket answer from a node: a JSON list of sites, each its
+/// item trimmed to what finding and ranking it needs
+/// ([`plumb_core::keys::slim_site`]). Sites that do not read are skipped.
+///
+/// A node of an earlier version answered with trimmed records' JSON
+/// instead, and a browser keeps a bucket for good at its address, which
+/// stays the same for as long as the node serves the same index, upgraded
+/// or not. So a site that is a record's JSON (one without an `id`) is read
+/// too, as the record's item ([`old_record::into_item`]).
+pub fn read_bucket(json: &str) -> Result<Vec<Item>, String> {
     if json.len() > MAX_BUCKET_BYTES {
         return Err("a bucket was too large".into());
     }
     let values: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|_| "a bucket did not read".to_string())?;
-    Ok(values
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect())
+    Ok(values.into_iter().filter_map(read_site).collect())
+}
+
+/// A site of a bucket answer, as [`read_bucket`] reads it: an item, as a
+/// node takes one from another ([`site::from_sent`]), or a record's JSON.
+fn read_site(value: serde_json::Value) -> Option<Item> {
+    if value.get("id").is_some() {
+        let item: Item = serde_json::from_value(value).ok()?;
+        return site::from_sent(&item).ok();
+    }
+    Some(old_record::into_item(serde_json::from_value(value).ok()?))
 }
 
 /// The random numbers that pick a search's padding buckets: the same for

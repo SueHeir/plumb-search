@@ -122,6 +122,7 @@ It prints `ok` with each expected page's title (to see it is the page the search
 | `--profiles` | Count the profile or listing shown above the results ("mrbeast youtube") as the first result |
 | `--explain` | For each miss, show how the first result and the expected one scored |
 | `--recall` | Find where each missed answer was lost before ranking: not indexed, how far down the word or meaning candidates, or never looked at |
+| `--candidates-out FILE` | Write each query's deep site candidates as JSON lines, with the raw signals a first stage could score them by: which query words each field has, field lengths, how rare each word is per field, link score and closeness. `--candidates-depth N` (500) sets how far down today's first stage, the sites with every main word and the sites nearest in meaning it goes. Only queries that expect a site |
 | `--show N` | Print the first N results of every query |
 | `--half tune\|held-out` | Measure one half only |
 
@@ -138,7 +139,7 @@ plumb-tools eval --index DIR --pages wikipedia-en.tsv.gz \
 | File | Variants |
 | --- | --- |
 | [rank_knobs.tsv](sweeps/rank_knobs.tsv) | Ranking knobs one at a time, a step either side of the default |
-| [learned.tsv](sweeps/learned.tsv) | The learned ranking against the hand-made order (`hand`), and switches it depends on |
+| [learned.tsv](sweeps/learned.tsv) | The learned ranking against the hand-made order (`hand`), with the site model (`sites`), and switches it depends on |
 | [meaning.tsv](sweeps/meaning.tsv) | Search-by-meaning knobs, for fitting them to another embedding model (needs `--vectors`, `--model`) |
 | [partial.tsv](sweeps/partial.tsv) | How close in meaning a site lacking some of a longer query's words must be to stay listed (needs `--vectors`, `--model`) |
 
@@ -155,7 +156,7 @@ plumb-tools train-rank --features features.jsonl --features features-typo.jsonl 
   --out crates/plumb-index/src/learned_model.json
 ```
 
-- `--features-out` writes one JSON line per search (`suite`, `half`, `query`, `searched`, `expected` and the listed `rows` with their signals) in the hand-made order, so the model never trains on its own output. It cannot be combined with `--sweep` or `--facts`.
+- `--features-out` writes one JSON line per search (`suite`, `half`, `query`, `searched`, `expected` and the listed `rows` with their signals) in the hand-made order, so the model never trains on its own output. It writes the first 30 rows, or every site `--limit` asks for when that is more (`train-rank --rows`). It cannot be combined with `--sweep` or `--facts`.
 - `train-rank` trains on the tune half and prints, for each file and half, top-1, top-3 and MRR of the expected answers within the first ten rows, before and after.
 - A row can also carry an LLM's `grade` of how well it meets the search, 0 to 3; `train-rank` then reports NDCG@10 too, an expected answer counting as grade 3. A search marked `"half": "test"` is only judged, never trained on. The graded searches are not in this repository.
 - `--folds K` also trains on all but one of K parts of the training half and judges the part left out, in turn, to choose options without looking at the held-out half. `--learner net` trains a small neural ranker instead of trees; `--objective` picks the loss (`lambda-rank`, `lambda-loss` or `softmax`).

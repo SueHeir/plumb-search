@@ -104,6 +104,7 @@ impl FrozenBackend {
         let query = applied.as_deref().unwrap_or(query);
         let mut found = pages.search(query, DISPLAY_CANDIDATES)?;
         pages.add_other_number(query, &results.hits, &mut found, DISPLAY_CANDIDATES)?;
+        let meant = pages.add_meant(&results.meant, &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));
         if rank.add_named_site {
             add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));
@@ -138,14 +139,14 @@ impl FrozenBackend {
             })?;
         }
         results.pages = place_pages(query, &results.hits, found);
-        if rank.learned {
-            plumb_index::learned::reorder(
-                plumb_index::learned::Model::builtin(),
-                query,
-                &mut results.hits,
-                &mut results.pages,
-            );
-        }
+        plumb_index::learned::reorder_results(
+            rank,
+            query,
+            results.sites_ordered,
+            meant.as_deref(),
+            &mut results.hits,
+            &mut results.pages,
+        );
         plumb_index::asked_state_first(query, &mut results.hits);
         let town = |name: &str| {
             self.sites
@@ -519,7 +520,7 @@ mod tests {
     use plumb_core::article::Article;
     use plumb_core::facts::{Fact, FactKind};
     use plumb_core::packages::PackageInfo;
-    use plumb_core::SiteRecord;
+    use plumb_core::site;
     use plumb_index::pages::{build_page_index, DOCS_SET};
     use tower::ServiceExt;
 
@@ -528,11 +529,10 @@ mod tests {
         let index = dir.path().join("sites");
         plumb_index::build_index(
             &index,
-            &[SiteRecord {
-                domain: "python.org".into(),
+            &[site::Item {
                 title: Some("Python".into()),
-                description: Some("Python programming language".into()),
-                ..SiteRecord::default()
+                about: Some("Python programming language".into()),
+                ..site::new("python.org")
             }],
         )
         .unwrap();
@@ -736,11 +736,10 @@ mod tests {
         // fourth while this server called every word common.
         let (dir, _) = fixture();
         let index = dir.path().join("health");
-        let site = |domain: &str, title: &str| SiteRecord {
-            domain: domain.into(),
+        let site = |domain: &str, title: &str| site::Item {
             title: Some(title.into()),
-            description: Some(format!("{title} health information")),
-            ..SiteRecord::default()
+            about: Some(format!("{title} health information")),
+            ..site::new(domain)
         };
         plumb_index::build_index(
             &index,

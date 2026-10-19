@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// The text a node embeds of `site`, read from the records file as the
+/// line [`seeded_dir`] writes it.
+fn text_of(site: &Item) -> String {
+    plumb_embed::site_text(&plumb_core::stored::read_record_json(&old_line(site)).unwrap())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_by_meaning_embeds_sites_in_the_background() {
     let dir = seeded_dir();
@@ -24,9 +30,9 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     // Every site with text gets a vector, saved for the next start.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let with_text = fixture_records()
+    let with_text = fixture_sites()
         .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .filter(|r| !text_of(r).is_empty())
         .count();
     while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) < with_text {
         assert!(std::time::Instant::now() < deadline, "vectors not saved");
@@ -116,17 +122,15 @@ async fn takes_site_vectors(as_set: bool) {
 
     // The trusted node's vectors: one for a site's very text, one for
     // other text, one for a site this node does not know.
-    let records = fixture_records();
-    let mut with_text = records
-        .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty());
+    let records = fixture_sites();
+    let mut with_text = records.iter().filter(|r| !text_of(r).is_empty());
     let same = with_text.next().unwrap();
     let other = with_text.next().unwrap();
     let marker = [7i8; 32];
     let mut theirs = plumb_embed::Vectors::new(model, 32);
-    let hash = plumb_embed::text_hash(&plumb_embed::site_text(same));
-    theirs.insert(&same.domain, hash, &marker).unwrap();
-    theirs.insert(&other.domain, [9; 32], &marker).unwrap();
+    let hash = plumb_embed::text_hash(&text_of(same));
+    theirs.insert(&same.id, hash, &marker).unwrap();
+    theirs.insert(&other.id, [9; 32], &marker).unwrap();
     theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
     let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
@@ -166,7 +170,7 @@ async fn takes_site_vectors(as_set: bool) {
         .to_peer_id();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -208,22 +212,19 @@ async fn takes_site_vectors(as_set: bool) {
     // Every site with text ends with a vector: the one sent for its text
     // kept as sent, the others made here.
     let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
-    let wanted = records
-        .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty())
-        .count();
+    let wanted = records.iter().filter(|r| !text_of(r).is_empty()).count();
     let deadline = Instant::now() + Duration::from_secs(60);
     let vectors = loop {
         if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
-            if vectors.len() == wanted && vectors.get(&same.domain).is_some() {
+            if vectors.len() == wanted && vectors.get(&same.id).is_some() {
                 break vectors;
             }
         }
         assert!(Instant::now() < deadline, "vectors not saved");
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
-    assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
+    assert_eq!(vectors.get(&same.id), Some((&hash, &marker[..])));
+    assert_ne!(vectors.get(&other.id).unwrap().1, &marker[..]);
     assert!(vectors.get("unknown-to-it.org").is_none());
     // Read into the node's own file, the set is not kept.
     let taken = crate::node::signed_sets::set_dir(dir.path(), &set).unwrap();

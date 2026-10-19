@@ -10,7 +10,7 @@ Part of [Plumb Search](../../README.md). See [the architecture](../../docs/archi
 flowchart LR
     node["plumb-node<br/>embeds the built module,<br/>tests against it"] --> private["plumb-private"]
     e2e["plumb-e2e"] --> private
-    private --> core["plumb-core<br/>keys, oblivious, records"]
+    private --> core["plumb-core<br/>keys, oblivious, sites"]
     private --> answer["plumb-answer<br/>instant answers"]
     private --> bindgen["wasm-bindgen, web-sys"]
 ```
@@ -21,7 +21,7 @@ plumb-node does not link this crate into the `plumb` binary: its [build.rs](../p
 
 | Module | What it does |
 | --- | --- |
-| [lib.rs](src/lib.rs) | `search` (keep the sites that match the query's keys, merge copies, rank), `read_bucket`, `padding`, `safe_href`, `language_country`, `query_from_fragment`, `LIMIT` (10 results), `MAX_BUCKET_BYTES` (16 MiB) |
+| [lib.rs](src/lib.rs) | `search` (keep the sites that match the query's keys, merge copies, rank), `read_bucket` (trimmed sites' items, or the trimmed records earlier versions served), `padding`, `safe_href`, `language_country`, `query_from_fragment`, `LIMIT` (10 results), `MAX_BUCKET_BYTES` (16 MiB) |
 | [rank.rs](src/rank.rs) | `rank`: the node's ranking formula over a few hundred candidates, without Tantivy; `merge_copies`; `Options` (country, only that country, safe search, language) and `Ranked` |
 | [sealed.rs](src/sealed.rs) | `seal` and `open`: bucket requests sealed to another node with Oblivious HTTP and sent through the page's own node |
 | [browser.rs](src/browser.rs) | Only for `wasm32`: the page glue, from the search form to the list of results |

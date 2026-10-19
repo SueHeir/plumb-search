@@ -22,9 +22,9 @@ use crate::query::{matching_docs, words_after, ParsedQuery, COMPARISON_WORDS};
 use crate::rank::{best_link_score, bm25_of, domain_of, link_scores};
 use crate::schema::Fields;
 use crate::{
-    analysis, health, pages, schema, spell, spell_model, CandidatePool, Hit, Meaning, RankConfig,
-    SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder, FILLER_WORDS,
-    WELL_KNOWN_LINK_SCORE,
+    analysis, health, learned, pages, schema, spell, spell_model, topics, CandidatePool, Hit,
+    Meaning, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder,
+    FILLER_WORDS, WELL_KNOWN_LINK_SCORE,
 };
 
 /// A query with operators ranks this many times its limit, and at least
@@ -46,6 +46,10 @@ pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
 /// Most words of a site's name at the end of a query
 /// ([`Searcher::site_search_at_end`]): "new york times".
 const MAX_END_NAME_WORDS: usize = 3;
+
+/// Sites listed first that a page nearest the query in meaning is weighed
+/// against ([`crate::MeantPage::sites`]), as hpc's hand check measured.
+const MEANT_PAGE_SITES: usize = 5;
 
 impl Searcher {
     /// Opens the index in `dir`. Fails when there is none, or when it was
@@ -225,7 +229,34 @@ impl Searcher {
         let query_text = without_www(query_text);
         let ops = Operators::parse(query_text);
         if !ops.any() {
-            let mut results = self.search_words(query_text, limit, cfg, options, meaning)?;
+            // The site model learned from searches with closeness in
+            // meaning for nearly every site; without a meaning it would
+            // read every site as far from the query. Nor does it order the
+            // news sites a query for the news alone lists by popularity
+            // and home country, with nothing of the query to read: "news"
+            // put buzzfeed.com before news.google.com and cnn.com.
+            let site_model = cfg.learned
+                && cfg.learned_sites
+                && meaning.is_some()
+                && !topics::asks_only_for_news(query_text);
+            let depth = if site_model {
+                limit.max(learned::LEARNED_SITES)
+            } else {
+                limit
+            };
+            let mut results = self.search_words(query_text, depth, cfg, options, meaning)?;
+            if site_model {
+                learned::reorder_sites(learned::Model::sites(), query_text, &mut results.hits);
+                results.hits.truncate(limit);
+                results.sites_ordered = true;
+            }
+            let sites: Vec<&str> = results
+                .hits
+                .iter()
+                .take(MEANT_PAGE_SITES)
+                .map(|hit| hit.domain.as_str())
+                .collect();
+            results.meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_pages(&sites));
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

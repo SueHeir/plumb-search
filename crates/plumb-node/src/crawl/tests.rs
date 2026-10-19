@@ -1,35 +1,51 @@
 //! Tests of picking homepages and of crawling them in batches, with fake
 //! fetchers instead of the network.
 
+use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use plumb_core::{read_jsonl, write_jsonl};
+use plumb_core::sites::{SiteList, Sites};
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;
-use crate::records::{journal_path, load_records};
+use crate::records::{journal_path, load_sites, replace_sites};
 
 const DAY: u64 = SECONDS_PER_DAY;
 const WINDOW: u64 = 30 * DAY;
 
-fn record(
+/// A site of `domain` with a Tranco rank, last fetched at `crawled_at` and
+/// last tried at `attempted_at`.
+fn site_with(
     domain: &str,
     tranco: u32,
     crawled_at: Option<u64>,
     attempted_at: Option<u64>,
-) -> SiteRecord {
-    let mut r = SiteRecord::new(domain);
-    r.signals.tranco_rank = Some(tranco);
-    r.crawled_at = crawled_at;
-    r.crawl_attempted_at = attempted_at;
-    r
+) -> Item {
+    let mut s = site::new(domain);
+    let mut signals = site::signals(&s);
+    signals.tranco_rank = Some(tranco);
+    site::set_signals(&mut s, &signals);
+    site::set_crawled(&mut s, crawled_at);
+    set_marks(&mut s, attempted_at, 0);
+    s
+}
+
+/// Sets when `s`'s homepage was last tried and how many tries in a row
+/// failed to reach it.
+fn set_marks(s: &mut Item, attempted_at: Option<u64>, failures: u32) {
+    let marks = site::CrawlMarks {
+        tried: attempted_at,
+        failures,
+        ..site::crawl_marks(s)
+    };
+    site::set_crawl_marks(s, marks);
 }
 
 /// Sites `site00.com`, `site01.com`... never tried, best first.
-fn sites(n: u32) -> Vec<SiteRecord> {
+fn sites(n: u32) -> Vec<Item> {
     (0..n)
-        .map(|i| record(&format!("site{i:02}.com"), i + 1, None, None))
+        .map(|i| site_with(&format!("site{i:02}.com"), i + 1, None, None))
         .collect()
 }
 
@@ -97,39 +113,53 @@ fn all_fetched(batch: Vec<CrawlTarget>) -> Option<Vec<CrawlResult>> {
     Some(batch.iter().map(|t| fetched(&t.domain, 1, &[])).collect())
 }
 
-/// A records file holding `records`, and a store for it.
-fn records_file(dir: &Path, records: &[SiteRecord]) -> (PathBuf, RecordSet, RecordStore) {
+/// A records file holding `sites`, the set of sites loaded from it, and a
+/// store for it.
+fn records_file(dir: &Path, sites: &[Item]) -> (PathBuf, Sites, RecordStore) {
     let path = dir.join("records.jsonl");
-    write_jsonl(&path, records).unwrap();
-    let set = load_records(&path).unwrap();
+    let list: SiteList = sites.iter().cloned().collect();
+    replace_sites(&path, &list).unwrap();
+    let set = load_sites(&path).unwrap();
     let store = RecordStore::open(&path);
     (path, set, store)
 }
 
 /// `(crawl_attempted_at, crawl_failures)` of `domain` in the file, journal included.
 fn marks(path: &Path, domain: &str) -> (Option<u64>, u32) {
-    let set = load_records(path).unwrap();
-    let r = set.get(domain).unwrap();
-    (r.crawl_attempted_at, r.crawl_failures)
+    let s = load_sites(path).unwrap().get(domain).unwrap();
+    (s.crawl_attempted_at(), s.crawl_failures())
+}
+
+/// The sites of the records file at `path` in file order, as its lines
+/// hold them: its journal is not replayed.
+fn file_sites(path: &Path) -> Vec<Item> {
+    let mut sites = Vec::new();
+    crate::outline::for_each_site(path, |s| sites.push(s)).unwrap();
+    sites
+}
+
+/// The lines of `set`, best first, as compacting writes them.
+fn lines_of(set: &Sites) -> Vec<Vec<u8>> {
+    set.lines_by_link_score().map(<[u8]>::to_vec).collect()
 }
 
 #[test]
 fn when_sites_are_due_again() {
-    assert_eq!(due_at(&record("a.com", 1, None, None), WINDOW), None);
+    assert_eq!(due_at(&site_with("a.com", 1, None, None), WINDOW), None);
     // Fetched, or answered without a page (robots.txt, HTTP errors): the window.
     assert_eq!(
-        due_at(&record("a.com", 1, Some(100), Some(90)), WINDOW),
+        due_at(&site_with("a.com", 1, Some(100), Some(90)), WINDOW),
         Some(100 + WINDOW)
     );
     assert_eq!(
-        due_at(&record("a.com", 1, None, Some(90)), WINDOW),
+        due_at(&site_with("a.com", 1, None, Some(90)), WINDOW),
         Some(90 + WINDOW)
     );
     // Not reached: 1 day, 2, 4, 8, 16, then the window.
     let unreachable = |failures| {
-        let mut r = record("a.com", 1, Some(10), Some(1_000));
-        r.crawl_failures = failures;
-        due_at(&r, WINDOW).unwrap() - 1_000
+        let mut s = site_with("a.com", 1, Some(10), Some(1_000));
+        set_marks(&mut s, Some(1_000), failures);
+        due_at(&s, WINDOW).unwrap() - 1_000
     };
     let waits: Vec<u64> = (1..=7).map(|f| unreachable(f) / DAY).collect();
     assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
@@ -137,9 +167,9 @@ fn when_sites_are_due_again() {
     assert_eq!(retry_after(1, 6 * 3600), 6 * 3600, "never past the window");
     assert_eq!(retry_after(3, 0), 0);
     // A site judged dead: three windows.
-    let mut gone = record("a.com", 1, Some(10), Some(1_000));
-    gone.crawl_failures = 6;
-    gone.make_gone(1_000);
+    let mut gone = site_with("a.com", 1, Some(10), Some(1_000));
+    set_marks(&mut gone, Some(1_000), 6);
+    site::make_gone(&mut gone, 1_000);
     assert_eq!(due_at(&gone, WINDOW), Some(1_000 + 3 * WINDOW));
 }
 
@@ -147,32 +177,42 @@ fn when_sites_are_due_again() {
 fn picks_the_best_sites_that_are_due() {
     let now = 1_000;
     let window = 500;
-    let records = [
-        record("c.com", 30, None, None),          // never tried
-        record("a.com", 10, Some(1_000), None),   // fetched within the window
-        record("b.com", 20, Some(10), None),      // fetched long ago: due
-        record("f.com", 5, None, Some(900)),      // answered within the window
-        record("g.com", 15, Some(10), Some(800)), // tried again within the window
-        record("h.com", 25, None, Some(50)),      // answered long ago: due
-        record("d.com", 40, None, None),
-        record("e.com", 40, None, None), // ties broken by domain
+    let sites = [
+        site_with("c.com", 30, None, None),          // never tried
+        site_with("a.com", 10, Some(1_000), None),   // fetched within the window
+        site_with("b.com", 20, Some(10), None),      // fetched long ago: due
+        site_with("f.com", 5, None, Some(900)),      // answered within the window
+        site_with("g.com", 15, Some(10), Some(800)), // tried again within the window
+        site_with("h.com", 25, None, Some(50)),      // answered long ago: due
+        site_with("d.com", 40, None, None),
+        site_with("e.com", 40, None, None), // ties broken by domain
     ];
     // Two never tried, one due again, best first.
-    let targets = select_targets(records.iter(), 3, now, window);
+    let targets = select_targets(sites.iter(), 3, now, window);
     assert_eq!(domains(&targets), ["b.com", "c.com", "d.com"]);
     assert_eq!(targets[0], CrawlTarget::new("b.com"));
 
-    let all = select_targets(records.iter(), 100, now, window);
+    let all = select_targets(sites.iter(), 100, now, window);
     assert_eq!(domains(&all), ["b.com", "h.com", "c.com", "d.com", "e.com"]);
-    assert!(select_targets(records.iter(), 0, now, window).is_empty());
+    assert!(select_targets(sites.iter(), 0, now, window).is_empty());
+
+    // A whole set picks the same, keeping only what picking reads of each.
+    let set: Sites = sites.iter().cloned().collect();
+    for budget in [0, 1, 3, 100] {
+        assert_eq!(
+            select_site_targets(&set, budget, now, window),
+            select_targets(sites.iter(), budget, now, window),
+            "{budget}"
+        );
+    }
 }
 
 #[test]
 fn targets_fall_back_to_where_a_site_was_last_reached() {
-    let mut moved = record("moved.com", 1, None, None);
+    let mut moved = site_with("moved.com", 1, None, None);
     moved.url = Some("https://www.moved.com/en/".into());
-    let records = [moved, record("plain.com", 2, None, None)];
-    let targets = select_targets(records.iter(), 2, 1_000, WINDOW);
+    let sites = [moved, site_with("plain.com", 2, None, None)];
+    let targets = select_targets(sites.iter(), 2, 1_000, WINDOW);
     assert_eq!(
         targets,
         [
@@ -186,30 +226,104 @@ fn targets_fall_back_to_where_a_site_was_last_reached() {
     );
 }
 
+/// A site's crawl marks, as a stored item holds them, set when its
+/// homepage is next due and which sites are picked.
+#[test]
+fn a_site_s_item_is_picked_by_its_marks() {
+    let now = 1_000;
+    let window = 500;
+    let mut moved = site_with("moved.com", 1, Some(10), Some(800));
+    moved.url = Some("https://www.moved.com/en/".into());
+    set_marks(&mut moved, Some(800), 2);
+    let mut gone = site_with("gone.com", 3, None, Some(100));
+    set_marks(&mut gone, Some(100), 6);
+    site::make_gone(&mut gone, 100);
+    let mut items = [
+        moved,
+        gone,
+        site_with("c.com", 30, None, None),
+        site_with("a.com", 10, Some(1_000), None),
+        site_with("b.com", 20, Some(10), None),
+        site_with("h.com", 25, None, Some(50)),
+        site_with("d.com", 40, None, None),
+        site_with("e.com", 40, None, None),
+    ];
+    items.iter_mut().for_each(site::clean);
+    let marks: Vec<_> = items
+        .iter()
+        .map(|item| {
+            (
+                CrawlSite::domain(item),
+                CrawlSite::crawled_at(item),
+                CrawlSite::crawl_attempted_at(item),
+                CrawlSite::crawl_failures(item),
+                CrawlSite::gone_at(item),
+                due_at(item, window),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("moved.com", Some(10), Some(800), 2, None, Some(1_300)),
+            ("gone.com", None, Some(100), 6, Some(100), Some(1_600)),
+            ("c.com", None, None, 0, None, None),
+            ("a.com", Some(1_000), None, 0, None, Some(1_500)),
+            ("b.com", Some(10), None, 0, None, Some(510)),
+            ("h.com", None, Some(50), 0, None, Some(550)),
+            ("d.com", None, None, 0, None, None),
+            ("e.com", None, None, 0, None, None),
+        ]
+    );
+    assert_eq!(
+        target_for(&items[0]),
+        CrawlTarget {
+            known_url: Some("https://www.moved.com/en/".into()),
+            ..CrawlTarget::new("moved.com")
+        }
+    );
+    assert_eq!(target_for(&items[2]), CrawlTarget::new("c.com"));
+    let scores: Vec<f32> = items.iter().map(CrawlSite::link_score).collect();
+    let sites: Vec<f32> = items.iter().map(site::link_score).collect();
+    assert_eq!(scores, sites);
+    let set: Sites = items.iter().cloned().collect();
+    let picks: [(usize, &[&str]); 4] = [
+        (0, &[]),
+        (1, &["c.com"]),
+        (3, &["b.com", "c.com", "d.com"]),
+        (100, &["b.com", "h.com", "c.com", "d.com", "e.com"]),
+    ];
+    for (budget, expected) in picks {
+        let picked = select_targets(items.iter(), budget, now, window);
+        assert_eq!(domains(&picked), expected, "{budget}");
+        assert_eq!(select_site_targets(&set, budget, now, window), picked);
+    }
+}
+
 #[test]
 fn the_budget_is_split_between_new_sites_and_due_ones() {
     let now = 100 * DAY;
     // Due sites rank better than the new ones, which would take every
     // pick if the best simply came first.
-    let due = |i: u32| record(&format!("due{i}.com"), i + 1, Some(DAY), Some(DAY));
-    let new = |i: u32| record(&format!("new{i}.com"), i + 100, None, None);
-    let picks = |records: &[SiteRecord], budget| -> (usize, usize) {
-        let targets = select_targets(records.iter(), budget, now, WINDOW);
+    let due = |i: u32| site_with(&format!("due{i}.com"), i + 1, Some(DAY), Some(DAY));
+    let new = |i: u32| site_with(&format!("new{i}.com"), i + 100, None, None);
+    let picks = |sites: &[Item], budget| -> (usize, usize) {
+        let targets = select_targets(sites.iter(), budget, now, WINDOW);
         let new = targets
             .iter()
             .filter(|t| t.domain.starts_with("new"))
             .count();
         (new, targets.len() - new)
     };
-    let both: Vec<SiteRecord> = (0..10).map(due).chain((0..10).map(new)).collect();
+    let both: Vec<Item> = (0..10).map(due).chain((0..10).map(new)).collect();
     assert_eq!(picks(&both, 4), (2, 2));
     assert_eq!(picks(&both, 5), (3, 2), "the odd one goes to a new site");
     assert_eq!(picks(&both, 15), (8, 7));
     assert_eq!(picks(&both, 100), (10, 10));
     // A side with too few leaves its share to the other.
-    let one_due: Vec<SiteRecord> = (0..1).map(due).chain((0..10).map(new)).collect();
+    let one_due: Vec<Item> = (0..1).map(due).chain((0..10).map(new)).collect();
     assert_eq!(picks(&one_due, 6), (5, 1));
-    let two_new: Vec<SiteRecord> = (0..10).map(due).chain((0..2).map(new)).collect();
+    let two_new: Vec<Item> = (0..10).map(due).chain((0..2).map(new)).collect();
     assert_eq!(picks(&two_new, 6), (2, 4));
     // The best of each side, in order of link score overall.
     let targets = select_targets(both.iter(), 4, now, WINDOW);
@@ -223,20 +337,21 @@ fn the_budget_is_split_between_new_sites_and_due_ones() {
 fn a_node_reaches_every_site_and_keeps_the_best_fresh() {
     // 1,000 sites, 10 homepages a day, 30 days between refreshes: picking
     // only the best would re-crawl the best 300 forever.
-    let mut set: RecordSet = (0..1_000)
-        .map(|i| record(&format!("s{i:04}.com"), i + 1, None, None))
+    let mut set: Sites = (0..1_000)
+        .map(|i| site_with(&format!("s{i:04}.com"), i + 1, None, None))
         .collect();
     let mut crawls_of_best = 0;
     let mut never_tried_after = Vec::new();
     for day in 1..=250u64 {
         let now = day * DAY;
-        for target in select_targets(set.iter(), 10, now, WINDOW) {
+        for target in select_site_targets(&set, 10, now, WINDOW) {
             crawls_of_best += usize::from(target.domain == "s0000.com");
-            let r = set.entry(&target.domain);
-            r.crawled_at = Some(now);
-            r.crawl_attempted_at = Some(now);
+            set.update(&target.domain, |s| {
+                site::set_crawled(s, Some(now));
+                set_marks(s, Some(now), 0);
+            });
         }
-        never_tried_after.push(set.iter().filter(|r| r.crawled_at.is_none()).count());
+        never_tried_after.push(set.iter().filter(|s| s.crawled_at().is_none()).count());
     }
     let reached_all = never_tried_after.iter().position(|&n| n == 0).unwrap() + 1;
     assert!(
@@ -253,16 +368,16 @@ fn a_batch_marks_every_target_by_outcome() {
     let (path, mut set, mut store) = records_file(
         dir.path(),
         &[
-            record("a.com", 10, None, None),
-            record("b.com", 20, Some(100), Some(100)),
-            record("c.com", 30, None, None),
-            record("d.com", 35, None, None),
-            record("idle.com", 40, None, None),
+            site_with("a.com", 10, None, None),
+            site_with("b.com", 20, Some(100), Some(100)),
+            site_with("c.com", 30, None, None),
+            site_with("d.com", 35, None, None),
+            site_with("idle.com", 40, None, None),
         ],
     );
-    let mut flaky = record("flaky.com", 50, Some(100), Some(200));
-    flaky.crawl_failures = 2;
-    commit(&mut set, &mut store, vec![Change::Merge { record: flaky }]).unwrap();
+    let mut flaky = site_with("flaky.com", 50, Some(100), Some(200));
+    set_marks(&mut flaky, Some(200), 2);
+    commit(&mut set, &mut store, vec![Change::Merge { site: flaky }]).unwrap();
 
     let started = now_unix();
     let targets: Vec<CrawlTarget> = ["a.com", "b.com", "c.com", "d.com", "flaky.com"]
@@ -290,49 +405,183 @@ fn a_batch_marks_every_target_by_outcome() {
     assert_eq!(totals.end, RunEnd::Finished);
 
     // What is in memory is what is saved.
-    let saved = load_records(&path).unwrap();
-    assert_eq!(
-        sorted_by_link_score_owned(&saved),
-        sorted_by_link_score_owned(&set)
-    );
+    let saved = load_sites(&path).unwrap();
+    assert_eq!(lines_of(&saved), lines_of(&set));
     let a = saved.get("a.com").unwrap();
-    let tried_at = a.crawl_attempted_at.unwrap();
+    let tried_at = a.crawl_attempted_at().unwrap();
     assert!(tried_at >= started);
-    assert_eq!((a.crawled_at, a.crawl_failures), (Some(started), 0));
+    assert_eq!((a.crawled_at(), a.crawl_failures()), (Some(started), 0));
     assert_eq!(a.title.as_deref(), Some("a.com home"));
     // Not reached: retried in a day. Refused by robots.txt: an answer.
     let b = saved.get("b.com").unwrap();
     assert_eq!(
-        (b.crawled_at, b.crawl_attempted_at, b.crawl_failures),
+        (b.crawled_at(), b.crawl_attempted_at(), b.crawl_failures()),
         (Some(100), Some(tried_at), 1)
     );
-    assert_eq!(due_at(b, WINDOW), Some(tried_at + DAY));
+    assert_eq!(due_at(&b, WINDOW), Some(tried_at + DAY));
     let c = saved.get("c.com").unwrap();
     assert_eq!(
-        (c.crawl_attempted_at, c.crawl_failures),
+        (c.crawl_attempted_at(), c.crawl_failures()),
         (Some(tried_at), 0)
     );
-    assert_eq!(due_at(c, WINDOW), Some(tried_at + WINDOW));
+    assert_eq!(due_at(&c, WINDOW), Some(tried_at + WINDOW));
     // So is a failure on the site's side, like a robots.txt server error.
     let d = saved.get("d.com").unwrap();
     assert_eq!(
-        (d.crawled_at, d.crawl_attempted_at, d.crawl_failures),
+        (d.crawled_at(), d.crawl_attempted_at(), d.crawl_failures()),
         (None, Some(tried_at), 0)
     );
-    assert_eq!(due_at(d, WINDOW), Some(tried_at + WINDOW));
+    assert_eq!(due_at(&d, WINDOW), Some(tried_at + WINDOW));
     // An answer ends a run of failures.
-    assert_eq!(saved.get("flaky.com").unwrap().crawl_failures, 0);
+    assert_eq!(saved.get("flaky.com").unwrap().crawl_failures(), 0);
     let idle = saved.get("idle.com").unwrap();
-    assert_eq!((idle.crawl_attempted_at, idle.crawl_failures), (None, 0));
+    assert_eq!(
+        (idle.crawl_attempted_at(), idle.crawl_failures()),
+        (None, 0)
+    );
     let new = saved.get("new.com").unwrap();
     assert_eq!(
-        (new.crawl_attempted_at, new.signals.linking_domains),
+        (
+            new.crawl_attempted_at(),
+            site::signals(&new).linking_domains
+        ),
         (None, 1)
     );
 }
 
-fn sorted_by_link_score_owned(set: &RecordSet) -> Vec<SiteRecord> {
-    set.clone().into_sorted_vec()
+/// A crawl of a whole set saves each batch's changes to the journal, and
+/// compacting the set writes its sites: the journal and file below.
+#[test]
+fn a_crawl_saves_its_changes_and_writes_the_sites_it_made() {
+    /// When the homepages were fetched.
+    const FETCHED: u64 = 1_790_000_000;
+    let started = now_unix();
+    let mut flaky = site_with("flaky.com", 50, Some(100), Some(200));
+    set_marks(&mut flaky, Some(200), 2);
+    let mut moved = site_with("moved.com", 60, Some(100), Some(100));
+    moved.url = Some("https://www.moved.com/en/".into());
+    let held = [
+        site_with("a.com", 10, None, None),
+        site_with("b.com", 20, Some(100), Some(100)),
+        site_with("c.com", 30, None, None),
+        site_with("d.com", 35, None, None),
+        site_with("idle.com", 40, None, None),
+        flaky,
+        moved,
+    ];
+    let results = |batch: Vec<CrawlTarget>| {
+        let results = batch
+            .iter()
+            .map(|t| match t.domain.as_str() {
+                "a.com" => fetched("a.com", FETCHED, &["new.com", "b.com", "c.com"]),
+                "b.com" => failed("b.com"),
+                "c.com" => refused("c.com"),
+                "d.com" => failed_there("d.com"),
+                domain => fetched(domain, FETCHED, &["new.com", "other.org"]),
+            })
+            .collect();
+        Some(results)
+    };
+    let write = |dir: &Path| {
+        let path = dir.join("records.jsonl");
+        replace_sites(&path, &held.iter().cloned().collect()).unwrap();
+        path
+    };
+    let targets: Vec<CrawlTarget> = held.iter().map(target_for).collect();
+    // A crawl marks its sites tried when it runs.
+    let at_runtime = |bytes: Vec<u8>| {
+        let text = String::from_utf8(bytes).unwrap();
+        let mut out = String::new();
+        let mut digits = String::new();
+        for c in text.chars().chain(['\n']) {
+            if c.is_ascii_digit() {
+                digits.push(c);
+                continue;
+            }
+            if !digits.is_empty() {
+                if digits
+                    .parse::<u64>()
+                    .is_ok_and(|n| (started..=now_unix()).contains(&n))
+                {
+                    out += "NOW";
+                } else {
+                    out += &digits;
+                }
+                digits.clear();
+            }
+            out.push(c);
+        }
+        out
+    };
+
+    let sites_dir = tempfile::tempdir().unwrap();
+    let path = write(sites_dir.path());
+    let mut set = load_sites(&path).unwrap();
+    let mut store = RecordStore::open(&path);
+    crawl_in_batches(&mut set, &targets, 2, &mut store, results, |_| Ok(())).unwrap();
+    // Each batch's sites marked tried before it is fetched, then what it
+    // found merged in and the marks set again.
+    let journal: Vec<String> = fs::read_to_string(journal_path(&path))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let change: serde_json::Value = serde_json::from_str(line).unwrap();
+            let op = change["op"].as_str().unwrap();
+            match op {
+                "mark" => format!("mark {} {}", change["domain"], change["failures"]),
+                _ => format!("{op} {}", change["record"]["id"]),
+            }
+        })
+        .collect();
+    assert_eq!(
+        journal,
+        [
+            r#"mark "a.com" 1"#,
+            r#"mark "b.com" 1"#,
+            r#"merge "a.com""#,
+            r#"merge "b.com""#,
+            r#"merge "c.com""#,
+            r#"merge "new.com""#,
+            r#"mark "a.com" 0"#,
+            r#"mark "b.com" 1"#,
+            r#"mark "c.com" 1"#,
+            r#"mark "d.com" 1"#,
+            r#"mark "c.com" 0"#,
+            r#"mark "d.com" 0"#,
+            r#"mark "idle.com" 1"#,
+            r#"mark "flaky.com" 3"#,
+            r#"merge "flaky.com""#,
+            r#"merge "idle.com""#,
+            r#"merge "new.com""#,
+            r#"merge "other.org""#,
+            r#"mark "idle.com" 0"#,
+            r#"mark "flaky.com" 0"#,
+            r#"mark "moved.com" 1"#,
+            r#"merge "moved.com""#,
+            r#"merge "new.com""#,
+            r#"merge "other.org""#,
+            r#"mark "moved.com" 0"#,
+        ]
+    );
+    // The journal replays to the sites the crawl held.
+    let replayed: Vec<Item> = load_sites(&path).unwrap().by_link_score().collect();
+    assert_eq!(replayed, set.by_link_score().collect::<Vec<_>>());
+    store.compact(&set).unwrap();
+    let file = at_runtime(fs::read(&path).unwrap());
+    assert_eq!(
+        file,
+        r#"{"id":"a.com","kind":"site","title":"a.com home","url":"https://a.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:b.com"},{"rel":"links_to","to":"site:c.com"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":10}}}
+{"id":"b.com","kind":"site","weight":1.0,"fields":{"crawl":{"failures":1,"tried":NOW},"crawled":"1970-01-01T00:01:40Z","link_texts":[{"count":1,"linkers":"1000000000000000","text":"linked site"}],"ranks":{"tranco":20}}}
+{"id":"c.com","kind":"site","weight":1.0,"fields":{"crawl":{"tried":NOW},"link_texts":[{"count":1,"linkers":"1000000000000000","text":"linked site"}],"ranks":{"tranco":30}}}
+{"id":"d.com","kind":"site","fields":{"crawl":{"tried":NOW},"ranks":{"tranco":35}}}
+{"id":"idle.com","kind":"site","title":"idle.com home","url":"https://idle.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":40}}}
+{"id":"flaky.com","kind":"site","title":"flaky.com home","url":"https://flaky.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":50}}}
+{"id":"moved.com","kind":"site","title":"moved.com home","url":"https://moved.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":60}}}
+{"id":"new.com","kind":"site","weight":4.0,"fields":{"link_texts":[{"count":3,"linkers":"1001000020000000","text":"linked site"}]}}
+{"id":"other.org","kind":"site","weight":3.0,"fields":{"link_texts":[{"count":2,"linkers":"0001000020000000","text":"linked site"}]}}
+
+"#
+    );
 }
 
 #[test]
@@ -342,10 +591,11 @@ fn linking_domains_count_over_the_whole_run() {
         fetched("b.com", 1, &["hub.com"]),
         fetched("c.com", 1, &["hub.com", "other.com"]),
     ];
-    let unbatched: RecordSet = to_records(&results).into_iter().collect();
-    assert_eq!(unbatched.get("hub.com").unwrap().signals.linking_domains, 3);
+    let signals = |set: &Sites, domain: &str| site::signals(&set.get(domain).unwrap());
+    let unbatched: Sites = to_items(&results).into_iter().collect();
+    assert_eq!(signals(&unbatched, "hub.com").linking_domains, 3);
 
-    let mut set = RecordSet::new();
+    let mut set = Sites::new();
     let mut merger = BatchMerger::default();
     for batch in results.chunks(2) {
         for change in merger.changes(batch) {
@@ -354,27 +604,29 @@ fn linking_domains_count_over_the_whole_run() {
     }
     for domain in ["hub.com", "other.com"] {
         assert_eq!(
-            set.get(domain).unwrap().signals,
-            unbatched.get(domain).unwrap().signals,
+            signals(&set, domain),
+            signals(&unbatched, domain),
             "{domain}"
         );
     }
 
     // A larger count from another source (a WAT file, say) is kept.
-    let mut known = SiteRecord::new("hub.com");
-    known.signals.linking_domains = 10;
-    let mut set: RecordSet = [known].into_iter().collect();
+    let mut known = site::new("hub.com");
+    let mut ranks = site::signals(&known);
+    ranks.linking_domains = 10;
+    site::set_signals(&mut known, &ranks);
+    let mut set: Sites = [known].into_iter().collect();
     for change in BatchMerger::default().changes(&results) {
         change.apply(&mut set);
     }
-    assert_eq!(set.get("hub.com").unwrap().signals.linking_domains, 10);
+    assert_eq!(signals(&set, "hub.com").linking_domains, 10);
 }
 
 #[test]
 fn every_batch_is_saved_before_and_after_it_is_fetched() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(5));
-    let targets = select_targets(set.iter(), 10, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 10, now_unix(), WINDOW);
     let started = now_unix();
 
     let mut batch_sizes: Vec<usize> = Vec::new();
@@ -387,10 +639,10 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
         |batch| {
             // Earlier batches are saved with their results, and this one
             // as tried and failed until it is done.
-            let saved = load_records(&path).unwrap();
+            let saved = load_sites(&path).unwrap();
             let done: usize = batch_sizes.iter().sum();
             for (i, target) in targets.iter().enumerate() {
-                let r = saved.get(&target.domain).unwrap();
+                let s = saved.get(&target.domain).unwrap();
                 let expected = if i < done {
                     let failed = target.domain == "site01.com";
                     (!failed, u32::from(failed))
@@ -399,7 +651,11 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
                 } else {
                     (false, 0)
                 };
-                assert_eq!((r.crawled_at.is_some(), r.crawl_failures), expected, "{i}");
+                assert_eq!(
+                    (s.crawled_at().is_some(), s.crawl_failures()),
+                    expected,
+                    "{i}"
+                );
             }
             batch_sizes.push(batch.len());
             Some(
@@ -439,12 +695,11 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
     );
 
     // The file itself waits for the journal to be folded in.
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert_eq!(file, sites(5));
+    assert_eq!(file_sites(&path), sites(5));
     store.compact(&set).unwrap();
     assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    let order: Vec<&str> = file.iter().map(|r| r.domain.as_str()).collect();
+    let file = file_sites(&path);
+    let order: Vec<&str> = file.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(
         order,
         [
@@ -456,19 +711,22 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
             "linked.com"
         ]
     );
-    for r in &file[..5] {
-        assert!(r.crawl_attempted_at.is_some_and(|t| t >= started), "{r:?}");
+    for s in &file[..5] {
+        assert!(
+            s.crawl_attempted_at().is_some_and(|t| t >= started),
+            "{s:?}"
+        );
     }
-    assert_eq!((file[1].crawled_at, file[1].crawl_failures), (None, 1));
-    assert_eq!(file[5].signals.linking_domains, 4);
-    assert_eq!(file[5].crawl_attempted_at, None);
+    assert_eq!((file[1].crawled_at(), file[1].crawl_failures()), (None, 1));
+    assert_eq!(site::signals(&file[5]).linking_domains, 4);
+    assert_eq!(file[5].crawl_attempted_at(), None);
 }
 
 #[test]
 fn a_crash_while_fetching_does_not_hit_the_same_sites_next_time() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(4));
-    let targets = select_targets(set.iter(), 4, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 4, now_unix(), WINDOW);
     // The second batch holds a page that takes the crawler down.
     let mut batches = 0;
     let crashed = catch_unwind(AssertUnwindSafe(|| {
@@ -491,15 +749,15 @@ fn a_crash_while_fetching_does_not_hit_the_same_sites_next_time() {
     // The next run starts from the file: the first batch is done, the
     // second counts as a failure.
     let now = now_unix();
-    let set = load_records(&path).unwrap();
+    let set = load_sites(&path).unwrap();
     for domain in ["site02.com", "site03.com"] {
         let (attempted_at, failures) = marks(&path, domain);
         assert!(attempted_at.is_some_and(|t| t >= now - 5), "{domain}");
         assert_eq!(failures, 1, "{domain}");
     }
-    assert!(select_targets(set.iter(), 10, now, WINDOW).is_empty());
+    assert!(select_site_targets(&set, 10, now, WINDOW).is_empty());
     // They come back after a day...
-    let later = select_targets(set.iter(), 10, now + DAY + 5, WINDOW);
+    let later = select_site_targets(&set, 10, now + DAY + 5, WINDOW);
     assert_eq!(domains(&later), ["site02.com", "site03.com"]);
 
     // ...and after two days when it happens again.
@@ -516,12 +774,12 @@ fn a_crash_while_fetching_does_not_hit_the_same_sites_next_time() {
         )
     }));
     assert!(crashed.is_err());
-    let set = load_records(&path).unwrap();
+    let set = load_sites(&path).unwrap();
     let site02 = set.get("site02.com").unwrap();
-    assert_eq!(site02.crawl_failures, 2);
+    assert_eq!(site02.crawl_failures(), 2);
     assert_eq!(
-        due_at(site02, WINDOW),
-        Some(site02.crawl_attempted_at.unwrap() + 2 * DAY)
+        due_at(&site02, WINDOW),
+        Some(site02.crawl_attempted_at().unwrap() + 2 * DAY)
     );
 }
 
@@ -529,10 +787,9 @@ fn a_crash_while_fetching_does_not_hit_the_same_sites_next_time() {
 fn a_stopped_batch_gets_its_old_marks_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut before = sites(5);
-    before[3].crawl_attempted_at = Some(77);
-    before[3].crawl_failures = 1;
+    set_marks(&mut before[3], Some(77), 1);
     let (path, mut set, mut store) = records_file(dir.path(), &before);
-    let targets: Vec<CrawlTarget> = before.iter().map(|r| CrawlTarget::new(&r.domain)).collect();
+    let targets: Vec<CrawlTarget> = before.iter().map(|s| CrawlTarget::new(&s.id)).collect();
     let mut batches = 0;
     let totals = crawl_in_batches(
         &mut set,
@@ -560,9 +817,9 @@ fn a_stopped_batch_gets_its_old_marks_back() {
         ("site04.com", (None, 0)),
     ] {
         assert_eq!(marks(&path, domain), expected, "{domain}");
-        let r = set.get(domain).unwrap();
+        let s = set.get(domain).unwrap();
         assert_eq!(
-            (r.crawl_attempted_at, r.crawl_failures),
+            (s.crawl_attempted_at(), s.crawl_failures()),
             expected,
             "{domain}"
         );
@@ -588,7 +845,7 @@ fn a_stopped_batch_gets_its_old_marks_back() {
 fn an_offline_batch_is_not_saved() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(60));
-    let targets = select_targets(set.iter(), 60, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 60, now_unix(), WINDOW);
     let mut batches = 0;
     let totals = crawl_in_batches(
         &mut set,
@@ -626,12 +883,12 @@ fn an_offline_batch_is_not_saved() {
         })
     );
     assert_eq!((totals.attempted, totals.outcomes.fetched), (30, 30));
-    let saved = load_records(&path).unwrap();
+    let saved = load_sites(&path).unwrap();
     assert_eq!(saved.len(), 60, "nothing of the second batch was merged");
     for target in &targets[30..] {
-        let r = saved.get(&target.domain).unwrap();
+        let s = saved.get(&target.domain).unwrap();
         assert_eq!(
-            (r.crawled_at, r.crawl_attempted_at, r.crawl_failures),
+            (s.crawled_at(), s.crawl_attempted_at(), s.crawl_failures()),
             (None, None, 0),
             "{}",
             target.domain
@@ -639,10 +896,10 @@ fn an_offline_batch_is_not_saved() {
     }
     assert!(targets[..30]
         .iter()
-        .all(|t| saved.get(&t.domain).unwrap().crawled_at.is_some()));
+        .all(|t| saved.get(&t.domain).unwrap().crawled_at().is_some()));
     // So they are first in line next time.
     assert_eq!(
-        domains(&select_targets(saved.iter(), 30, now_unix(), WINDOW)),
+        domains(&select_site_targets(&saved, 30, now_unix(), WINDOW)),
         domains(&targets[30..])
     );
 }
@@ -651,7 +908,7 @@ fn an_offline_batch_is_not_saved() {
 fn an_offline_batch_is_fetched_again_after_each_wait() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(60));
-    let targets = select_targets(set.iter(), 60, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 60, now_unix(), WINDOW);
     let waits = [Duration::from_millis(1); 2];
     let mut tries: Vec<String> = Vec::new();
     let mut fetcher = Batches {
@@ -682,10 +939,10 @@ fn an_offline_batch_is_fetched_again_after_each_wait() {
         [&targets[0], &targets[0], &targets[0], &targets[30]].map(|t| t.domain.clone())
     );
     assert_eq!((totals.attempted, totals.outcomes.fetched), (60, 60));
-    let saved = load_records(&path).unwrap();
+    let saved = load_sites(&path).unwrap();
     assert!(targets
         .iter()
-        .all(|t| saved.get(&t.domain).unwrap().crawl_failures == 0));
+        .all(|t| saved.get(&t.domain).unwrap().crawl_failures() == 0));
 
     // Each batch gets every wait anew, and the run ends when they run out.
     let dir = tempfile::tempdir().unwrap();
@@ -711,10 +968,10 @@ fn an_offline_batch_is_fetched_again_after_each_wait() {
     drop(fetcher);
     assert_eq!(tries, 3);
     assert!(matches!(totals.end, RunEnd::Offline(_)));
-    let saved = load_records(&path).unwrap();
+    let saved = load_sites(&path).unwrap();
     assert!(targets.iter().all(|t| {
-        let r = saved.get(&t.domain).unwrap();
-        (r.crawl_attempted_at, r.crawl_failures) == (None, 0)
+        let s = saved.get(&t.domain).unwrap();
+        (s.crawl_attempted_at(), s.crawl_failures()) == (None, 0)
     }));
 }
 
@@ -779,7 +1036,7 @@ fn the_journal_is_folded_in_as_it_grows() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(6));
     store.set_min_compact_bytes(0);
-    let targets = select_targets(set.iter(), 6, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 6, now_unix(), WINDOW);
     let mut journal_seen = Vec::new();
     crawl_in_batches(
         &mut set,
@@ -798,8 +1055,7 @@ fn the_journal_is_folded_in_as_it_grows() {
     .unwrap();
     // Each batch's marks go to a fresh journal before it is fetched.
     assert_eq!(journal_seen, [true, true, true]);
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert!(file.iter().all(|r| r.crawled_at.is_some()));
+    assert!(file_sites(&path).iter().all(|s| s.crawled_at().is_some()));
 }
 
 #[test]
@@ -917,7 +1173,7 @@ impl Fetcher for OutOfOrder {
 fn slow_sites_do_not_hold_up_the_batches_after_them() {
     let dir = tempfile::tempdir().unwrap();
     let (path, mut set, mut store) = records_file(dir.path(), &sites(7));
-    let targets = select_targets(set.iter(), 10, now_unix(), WINDOW);
+    let targets = select_site_targets(&set, 10, now_unix(), WINDOW);
     let mut fetcher = OutOfOrder {
         ahead: 2,
         slow: vec!["site00.com"],
@@ -945,18 +1201,17 @@ fn slow_sites_do_not_hold_up_the_batches_after_them() {
     // Two batches are started ahead of the two sites waited for, and the
     // slow site is waited for only at the end.
     assert_eq!(fetcher.seen, [4, 4, 3, 1]);
-    let saved = load_records(&path).unwrap();
-    assert!(saved.iter().all(|r| r.crawled_at == Some(1)));
+    let saved = load_sites(&path).unwrap();
+    assert!(saved.iter().all(|s| s.crawled_at() == Some(1)));
 }
 
 #[test]
 fn a_stopped_rolling_crawl_gives_every_unfinished_site_its_old_marks_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut before = sites(6);
-    before[0].crawl_attempted_at = Some(77);
-    before[0].crawl_failures = 1;
+    set_marks(&mut before[0], Some(77), 1);
     let (path, mut set, mut store) = records_file(dir.path(), &before);
-    let targets: Vec<CrawlTarget> = before.iter().map(|r| CrawlTarget::new(&r.domain)).collect();
+    let targets: Vec<CrawlTarget> = before.iter().map(|s| CrawlTarget::new(&s.id)).collect();
     let mut fetcher = OutOfOrder {
         ahead: 2,
         slow: vec!["site00.com"],
@@ -986,18 +1241,18 @@ fn a_stopped_rolling_crawl_gives_every_unfinished_site_its_old_marks_back() {
 #[test]
 fn sites_can_be_made_due_early() {
     let now = 10 * DAY;
-    let records = [
-        record("fresh.com", 1, Some(9 * DAY), Some(9 * DAY)),
-        record("noted.com", 2, Some(9 * DAY), Some(9 * DAY)),
+    let sites = [
+        site_with("fresh.com", 1, Some(9 * DAY), Some(9 * DAY)),
+        site_with("noted.com", 2, Some(9 * DAY), Some(9 * DAY)),
     ];
-    assert!(select_targets(records.iter(), 10, now, WINDOW).is_empty());
-    let early = select_targets_with(records.iter(), 10, now, WINDOW, |r| r.domain == "fresh.com");
+    assert!(select_targets(sites.iter(), 10, now, WINDOW).is_empty());
+    let early = select_targets_with(sites.iter(), 10, now, WINDOW, |s| s.id == "fresh.com");
     assert_eq!(domains(&early), ["fresh.com"]);
 }
 
-/// A record set that takes no site it does not hold, as a node's round
+/// A set of sites that takes no site it does not hold, as a node's round
 /// does with [`crate::node::NodeConfig::take_new_sites`] off.
-struct Holding(RecordSet);
+struct Holding(Sites);
 
 impl CrawlSet for Holding {
     fn marks(&self, domain: &str) -> (Option<u64>, u32) {
@@ -1013,7 +1268,7 @@ impl CrawlSet for Holding {
     }
 
     fn takes(&self, domain: &str) -> bool {
-        self.0.get(domain).is_some()
+        self.0.contains(domain)
     }
 
     fn compact(&self, store: &mut RecordStore) -> Result<usize> {
@@ -1027,8 +1282,8 @@ fn a_set_holding_back_new_sites_only_refreshes_the_ones_it_holds() {
     let (path, set, mut store) = records_file(
         dir.path(),
         &[
-            record("a.com", 10, None, None),
-            record("b.com", 20, None, None),
+            site_with("a.com", 10, None, None),
+            site_with("b.com", 20, None, None),
         ],
     );
     let mut set = Holding(set);
@@ -1049,10 +1304,11 @@ fn a_set_holding_back_new_sites_only_refreshes_the_ones_it_holds() {
     )
     .unwrap();
     assert_eq!((totals.attempted, totals.discovered), (1, 0));
-    let saved = load_records(&path).unwrap();
+    let saved = load_sites(&path).unwrap();
     assert_eq!(saved.len(), 2);
-    assert!(saved.get("new.com").is_none());
-    assert_eq!(saved.get("a.com").unwrap().crawled_at, Some(started));
+    assert!(!saved.contains("new.com"));
+    assert_eq!(saved.get("a.com").unwrap().crawled_at(), Some(started));
     // A site held still counts the links to it.
-    assert_eq!(saved.get("b.com").unwrap().signals.linking_domains, 1);
+    let b = saved.get("b.com").unwrap();
+    assert_eq!(site::signals(&b).linking_domains, 1);
 }

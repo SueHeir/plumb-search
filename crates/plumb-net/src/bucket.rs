@@ -7,7 +7,9 @@
 //! the spaces taken out (`U.S. Bank` -> `us`, `bank`, `usbank`). Each key
 //! falls in one of [`BUCKETS`] buckets by its hash. A node with an index
 //! keeps, for every bucket, the best [`KEY_CAP`] sites of every key in it
-//! ([`BucketTable`]).
+//! ([`BucketTable`]). Its index build writes them a site at a time from
+//! each site's stored item ([`BucketWriter`], [`plumb_core::site`]),
+//! filed under its keys ([`site_keys`]).
 //!
 //! To search the network, a node works out the keys of its query, and asks
 //! for their buckets, never the query: [`BUCKETS_PER_SEARCH`] buckets every
@@ -24,9 +26,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 pub use plumb_core::keys::{
-    bucket_of, matches, query_keys, record_keys, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
+    bucket_of, query_keys, site_keys, site_matches, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
 };
-use plumb_core::SiteRecord;
+use plumb_core::site::{self, Item};
 use rand_core::RngCore;
 
 use crate::hash::Hash;
@@ -40,12 +42,13 @@ pub fn search_buckets(query: &str) -> (Vec<u32>, Vec<String>) {
 
 /// Answers bucket requests from other nodes.
 pub trait BucketSource: Send + Sync + 'static {
-    /// The records of bucket `bucket`, as JSON, or `None` when this node
-    /// has no bucket table (yet).
+    /// The records of bucket `bucket`, as stored lines
+    /// ([`plumb_core::stored`]), or `None` when this node has no bucket
+    /// table (yet).
     fn bucket(&self, bucket: u32) -> Option<Vec<String>>;
 
     /// Records `from..from + count` of all the sites, best-ranked first, as
-    /// JSON, and how many sites there are; `None` when this node has no
+    /// stored lines, and how many sites there are; `None` when this node has no
     /// bucket table (yet). For nodes filling their space (see
     /// [`crate::fill`]).
     fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
@@ -120,7 +123,8 @@ pub trait BucketSource: Send + Sync + 'static {
 /// A node's buckets on disk, written next to an index and never changed.
 ///
 /// ```text
-/// records.dat    the records, JSON, one after the other
+/// records.dat    the records, one after the other, as a node stores them
+///                ([`plumb_core::stored`])
 /// records.idx    where each record starts: little-endian u64, one more
 ///                than there are records
 /// buckets.idx    where each bucket's list starts in buckets.dat, counted
@@ -134,30 +138,35 @@ pub struct BucketTable {
 }
 
 impl BucketTable {
-    /// Writes the table of `records` into `dir`, which must not exist yet.
-    /// Takes about as much disk as the records file, and memory for about
-    /// 12 bytes per key and 4 per bucket entry while it runs. `records` may
-    /// be the records themselves or references to them.
-    pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
-        Self::build_with_budget(dir, records, None)
+    /// Writes the table of `sites`, their stored items
+    /// ([`plumb_core::site`]), into `dir`, which must not exist yet: best
+    /// [`site::link_score`] first, ties by domain, each cleaned
+    /// ([`site::clean`]) as a node's sets hold them. Takes about as much
+    /// disk as the records file, and memory for about 12 bytes per key and
+    /// 4 per bucket entry while it runs. `sites` may be the items
+    /// themselves or references to them.
+    pub fn build<S: Borrow<Item>>(dir: &Path, sites: &[S]) -> Result<BucketTable> {
+        Self::build_with_budget(dir, sites, None)
     }
 
-    pub fn build_with_budget<R: Borrow<SiteRecord>>(
+    pub fn build_with_budget<S: Borrow<Item>>(
         dir: &Path,
-        records: &[R],
+        sites: &[S],
         budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     ) -> Result<BucketTable> {
-        let records: Vec<&SiteRecord> = records.iter().map(Borrow::borrow).collect();
-        let mut order: Vec<usize> = (0..records.len()).collect();
+        let sites: Vec<&Item> = sites.iter().map(Borrow::borrow).collect();
+        let scores: Vec<f32> = sites.iter().map(|s| site::link_score(s)).collect();
+        let mut order: Vec<usize> = (0..sites.len()).collect();
         order.sort_by(|&a, &b| {
-            records[b]
-                .link_score()
-                .total_cmp(&records[a].link_score())
-                .then_with(|| records[a].domain.cmp(&records[b].domain))
+            scores[b]
+                .total_cmp(&scores[a])
+                .then_with(|| sites[a].id.cmp(&sites[b].id))
         });
         let mut writer = BucketWriter::new_with_budget(dir, budget)?;
         for i in order {
-            writer.add(records[i])?;
+            let mut clean = sites[i].clone();
+            site::clean(&mut clean);
+            writer.add(&clean)?;
         }
         writer.finish()
     }
@@ -192,7 +201,7 @@ impl BucketTable {
         self.records == 0
     }
 
-    /// The records of `bucket`, as JSON.
+    /// The records of `bucket`, as stored lines.
     pub fn get(&self, bucket: u32) -> Result<Vec<String>> {
         if bucket >= BUCKETS {
             bail!("there is no bucket {bucket}");
@@ -225,7 +234,7 @@ impl BucketTable {
     }
 
     /// Records `from..from + count` (fewer at the end), best-ranked first,
-    /// as JSON: the table keeps them in that order.
+    /// as stored lines: the table keeps them in that order.
     pub fn ranked(&self, from: usize, count: usize) -> Result<Vec<String>> {
         let end = from.saturating_add(count).min(self.records);
         if from >= end {
@@ -339,16 +348,18 @@ impl BucketWriter {
         })
     }
 
-    /// Adds the next record.
-    pub fn add(&mut self, record: &SiteRecord) -> Result<()> {
+    /// Adds the next site, as its stored item ([`plumb_core::site`]): its
+    /// stored line ([`plumb_core::stored::item_as_line`]), filed under its
+    /// keys ([`site_keys`]).
+    pub fn add(&mut self, site: &Item) -> Result<()> {
         let n = u32::try_from(self.records).context("too many records for a bucket table")?;
-        let json = serde_json::to_vec(record).context("encoding a record")?;
+        let json = plumb_core::stored::item_as_line(site).context("encoding a site")?;
         self.offsets.write_all(&self.at.to_le_bytes())?;
         self.data.write_all(&json)?;
         self.at += json.len() as u64;
         self.records += 1;
         let mut seen_buckets = Vec::new();
-        for key in record_keys(record) {
+        for key in site_keys(site) {
             let count = self
                 .per_key
                 .entry(Hash::of(&[key.as_bytes()]).prefix_u64())
@@ -409,28 +420,32 @@ impl BucketWriter {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::LinkText;
+    use plumb_core::{LinkText, Signals};
 
     use super::*;
 
-    fn site(domain: &str, title: &str, tranco: u32) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.title = Some(title.to_string());
-        r.signals.tranco_rank = Some(tranco);
-        r
+    fn site(domain: &str, title: &str, tranco: u32) -> Item {
+        let mut site = site::new(domain);
+        site.title = Some(title.to_string());
+        let signals = Signals {
+            tranco_rank: Some(tranco),
+            ..Signals::default()
+        };
+        site::set_signals(&mut site, &signals);
+        site
     }
 
     #[test]
     fn keys_cover_words_and_joined_names() {
-        let mut r = site("usbank.com", "U.S. Bank | Checking & Savings", 500);
-        r.link_texts = vec![LinkText::with_count("US Bank online", 3)];
-        let keys = record_keys(&r);
+        let mut usbank = site("usbank.com", "U.S. Bank | Checking & Savings", 500);
+        site::set_link_texts(&mut usbank, &[LinkText::with_count("US Bank online", 3)]);
+        let keys = site_keys(&usbank);
         for key in ["usbank", "bank", "us", "checking", "usbankonline", "online"] {
             assert!(keys.contains(key), "{key} in {keys:?}");
         }
         assert_eq!(query_keys("U.S. Bank"), vec!["usbank", "bank", "us"]);
-        assert!(matches(&r, &query_keys("us bank")));
-        assert!(!matches(&r, &query_keys("chase")));
+        assert!(site_matches(&usbank, &query_keys("us bank")));
+        assert!(!site_matches(&usbank, &query_keys("chase")));
     }
 
     #[test]
@@ -455,7 +470,7 @@ mod tests {
     #[test]
     fn a_table_returns_each_key_best_sites_and_survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
-        let mut records: Vec<SiteRecord> = (0..100)
+        let mut sites: Vec<Item> = (0..100)
             .map(|i| {
                 site(
                     &format!("bank{i}.com"),
@@ -464,29 +479,29 @@ mod tests {
                 )
             })
             .collect();
-        records.push(site("usbank.com", "U.S. Bank", 10));
+        sites.push(site("usbank.com", "U.S. Bank", 10));
         let path = dir.path().join("buckets");
-        BucketTable::build(&path, &records).unwrap();
+        BucketTable::build(&path, &sites).unwrap();
         let table = BucketTable::open(&path).unwrap();
         assert_eq!(table.len(), 101);
 
-        let bank: Vec<SiteRecord> = table
+        let bank: Vec<Item> = table
             .get(bucket_of("bank"))
             .unwrap()
             .iter()
-            .map(|j| serde_json::from_str(j).unwrap())
-            .filter(|r: &SiteRecord| record_keys(r).contains("bank"))
+            .map(|j| plumb_core::stored::read_item(j.as_bytes()).unwrap())
+            .filter(|site| site_keys(site).contains("bank"))
             .collect();
         // Capped, best first.
         assert_eq!(bank.len(), KEY_CAP);
-        assert_eq!(bank[0].domain, "usbank.com");
-        assert_eq!(bank[1].domain, "bank0.com");
+        assert_eq!(bank[0].id, "usbank.com");
+        assert_eq!(bank[1].id, "bank0.com");
 
         let usbank = table.get(bucket_of("usbank")).unwrap();
         assert!(usbank.iter().any(|j| j.contains("\"usbank.com\"")));
         assert!(table.get(BUCKETS).is_err());
         assert!(
-            BucketTable::build(&path, &records).is_err(),
+            BucketTable::build(&path, &sites).is_err(),
             "never overwritten"
         );
     }
