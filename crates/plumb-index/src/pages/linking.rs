@@ -289,30 +289,45 @@ impl PageSearcher {
     /// holds, the pages nearest the query in meaning with their cosines
     /// ([`crate::Meaning::nearest_pages`]), scored as a linked article is
     /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
-    /// the first sites. Words found it too when it is in `found`: it is
-    /// then listed as they scored it, or as meant when only meaning lists
-    /// it, though a page they list that is not an article gives way to the
-    /// next. Nothing is added when a page found is named by the whole
-    /// query or answers it whole, as words find those better, a page of
-    /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
-    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`] (higher when
-    /// it is far from the sites listed, [`MEANT_SITES_TYPICAL`]), and any
-    /// page that is not an article, those of [`MEANT_WITH_WORDS`] too, only
-    /// from [`MEANT_OTHER_LEAST`] and after the pages words list. A page
-    /// that would score too little to be placed ([`MIN_PARTIAL_SCORE`])
-    /// gives way to the next. A page only meaning found is never placed
-    /// under its site. Callers check the searcher's options
+    /// the first sites. An article goes before the pages words found only
+    /// in part, so it takes one of the places placing gives pages; one
+    /// they list moves there too, but keeps their score and is not marked.
+    /// In a medical `query` ([`crate::health::is_medical`]) it goes by
+    /// score instead, so it takes no place of a page words list.
+    /// Nothing is added when a page found is named by the whole query, as
+    /// words find those better, and a page found that answers the query
+    /// whole is left as it is; a page words list that is not an article
+    /// gives way to the next. A page of [`MEANT_WITH_WORDS`] is
+    /// added only when words found one too, an article only from
+    /// [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`] (higher when it is
+    /// far from the sites listed, [`MEANT_SITES_TYPICAL`]), and any page
+    /// that is not an article, those of [`MEANT_WITH_WORDS`] too, only from
+    /// [`MEANT_OTHER_LEAST`] and after the pages words list. A page that
+    /// would score too little to be placed ([`MIN_PARTIAL_SCORE`]) gives
+    /// way to the next. A page only meaning found is never placed under
+    /// its site. Callers check the searcher's options
     /// ([`super::options_allow`]) after, as for any page found, and give
     /// the address of the page added, if any, to the learned order
     /// ([`crate::learned::reorder_results`]).
     pub fn add_meant(
         &self,
+        query: &str,
         meant: &[MeantPage],
         found: &mut Vec<PageHit>,
     ) -> Result<Option<String>> {
-        if found.iter().any(|hit| hit.named || hit.whole) {
+        // After a page the query names, meaning added a part of it on hpc
+        // ("Matthew McConaughey filmography", "Political positions of
+        // Zohran Mamdani"). A page that answers the query whole only has
+        // all its words, and kept out Laundry symbol for "laundry care
+        // symbols" (bhg.com's page).
+        if found.iter().any(|hit| hit.named) {
             return Ok(None);
         }
+        // A medical search lists health sources first (crate::health), and
+        // an article takes no place of a page words list there: on hpc
+        // Urinary tract infection pushed out the NHS page for "urinary
+        // tract infection symptoms men".
+        let medical = crate::health::is_medical(query);
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
         let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
@@ -341,15 +356,30 @@ impl PageSearcher {
             };
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
                 Some(at) => {
-                    let listed = found[at].score >= MIN_PARTIAL_SCORE;
-                    if listed && found[at].page.is_article() {
+                    let words = &found[at];
+                    let listed = words.score >= MIN_PARTIAL_SCORE;
+                    if words.whole {
+                        return Ok(None);
+                    }
+                    // An article words list stays theirs: marked as meant it
+                    // would come after three sites and leave the learned
+                    // order, and on hpc Folate fell from first to fourth
+                    // for "source of folic acid". It only moves before the
+                    // pages found in part, as Tariff for "what is a tariff
+                    // code".
+                    if listed && words.page.is_article() {
+                        if counts(words) && !medical {
+                            let hit = found.remove(at);
+                            let before = found.iter().position(|kept| !kept.whole);
+                            found.insert(before.map_or(at, |first| first.min(at)), hit);
+                        }
                         return Ok(None);
                     }
                     // A page of another kind words list, or one that does
                     // not count, does not keep out the next nearest: on hpc
                     // a question words listed kept Robinhood Markets from
                     // "robin hood stocks app".
-                    if listed || !counts(&found[at]) {
+                    if listed || !counts(words) {
                         continue;
                     }
                     found.remove(at)
@@ -379,15 +409,23 @@ impl PageSearcher {
                 meant: true,
                 ..hit
             };
-            // A page that is not an article takes no place of one words
-            // list: on hpc the isbn gem pushed out the Stack Overflow
+            // An article goes before the pages words found only in part,
+            // though they score more: placing lists two pages, and on hpc
+            // Eye examination and Lea test kept out Eye chart for "eye test
+            // chart". A page that is not an article takes no place of one
+            // words list: the isbn gem pushed out the Stack Overflow
             // question "convert ISBN-10 to ISBN-13" wanted, and certbot's
             // repository a Server Fault question on getting a certificate.
-            let article = hit.page.is_article();
             let at = found
                 .iter()
                 .position(|kept| {
-                    kept.score < hit.score && (article || kept.score < MIN_PARTIAL_SCORE)
+                    if !hit.page.is_article() {
+                        kept.score < hit.score && kept.score < MIN_PARTIAL_SCORE
+                    } else if medical {
+                        kept.score < hit.score
+                    } else {
+                        !kept.whole
+                    }
                 })
                 .unwrap_or(found.len());
             found.insert(at, hit);

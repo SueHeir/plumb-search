@@ -2022,8 +2022,8 @@ knows zzz false
   search
     0.2791 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603
   added
-    0.4186 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 meant
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4186 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 meant
   spelled right false
 # query "python"
   search
@@ -2053,8 +2053,8 @@ knows zzz false
   entities
     0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
   added
-    0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
   spelled right false
 # query "python snake"
   search
@@ -2144,15 +2144,15 @@ knows zzz false
   entities
     0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   added
-    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   spelled right false
 # query "what is the manubrium"
   search
     0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   added
-    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   spelled right false
 # query "breastbone"
   search
@@ -2160,16 +2160,16 @@ knows zzz false
   entities
     0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   added
-    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
   spelled right false
 # query "triassic jurassic cretaceous"
   search
     0.4971 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
     0.1786 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
   added
-    0.4971 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4971 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
     0.1786 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
   spelled right false
 # query "triassic"
@@ -2229,8 +2229,8 @@ knows zzz false
   search
     0.4381 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 meant
   added
-    0.4381 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 meant
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4381 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 meant
   spelled right false
 # query "hamstring insertion point"
   search
@@ -2252,8 +2252,8 @@ knows zzz false
   search
     0.4412 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 meant
   added
-    0.4412 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 meant
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4412 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 meant
   spelled right false
 # query "france"
   search
@@ -2352,15 +2352,15 @@ knows zzz false
   search
     0.6000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000
   added
-    0.6000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.6000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000
   spelled right false
 # query "gesunde ernährung bewegung"
   search
     0.7500 wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung pop=1.0000
   added
-    0.7500 wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung pop=1.0000
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.7500 wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung pop=1.0000
   spelled right false
 # query "linux kernel"
   search
@@ -2384,26 +2384,44 @@ knows zzz false
 # query "undo last git commit"
   search
     0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+  added
+    0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "how to undo the most recent commit in git"
   search
     0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+  added
+    0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "delete a git branch locally and remotely"
   search
     0.5969 stackoverflow https://stackoverflow.com/questions/2003505 pop=0.9898 whole
+  added
+    0.5969 stackoverflow https://stackoverflow.com/questions/2003505 pop=0.9898 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "sort list of strings ignoring whitespace python"
   search
     0.4941 stackoverflow https://stackoverflow.com/questions/36139 pop=0.6469 whole
+  added
+    0.4941 stackoverflow https://stackoverflow.com/questions/36139 pop=0.6469 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "how to get rid of aphids"
   search
     0.5753 stackexchange https://gardening.stackexchange.com/questions/1234 pop=0.9178 whole
+  added
+    0.5753 stackexchange https://gardening.stackexchange.com/questions/1234 pop=0.9178 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "which process is using a port"
   search
     0.6000 stackexchange https://unix.stackexchange.com/questions/106561 pop=1.0000 whole
+  added
+    0.6000 stackexchange https://unix.stackexchange.com/questions/106561 pop=1.0000 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "dune"
   search
@@ -2434,8 +2452,8 @@ knows zzz false
   search
     0.2371 podcasts https://podcastindex.org/podcast/1 pop=0.9755
   added
-    0.4445 podcasts https://podcastindex.org/podcast/1 pop=0.9755 meant
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4445 podcasts https://podcastindex.org/podcast/1 pop=0.9755 meant
   spelled right false
 # query "smells like teen spirit"
   added
@@ -2474,8 +2492,8 @@ knows zzz false
   search
     0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
   added
-    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
   spelled right false
 # query "tomllib"
   search
@@ -2483,8 +2501,8 @@ knows zzz false
   naming docs=true
     0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000 named whole
   added
-    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000
   spelled right false
 # query "python tomllib"
   search
@@ -2498,9 +2516,9 @@ knows zzz false
     0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710 named whole
     0.8268 docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html pop=0.8373 named whole
   added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
     0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710
     0.8268 docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html pop=0.8373
-    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right false
 # query "javascript padstart"
   search
@@ -2510,8 +2528,8 @@ knows zzz false
   search
     0.5921 docs https://react.dev/reference/react/hooks pop=0.9738
   added
-    0.5921 docs https://react.dev/reference/react/hooks pop=0.9738
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5921 docs https://react.dev/reference/react/hooks pop=0.9738
   spelled right false
 # query "asyncio"
   search
@@ -2519,8 +2537,8 @@ knows zzz false
   naming docs=true
     0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400 named whole
   added
-    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
   spelled right false
 # query "asyncio.run"
   search
@@ -2528,8 +2546,8 @@ knows zzz false
   naming docs=true
     0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400 named whole
   added
-    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
   spelled right false
 # query "python asyncio run"
   search
@@ -2546,10 +2564,16 @@ knows zzz false
 # query "dengue fever symptoms"
   search
     0.6000 reference https://www.healthline.com/health/dengue-fever pop=1.0000 whole
+  added
+    0.6000 reference https://www.healthline.com/health/dengue-fever pop=1.0000 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "who dengue fact sheet"
   search
     0.6000 subpages2 https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue pop=1.0000 whole
+  added
+    0.6000 subpages2 https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue pop=1.0000 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "define prioritize"
   added
@@ -2562,6 +2586,9 @@ knows zzz false
 # query "harvard admissions"
   search
     0.5741 subpages2 https://college.harvard.edu/admissions pop=0.9137 whole
+  added
+    0.5741 subpages2 https://college.harvard.edu/admissions pop=0.9137 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "us bank mortgage rates"
   search
@@ -2569,6 +2596,7 @@ knows zzz false
     0.3861 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 meant
   added
     0.4000 wanted https://www.usbank.com/home-loans/mortgage/mortgage-rates.html pop=1.0000 page={"set":"wanted","url":"https://www.usbank.com/home-loans/mortgage/mortgage-rates.html","title":"Mortgage rates today","description":"Compare today's mortgage rates from U.S. Bank.","site":"usbank.com","views":500}
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
     0.3861 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 meant
   spelled right false
 # query "attention is all you need"
@@ -2588,6 +2616,9 @@ knows zzz false
     0.4782 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926 whole
   papers
     0.5978 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926
+  added
+    0.4782 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926 whole
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right true
 # query "basic local alignment search tool"
   search
@@ -2647,9 +2678,9 @@ knows zzz false
   entities
     0.4067 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075 whole
   added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
     0.6100 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
     0.4166 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
-    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
   spelled right false
 # query "einstien"
   added
@@ -2697,8 +2728,8 @@ knows zzz false
   entities
     0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 whole page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
   added
-    0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
   spelled right false
 # query "cafe society"
   search
@@ -2728,8 +2759,8 @@ knows zzz false
   search
     0.4043 papers https://doi.org/10.1038/nature14539 pop=0.9653
   added
-    0.4043 papers https://doi.org/10.1038/nature14539 pop=0.9653
     0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.4043 papers https://doi.org/10.1038/nature14539 pop=0.9653
   spelled right false
 # query ""
   papers
