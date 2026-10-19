@@ -12,9 +12,10 @@ use tracing::{info, warn};
 use super::site_pages::{fetch_site_pages_with_extraction, SitePageOutcome, SitePagesTarget};
 
 const SCHEMA: u32 = 1;
-/// Bump when extraction, passage/symbol limits or title policies change.
+/// Bump when extraction, passage/symbol limits, title policies or the pages
+/// picked change.
 /// Kept here so richer FetchedDoc fields can be added independently.
-pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-4-boilerplate";
+pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-5-spares";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Envelope {

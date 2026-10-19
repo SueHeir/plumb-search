@@ -31,6 +31,18 @@ const FOUND_FACTOR: usize = 20;
 /// Of the pages fetched, up to one in this many are taken first for being
 /// linked from a root's own page ([`Found::balanced`]).
 const LINKED_SHARE: usize = 4;
+/// Pages picked per page wanted, the rest standing in for pages that fail:
+/// of the 10,000 healthline.com pages picked first, 2,230 were gone (HTTP
+/// 410) and 3,413 led to a page fetched before.
+const SPARE_FACTOR: usize = 2;
+/// Pages a site may refuse in a row (HTTP 401, 403 or 429, or a bot check)
+/// before the rest are left: merriam-webster.com refused 19,729 pages, an
+/// afternoon of requests, after letting the first 270 through.
+const MAX_REFUSED: usize = 100;
+/// Links followed from the pages a site's index pages and roots link to,
+/// when its sitemaps list none of its pages: WebMD names no sitemap, and
+/// its sitemap page links only to topic pages.
+const FOLLOW_DEPTH: usize = 2;
 
 /// A site whose inner pages to fetch.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,8 +107,12 @@ pub struct SitePageOutcome {
 /// fetched one at a time, with robots.txt and the per-host delay obeyed as
 /// in a homepage crawl; icons are not fetched and `cfg.target_deadline`
 /// does not apply (each request has `cfg.timeout`). A redirect off the
-/// roots, a repeat, a bot check or a page that is not HTML is skipped.
-/// `extraction` opts in to richer inner-page content; request, body,
+/// roots, a repeat, a bot check or a page that is not HTML is skipped,
+/// and the next page picked fetched in its place, up to [`SPARE_FACTOR`]
+/// pages picked per page wanted; a site that refuses [`MAX_REFUSED`] pages
+/// in a row is left. When the sitemaps list none of its pages and the index
+/// pages fewer than wanted, the links of the pages fetched are followed
+/// too, up to [`FOLLOW_DEPTH`] links from an index page or root. `extraction` opts in to richer inner-page content; request, body,
 /// robots and redirect bounds are the same for every kind.
 /// Must run inside a Tokio runtime.
 pub async fn fetch_site_pages_with_extraction(
@@ -130,35 +146,8 @@ pub async fn fetch_site_pages_with_extraction(
     }
     let mut visit = Visit::new(&client, &cfg);
     visit.set_inner_page_extraction(extraction);
-    let root_pages = roots.clone();
-    let mut indexes = Vec::new();
-    for index in &target.index_pages {
-        let Ok(url) = http_url(index) else { continue };
-        match fetch_list(&mut visit, &cfg, url.clone()).await {
-            Ok((at, body)) => {
-                result.outcomes.push(SitePageOutcome {
-                    url: url.to_string(),
-                    final_url: Some(at.to_string()),
-                    status: "discovery-fetched".into(),
-                });
-                // "en/stable/contents/" sends you on to "en/5.2/contents/":
-                // the pages are under "en/5.2/" too.
-                if let Some(root) = moved_root(&url, &at, &roots) {
-                    info!("{}: {url} is now under {root}", target.domain);
-                    roots.push(root);
-                }
-                indexes.push((root_pages.contains(&url), at, body));
-            }
-            Err(error) => {
-                result.outcomes.push(SitePageOutcome {
-                    url: url.to_string(),
-                    final_url: None,
-                    status: "discovery-failed".into(),
-                });
-                info!("{}: index page {url}: {error}", target.domain);
-            }
-        }
-    }
+    let indexes =
+        read_index_pages(&mut visit, &cfg, target, &mut roots, &mut result.outcomes).await;
     let wanted = target.max_pages.max(1);
     let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
     for (root, at, body) in &indexes {
@@ -176,91 +165,73 @@ pub async fn fetch_site_pages_with_extraction(
         }
     }
     let sitemaps = sitemaps_of(&mut visit, target, &roots).await;
+    let from_indexes = found.count;
     result
         .outcomes
         .extend(read_sitemaps(&mut visit, &cfg, &target.domain, sitemaps, &mut found).await);
     result.found = found.count;
-    let urls = found.balanced(wanted);
+    let follow = found.count == from_indexes && found.count < wanted;
+    let urls = found.balanced(wanted, wanted.saturating_mul(SPARE_FACTOR));
     info!(
-        "{}: {} pages found under {}, fetching {}",
+        "{}: {} pages found under {}, fetching {}{}",
         target.domain,
         result.found,
         target.roots.join(", "),
-        urls.len()
+        urls.len().min(wanted),
+        if follow { " and following links" } else { "" }
     );
+    // Each page with how many links it is from an index page or root.
+    let mut queue: std::collections::VecDeque<(Url, usize)> =
+        urls.into_iter().map(|url| (url, 1)).collect();
     let mut seen = HashSet::new();
     let mut why = std::collections::BTreeMap::<String, usize>::new();
-    for url in urls {
-        let mut outcome = visit.fetch_homepage(&target.domain, &url).await;
-        // A page that only sends you on, with a `<meta>` refresh or a
-        // script ("Redirecting…"): the page it sends you to, on its host.
-        if let CrawlOutcome::Fetched(page) = &outcome {
-            if is_stub(page.meta.title.as_deref()) {
-                if let Ok(stub) = Url::parse(&page.final_url) {
-                    if let Ok((at, body)) = fetch_list(&mut visit, &cfg, stub).await {
-                        if let Some(next) = refresh_target(&at, &String::from_utf8_lossy(&body))
-                            .filter(|next| next.host_str() == at.host_str() && *next != at)
-                        {
-                            outcome = visit.fetch_homepage(&target.domain, &next).await;
+    let mut refused = 0;
+    while result.pages.len() < wanted {
+        if refused == MAX_REFUSED {
+            info!(
+                "{}: refused {refused} pages in a row, leaving the rest",
+                target.domain
+            );
+            break;
+        }
+        let Some((url, depth)) = queue.pop_front() else {
+            break;
+        };
+        let fetched = fetch_page(&mut visit, &cfg, &target.domain, &roots, &url, &seen).await;
+        refused = match &fetched {
+            Err(skip) if skip.refused => refused + 1,
+            _ => 0,
+        };
+        let (final_url, status) = match fetched {
+            Ok((at, mut meta)) => {
+                if follow && depth < FOLLOW_DEPTH {
+                    for link in &meta.own_links {
+                        if let Some(link) = Url::parse(&link.url).ok().and_then(|l| found.add(l)) {
+                            queue.push_back((link, depth + 1));
                         }
                     }
                 }
-            }
-        }
-        let mut final_url = None;
-        let skipped = match outcome {
-            CrawlOutcome::Fetched(page) => {
-                let at = Url::parse(&page.final_url).ok().map(|mut at| {
-                    at.set_fragment(None);
-                    at
+                // A site's pages are held until it is done: without their
+                // links to the site, which nothing after this reads.
+                meta.own_links = Vec::new();
+                seen.insert(at.to_string());
+                result.pages.push(SitePage {
+                    url: at.to_string(),
+                    meta,
                 });
-                match at {
-                    // A page under the roots, or one it redirects to on the
-                    // same host ("stable/" to "2.9/").
-                    Some(at)
-                        if (under_roots(&at, &roots) || at.host_str() == url.host_str())
-                            && !seen.contains(at.as_str()) =>
-                    {
-                        seen.insert(at.to_string());
-                        final_url = Some(at.to_string());
-                        // A site's pages are held until it is done: without
-                        // their links to the site, which nothing here reads.
-                        result.pages.push(SitePage {
-                            url: at.into(),
-                            meta: plumb_crawl::PageMeta {
-                                own_links: Vec::new(),
-                                ..page.meta
-                            },
-                        });
-                        None
-                    }
-                    Some(at) if seen.contains(at.as_str()) => Some("a page fetched before".into()),
-                    _ => Some("a redirect off the site's host".into()),
-                }
+                (Some(at.to_string()), "fetched".to_string())
             }
-            CrawlOutcome::RobotsDisallowed => Some("disallowed by robots.txt".into()),
-            CrawlOutcome::OffsiteRedirect { .. } => Some("a redirect to another site".into()),
-            CrawlOutcome::HttpStatus { status } => Some(format!("HTTP {status}")),
-            CrawlOutcome::NotHtml { .. } => Some("not a web page".into()),
-            CrawlOutcome::BotCheck { .. } => Some("a bot check".into()),
-            CrawlOutcome::Failed { error, .. } => {
-                debug!("{url}: {error}");
-                Some(if error.starts_with("robots.txt") {
-                    "robots.txt could not be read".into()
-                } else {
-                    "failed".into()
-                })
+            Err(skip) => {
+                result.skipped += 1;
+                *why.entry(skip.reason.clone()).or_default() += 1;
+                (None, skip.reason)
             }
         };
         result.outcomes.push(SitePageOutcome {
             url: url.to_string(),
             final_url,
-            status: skipped.clone().unwrap_or_else(|| "fetched".into()),
+            status,
         });
-        if let Some(reason) = skipped {
-            result.skipped += 1;
-            *why.entry(reason).or_default() += 1;
-        }
     }
     let why: Vec<String> = why
         .into_iter()
@@ -279,6 +250,128 @@ pub async fn fetch_site_pages_with_extraction(
     );
     result.finished = true;
     result
+}
+
+/// Reads `target`'s index pages, adding to `roots` those the pages moved
+/// under, and returns each read with whether it is a root's own page,
+/// where it was and its body.
+async fn read_index_pages(
+    visit: &mut Visit<'_>,
+    cfg: &CrawlConfig,
+    target: &SitePagesTarget,
+    roots: &mut Vec<Url>,
+    outcomes: &mut Vec<SitePageOutcome>,
+) -> Vec<(bool, Url, Vec<u8>)> {
+    let root_pages = roots.clone();
+    let mut indexes = Vec::new();
+    for index in &target.index_pages {
+        let Ok(url) = http_url(index) else { continue };
+        match fetch_list(visit, cfg, url.clone()).await {
+            Ok((at, body)) => {
+                outcomes.push(SitePageOutcome {
+                    url: url.to_string(),
+                    final_url: Some(at.to_string()),
+                    status: "discovery-fetched".into(),
+                });
+                // "en/stable/contents/" sends you on to "en/5.2/contents/":
+                // the pages are under "en/5.2/" too.
+                if let Some(root) = moved_root(&url, &at, roots) {
+                    info!("{}: {url} is now under {root}", target.domain);
+                    roots.push(root);
+                }
+                indexes.push((root_pages.contains(&url), at, body));
+            }
+            Err(error) => {
+                outcomes.push(SitePageOutcome {
+                    url: url.to_string(),
+                    final_url: None,
+                    status: "discovery-failed".into(),
+                });
+                info!("{}: index page {url}: {error}", target.domain);
+            }
+        }
+    }
+    indexes
+}
+
+/// Why a page was not kept, and whether the site refused it.
+struct Skip {
+    reason: String,
+    refused: bool,
+}
+
+impl Skip {
+    fn because(reason: impl Into<String>) -> Self {
+        Skip {
+            reason: reason.into(),
+            refused: false,
+        }
+    }
+}
+
+/// Fetches the page at `url` of `domain`, and returns where it was, after
+/// redirects, and what it says: a page under `roots`, or one it redirects
+/// to on the same host ("stable/" to "2.9/"), not one of `seen`.
+async fn fetch_page(
+    visit: &mut Visit<'_>,
+    cfg: &CrawlConfig,
+    domain: &str,
+    roots: &[Url],
+    url: &Url,
+    seen: &HashSet<String>,
+) -> Result<(Url, PageMeta), Skip> {
+    let mut outcome = visit.fetch_homepage(domain, url).await;
+    // A page that only sends you on, with a `<meta>` refresh or a script
+    // ("Redirecting…"): the page it sends you to, on its host.
+    if let CrawlOutcome::Fetched(page) = &outcome {
+        if is_stub(page.meta.title.as_deref()) {
+            if let Ok(stub) = Url::parse(&page.final_url) {
+                if let Ok((at, body)) = fetch_list(visit, cfg, stub).await {
+                    if let Some(next) = refresh_target(&at, &String::from_utf8_lossy(&body))
+                        .filter(|next| next.host_str() == at.host_str() && *next != at)
+                    {
+                        outcome = visit.fetch_homepage(domain, &next).await;
+                    }
+                }
+            }
+        }
+    }
+    match outcome {
+        CrawlOutcome::Fetched(page) => {
+            let at = Url::parse(&page.final_url).ok().map(|mut at| {
+                at.set_fragment(None);
+                at
+            });
+            match at {
+                Some(at) if seen.contains(at.as_str()) => {
+                    Err(Skip::because("a page fetched before"))
+                }
+                Some(at) if under_roots(&at, roots) || at.host_str() == url.host_str() => {
+                    Ok((at, page.meta))
+                }
+                _ => Err(Skip::because("a redirect off the site's host")),
+            }
+        }
+        CrawlOutcome::RobotsDisallowed => Err(Skip::because("disallowed by robots.txt")),
+        CrawlOutcome::OffsiteRedirect { .. } => Err(Skip::because("a redirect to another site")),
+        CrawlOutcome::HttpStatus { status } => Err(Skip {
+            reason: format!("HTTP {status}"),
+            refused: matches!(status, 401 | 403 | 429),
+        }),
+        CrawlOutcome::NotHtml { .. } => Err(Skip::because("not a web page")),
+        CrawlOutcome::BotCheck { .. } => Err(Skip {
+            reason: "a bot check".into(),
+            refused: true,
+        }),
+        CrawlOutcome::Failed { error, .. } => {
+            debug!("{url}: {error}");
+            Err(Skip::because(if error.starts_with("robots.txt") {
+                "robots.txt could not be read"
+            } else {
+                "failed"
+            }))
+        }
+    }
 }
 
 /// The sitemaps to read for `target`: its own, else those the robots.txt
@@ -316,7 +409,8 @@ async fn sitemaps_of(visit: &mut Visit<'_>, target: &SitePagesTarget, roots: &[U
 }
 
 /// Reads `sitemaps` and the sitemaps their indexes list, breadth first, up
-/// to [`MAX_SITEMAPS`] files, adding the pages they list to `found`.
+/// to [`MAX_SITEMAPS`] files, adding the pages they list to `found`. Those
+/// [`about_roots`] are read first.
 async fn read_sitemaps(
     visit: &mut Visit<'_>,
     cfg: &CrawlConfig,
@@ -325,9 +419,21 @@ async fn read_sitemaps(
     found: &mut Found<'_>,
 ) -> Vec<SitePageOutcome> {
     let mut outcomes = Vec::new();
-    let mut queue: std::collections::VecDeque<Url> = sitemaps.into();
+    let roots = found.roots;
+    let (mut first, mut rest) = (
+        std::collections::VecDeque::new(),
+        std::collections::VecDeque::new(),
+    );
+    for sitemap in sitemaps {
+        let queue = if about_roots(&sitemap, roots) {
+            &mut first
+        } else {
+            &mut rest
+        };
+        queue.push_back(sitemap);
+    }
     let mut read = HashSet::new();
-    while let Some(sitemap) = queue.pop_front() {
+    while let Some(sitemap) = first.pop_front().or_else(|| rest.pop_front()) {
         if read.len() == MAX_SITEMAPS || found.full() {
             break;
         }
@@ -370,6 +476,11 @@ async fn read_sitemaps(
                 // Only a site's own sitemaps: robots.txt may name another
                 // site's, and a sitemap index another host's.
                 if same_site(&sitemap, &url) {
+                    let queue = if about_roots(&url, roots) {
+                        &mut first
+                    } else {
+                        &mut rest
+                    };
                     queue.push_back(url);
                 }
             }
@@ -386,6 +497,19 @@ async fn read_sitemaps(
         found.count
     );
     outcomes
+}
+
+/// Whether `sitemap` is about the roots' part of their site: it has a root's
+/// first folder among its own (`/en-us/sitemaps/sitemap-index-en-us.xml`
+/// for `https://support.apple.com/en-us/`, whose robots.txt names 130
+/// sitemaps, one a country, en-us's 40th).
+fn about_roots(sitemap: &Url, roots: &[Url]) -> bool {
+    roots.iter().any(|root| {
+        let folder = root.path().split('/').find(|s| !s.is_empty());
+        folder.is_some_and(|folder| {
+            sitemap.host_str() == root.host_str() && sitemap.path().split('/').any(|s| s == folder)
+        })
+    })
 }
 
 /// Fetches a sitemap or index page at `url`, following redirects on the
@@ -482,12 +606,24 @@ pub(crate) fn parse_sitemap(body: &[u8]) -> Option<Listed> {
             continue;
         };
         match node.parent_element().map(|p| p.tag_name().name()) {
+            // history.com lists its sitemaps as pages.
+            Some("url") if is_sitemap_address(loc) => listed.sitemaps.push(loc.to_string()),
             Some("url") => listed.pages.push(loc.to_string()),
             Some("sitemap") => listed.sitemaps.push(loc.to_string()),
             _ => {}
         }
     }
     Some(listed)
+}
+
+/// Whether `loc` is the address of a sitemap rather than a page: an XML file.
+fn is_sitemap_address(loc: &str) -> bool {
+    let path = loc
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(loc)
+        .to_ascii_lowercase();
+    path.ends_with(".xml") || path.ends_with(".xml.gz")
 }
 
 /// Whether a page titled `title` only sends you on to another.
@@ -707,13 +843,15 @@ impl<'a> Found<'a> {
     /// what it holds most important ("QuickFacts" on census.gov, three
     /// folders down). Then slots are reserved across the configured roots
     /// (or top-level sections of a whole-site root), and shallow pages
-    /// taken within each.
-    fn balanced(self, wanted: usize) -> Vec<Url> {
-        if self.urls.len() <= wanted {
-            return self.shallowest(wanted);
+    /// taken within each, up to `most`: the first `wanted` as for `wanted`
+    /// alone, then spares in the same order. The pages are taken out, and
+    /// what is added after counts as found anew.
+    fn balanced(&mut self, wanted: usize, most: usize) -> Vec<Url> {
+        let urls = std::mem::take(&mut self.urls);
+        if urls.len() <= wanted {
+            return shallowest(urls, wanted);
         }
-        let mut chosen: Vec<Url> = self
-            .linked
+        let mut chosen: Vec<Url> = std::mem::take(&mut self.linked)
             .into_iter()
             .take(wanted / LINKED_SHARE)
             .collect();
@@ -730,7 +868,7 @@ impl<'a> Found<'a> {
         };
         let distinct = self.roots.iter().map(twin).collect::<HashSet<_>>().len();
         let mut groups = std::collections::BTreeMap::<String, Vec<Url>>::new();
-        for url in self.urls {
+        for url in urls {
             if taken.contains(url.as_str()) {
                 continue;
             }
@@ -765,13 +903,13 @@ impl<'a> Found<'a> {
             })
             .collect();
         groups.sort_by_key(|g| g.front().map_or(usize::MAX, depth));
-        while chosen.len() < wanted {
+        while chosen.len() < most {
             let before = chosen.len();
             for group in &mut groups {
                 if let Some(url) = group.pop_front() {
                     chosen.push(url);
                 }
-                if chosen.len() == wanted {
+                if chosen.len() == most {
                     break;
                 }
             }
@@ -781,19 +919,18 @@ impl<'a> Found<'a> {
         }
         chosen
     }
+}
 
-    /// The `wanted` shallowest pages, those listed first among equals.
-    fn shallowest(self, wanted: usize) -> Vec<Url> {
-        let mut urls: Vec<(usize, usize, Url)> = self
-            .urls
-            .into_iter()
-            .enumerate()
-            .map(|(i, url)| (depth(&url), i, url))
-            .collect();
-        urls.sort_by_key(|(depth, i, _)| (*depth, *i));
-        urls.truncate(wanted);
-        urls.into_iter().map(|(_, _, url)| url).collect()
-    }
+/// The `wanted` shallowest of `urls`, those listed first among equals.
+fn shallowest(urls: Vec<Url>, wanted: usize) -> Vec<Url> {
+    let mut urls: Vec<(usize, usize, Url)> = urls
+        .into_iter()
+        .enumerate()
+        .map(|(i, url)| (depth(&url), i, url))
+        .collect();
+    urls.sort_by_key(|(depth, i, _)| (*depth, *i));
+    urls.truncate(wanted);
+    urls.into_iter().map(|(_, _, url)| url).collect()
 }
 
 /// How deep `url` is: the non-empty segments of its path.
@@ -835,7 +972,7 @@ mod tests {
             found.add(Url::parse(&format!("https://example.org/forms/{i}")).unwrap());
         }
         found.add(Url::parse("https://example.org/benefits/retirement/apply").unwrap());
-        let chosen = found.balanced(4);
+        let chosen = found.balanced(4, 4);
         assert_eq!(chosen.len(), 4);
         assert!(chosen.iter().any(|u| u.path().starts_with("/benefits/")));
     }
@@ -857,7 +994,8 @@ mod tests {
         for film in ["oppenheimer", "barbie"] {
             found.add(Url::parse(&format!("https://www.a.org/m/{film}")).unwrap());
         }
-        let chosen: Vec<String> = found.balanced(4).into_iter().map(String::from).collect();
+        // Two spares after the four wanted, in the same order.
+        let chosen: Vec<String> = found.balanced(4, 6).into_iter().map(String::from).collect();
         assert_eq!(
             chosen,
             [
@@ -865,6 +1003,8 @@ mod tests {
                 "https://www.a.org/celebrity/0",
                 "https://www.a.org/m/oppenheimer",
                 "https://www.a.org/celebrity/1",
+                "https://www.a.org/m/barbie",
+                "https://www.a.org/celebrity/2",
             ]
         );
     }
@@ -973,6 +1113,141 @@ mod tests {
         assert_eq!(few.pages.len(), 1);
     }
 
+    /// Serves `app` as docs.example, and returns the address of a path on
+    /// it and how to fetch from it. A name, not 127.0.0.1, so that its
+    /// pages' links read as links to their own site.
+    async fn serve(app: axum::Router) -> (impl Fn(&str) -> String, CrawlConfig) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = CrawlConfig {
+            per_host_delay: Duration::from_millis(1),
+            timeout: Duration::from_secs(3),
+            resolve: vec![("docs.example".into(), ([127, 0, 0, 1], port).into())],
+            allow_private_addresses: true,
+            ..CrawlConfig::default()
+        };
+        (
+            move |path: &str| format!("http://docs.example:{port}{path}"),
+            cfg,
+        )
+    }
+
+    fn titled(title: &str, body: &str) -> axum::response::Html<String> {
+        axum::response::Html(format!(
+            "<html><head><title>{title}</title></head><body>{body}</body></html>"
+        ))
+    }
+
+    #[tokio::test]
+    async fn fetches_spares_for_pages_gone_and_leaves_a_site_that_refuses() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let port = std::sync::Arc::new(std::sync::OnceLock::<String>::new());
+        let base = port.clone();
+        let app = axum::Router::new()
+            .route(
+                "/sitemap.xml",
+                get(move || async move {
+                    let base = base.get().unwrap();
+                    let mut set = String::from("<urlset>");
+                    for path in ["gone", "a", "b", "c"]
+                        .iter()
+                        .map(|p| format!("docs/x/{p}"))
+                        .chain((0..150).map(|n| format!("shut/{n}")))
+                    {
+                        set.push_str(&format!("<url><loc>{base}/{path}</loc></url>"));
+                    }
+                    set.push_str("</urlset>");
+                    set
+                }),
+            )
+            .route("/docs/x/gone", get(|| async { StatusCode::GONE }))
+            .route(
+                "/docs/x/{page}",
+                get(|| async { titled("Page", "<p>Text.</p>") }),
+            )
+            .route("/shut/{page}", get(|| async { StatusCode::FORBIDDEN }));
+        let (at, cfg) = serve(app).await;
+        port.set(at("")).unwrap();
+        let target = |root: &str, max_pages| SitePagesTarget {
+            domain: "example.test".into(),
+            roots: vec![at(root)],
+            max_pages,
+            ..Default::default()
+        };
+
+        // The page gone is made up for by the next one picked.
+        let docs = fetch_site_pages(&target("/docs/", 2), &cfg).await;
+        let urls: Vec<&str> = docs.pages.iter().map(|page| page.url.as_str()).collect();
+        assert_eq!(urls, [at("/docs/x/a"), at("/docs/x/b")]);
+        assert_eq!(docs.skipped, 1);
+
+        let shut = fetch_site_pages(&target("/shut/", 150), &cfg).await;
+        assert!(shut.pages.is_empty());
+        assert_eq!(shut.skipped, MAX_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn follows_links_on_a_site_without_a_sitemap() {
+        use axum::routing::get;
+
+        let app = axum::Router::new()
+            .route(
+                "/docs/",
+                get(|| async {
+                    axum::response::Html(r#"<a href="/docs/topic">Topic</a>"#.to_string())
+                }),
+            )
+            .route(
+                "/docs/topic",
+                get(|| async { titled("Topic", r#"<a href="/docs/topic/article">Article</a>"#) }),
+            )
+            .route(
+                "/docs/topic/article",
+                get(|| async { titled("Article", r#"<a href="/docs/topic/deeper">Deeper</a>"#) }),
+            )
+            .route(
+                "/docs/topic/deeper",
+                get(|| async { titled("Deeper", "<p>Text.</p>") }),
+            );
+        let (at, cfg) = serve(app).await;
+        let target = SitePagesTarget {
+            domain: "docs.example".into(),
+            roots: vec![at("/docs/")],
+            index_pages: vec![at("/docs/")],
+            max_pages: 10,
+            ..Default::default()
+        };
+        let result = fetch_site_pages(&target, &cfg).await;
+        let titles: Vec<_> = result
+            .pages
+            .iter()
+            .filter_map(|page| page.meta.title.as_deref())
+            .collect();
+        // Two links from the index page and no further.
+        assert_eq!(titles, ["Topic", "Article"]);
+    }
+
+    #[test]
+    fn reads_the_sitemaps_about_the_roots_first() {
+        let roots = [Url::parse("https://support.a.com/en-us/").unwrap()];
+        let about = |sitemap: &str| about_roots(&Url::parse(sitemap).unwrap(), &roots);
+        assert!(about(
+            "https://support.a.com/en-us/sitemaps/sitemap-index-en-us.xml"
+        ));
+        assert!(!about(
+            "https://support.a.com/en-ph/sitemaps/sitemap-index-en-ph.xml"
+        ));
+        assert!(!about("https://other.a.com/en-us/sitemap.xml"));
+        let whole = [Url::parse("https://a.com/").unwrap()];
+        assert!(!about_roots(
+            &Url::parse("https://a.com/sitemap.xml").unwrap(),
+            &whole
+        ));
+    }
+
     #[tokio::test]
     async fn rich_fetch_keeps_robots_and_body_bounds() {
         use axum::{response::Html, routing::get, Router};
@@ -1037,6 +1312,19 @@ mod tests {
   <sitemap><loc>https://a.org/s1.xml.gz</loc></sitemap></sitemapindex>"#;
         let listed = parse_sitemap(index).unwrap();
         assert_eq!(listed.sitemaps, ["https://a.org/s1.xml.gz"]);
+        assert!(listed.pages.is_empty());
+
+        // history.com lists its sitemaps as pages.
+        let listing = br#"<urlset><url><loc>https://a.org/articles/sitemap.xml</loc></url>
+  <url><loc>https://a.org/topics/sitemap.xml?page=2</loc></url></urlset>"#;
+        let listed = parse_sitemap(listing).unwrap();
+        assert_eq!(
+            listed.sitemaps,
+            [
+                "https://a.org/articles/sitemap.xml",
+                "https://a.org/topics/sitemap.xml?page=2"
+            ]
+        );
         assert!(listed.pages.is_empty());
 
         let text = b"https://a.org/x\n\nhttps://a.org/y\n";
@@ -1161,7 +1449,10 @@ mod tests {
             found.add(Url::parse(url).unwrap());
         }
         assert_eq!(found.count, 3);
-        let urls: Vec<String> = found.shallowest(2).into_iter().map(String::from).collect();
+        let urls: Vec<String> = shallowest(found.urls, 2)
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(
             urls,
             [

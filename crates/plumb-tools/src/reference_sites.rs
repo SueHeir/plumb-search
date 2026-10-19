@@ -128,7 +128,18 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         max_pages: Some(500),
     },
     // Health.
-    big("www.webmd.com", 10, 10_000),
+    // WebMD names no sitemap: its pages are followed from its sitemap page.
+    ReferenceSite {
+        host: "www.webmd.com",
+        roots: &[],
+        sitemaps: &[],
+        index_pages: &[
+            "https://www.webmd.com/sitemap",
+            "https://www.webmd.com/a-to-z-guides/health-topics",
+        ],
+        weight: 10,
+        max_pages: Some(10_000),
+    },
     big("www.healthline.com", 10, 10_000),
     big("www.mayoclinic.org", 10, 10_000),
     big("www.drugs.com", 9, 10_000),
@@ -183,7 +194,6 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     whole("www.merckmanuals.com", 6),
     whole("www.babycenter.com", 6),
     whole("www.whattoexpect.com", 5),
-    whole("www.livestrong.com", 5),
     whole("www.testing.com", 4),
     whole("www.verywellmind.com", 5),
     whole("www.verywellfit.com", 5),
