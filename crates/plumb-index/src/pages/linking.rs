@@ -302,10 +302,16 @@ impl PageSearcher {
     /// that would score too little to be placed ([`MIN_PARTIAL_SCORE`])
     /// gives way to the next. A page only meaning found is never placed
     /// under its site. Callers check the searcher's options
-    /// ([`super::options_allow`]) after, as for any page found.
-    pub fn add_meant(&self, meant: &[MeantPage], found: &mut Vec<PageHit>) -> Result<()> {
+    /// ([`super::options_allow`]) after, as for any page found, and give
+    /// the address of the page added, if any, to the learned order
+    /// ([`crate::learned::reorder_results`]).
+    pub fn add_meant(
+        &self,
+        meant: &[MeantPage],
+        found: &mut Vec<PageHit>,
+    ) -> Result<Option<String>> {
         if found.iter().any(|hit| hit.named || hit.whole) {
-            return Ok(());
+            return Ok(None);
         }
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
@@ -337,7 +343,7 @@ impl PageSearcher {
                 Some(at) => {
                     let listed = found[at].score >= MIN_PARTIAL_SCORE;
                     if listed && found[at].page.is_article() {
-                        return Ok(());
+                        return Ok(None);
                     }
                     // A page of another kind words list, or one that does
                     // not count, does not keep out the next nearest: on hpc
@@ -385,9 +391,9 @@ impl PageSearcher {
                 })
                 .unwrap_or(found.len());
             found.insert(at, hit);
-            return Ok(());
+            return Ok(Some(url.clone()));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// The page stored at `address`.

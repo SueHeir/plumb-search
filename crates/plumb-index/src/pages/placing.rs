@@ -309,6 +309,12 @@ pub(crate) fn is_record(hit: &PageHit) -> bool {
     hit.page.set == RECORDS_SET
 }
 
+/// Whether `hit` was listed only for what the query means
+/// ([`PageHit::meant`]), and so goes after [`PARTIAL_AFTER`] sites.
+pub(crate) fn only_meant(hit: &PageHit) -> bool {
+    hit.meant && !hit.named && !hit.whole
+}
+
 /// Best sites of a query looked at for the site of a subpage found by its
 /// words ([`subpage_asked`]).
 const SUBPAGE_SITES: usize = 3;
@@ -637,7 +643,7 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         }
         if is_record(&page.hit) || code(page) {
             page.at = 0;
-        } else if namesake || page.hit.meant && !page.hit.named && !page.hit.whole {
+        } else if namesake || only_meant(&page.hit) {
             page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());

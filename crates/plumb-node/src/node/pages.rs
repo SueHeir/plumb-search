@@ -1247,9 +1247,12 @@ pub(super) fn add_pages(
             {
                 warn!("searching pages in the other number: {err:#}");
             }
-            if let Err(err) = searcher.add_meant(&results.meant, &mut found) {
-                warn!("adding the page nearest in meaning: {err:#}");
-            }
+            let meant = searcher
+                .add_meant(&results.meant, &mut found)
+                .unwrap_or_else(|err| {
+                    warn!("adding the page nearest in meaning: {err:#}");
+                    None
+                });
             if let Some(wanted) = &wanted {
                 add_wanted(wanted, query, &mut found);
             }
@@ -1329,6 +1332,7 @@ pub(super) fn add_pages(
                 &inner.rank,
                 query,
                 results.sites_ordered,
+                meant.as_deref(),
                 &mut results.hits,
                 &mut results.pages,
             );

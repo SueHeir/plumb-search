@@ -222,6 +222,7 @@ A second model, built in from [learned_sites_model.json](../crates/plumb-index/s
 The model only reorders. Guards in `reorder` keep the hand-made ranking's say where the model is known to go wrong:
 
 - A record the query names by its identifier ("rfc 3339") stays first; the model never saw one.
+- The page nearest the search in meaning, which a node given page vectors lists ([pages.md](pages.md)), is not read and stays where placing put it, after the third site. The model reads each row's place, so listing one moved the sites below it too: "calories in a shot" put davidprotein.com second.
 - A site with nothing but popularity behind it cannot jump over a site placed above it.
 - A site lacking some of the query's words cannot pass a site the whole query names.
 - A site's inner page cannot pass a page above it on popularity alone, and a docs page stays below the best site.
