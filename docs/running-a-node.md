@@ -163,9 +163,10 @@ Every flag of `plumb run`, grouped. Defaults are in brackets, and those in the p
 
 ## The panel and saved settings
 
-The panel at `/app` shows what the node is doing and holds the settings that have no flag: background updates, workload, download and storage limits, crawl hours, pausing, filling, page sets and focus topics. It takes changes only from the computer the node runs on (a loopback address, not through a proxy). On a server, reach it through an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 server`, then http://127.0.0.1:8080/app) or use [remote control](#remote-control).
+The panel at `/app` shows what the node is doing and holds the settings that have no flag: background updates, workload, download and storage limits, crawl hours, pausing, filling, page sets, focus topics and how much the project's site grades count. It takes changes only from the computer the node runs on (a loopback address, not through a proxy). On a server, reach it through an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 server`, then http://127.0.0.1:8080/app) or use [remote control](#remote-control).
 
 - Settings are saved in `DIR/settings.json` and apply at once. Until you save them, the profile's defaults apply.
+- **Site grades** (100% by default) is how far searches push down the sites the project's `plumb/site-grades` set marks: a site a language model judged spam loses 90% of its score at 100% (unless the search is its address), one of little use 30% (unless the search names it or it is an organization's official site), in this node's results and in other nodes' alike. 0 turns the grades off. See [tools/grades](../tools/grades/README.md).
 - Optional features (the network, search by meaning, sharing popularity, search history, bootstrap and trusted nodes, search scope, answer limit, spending credits) are saved in `DIR/features.json` and apply when the node starts again. Once that file exists it wins over `--network`, `--search-by-meaning`, `--share-popularity`, `--search-history`, `--bootstrap`, `--trust-peer` and `--no-default-trust`; the log says when one of the first four is ignored. Delete the file while the node is stopped to go back to flags alone.
 
 ## Storage limits and focus topics

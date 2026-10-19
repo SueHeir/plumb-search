@@ -115,7 +115,13 @@ pub(crate) async fn network_search(
         if let Some(node) = &node {
             take_found(&**node, &mut found);
         }
-        let mut results = rank_found(found, &query, limit, &rank, &options)?;
+        // A few more when grades may push some out, as the node's own.
+        let grades = node.as_ref().and_then(|node| node.site_grades());
+        let wanted = match grades {
+            Some(_) => limit + plumb_index::grades::MARGIN,
+            None => limit,
+        };
+        let mut results = rank_found(found, &query, wanted, &rank, &options)?;
         if let Some(node) = &node {
             // The index fills in the key pages of a few sites that keep
             // crawlers out (`key_pages_or_known`), past the check above.
@@ -128,6 +134,15 @@ pub(crate) async fn network_search(
                     .hits
                     .retain(|result| !node.blocks_adult(&result.hit.domain));
             }
+        }
+        // And graded sites go down as in the node's own results, or other
+        // nodes would put back what it pushed out.
+        if let Some((grades, percent)) = &grades {
+            let hits = &mut results.hits;
+            plumb_index::grades::demote_by(grades, *percent, &query, hits, |result| {
+                &mut result.hit
+            });
+            results.hits.truncate(limit);
         }
         Ok(results)
     })

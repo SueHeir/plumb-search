@@ -389,6 +389,11 @@ pub trait StatusSource: Send + Sync {
     fn blocks_adult(&self, _domain: &str) -> bool {
         false
     }
+    /// The site grades the node's searches push sites down by, and the
+    /// share of their penalty its settings take, while it takes any.
+    fn site_grades(&self) -> Option<(Arc<plumb_index::grades::SiteGrades>, u8)> {
+        None
+    }
 
     /// Keeps the signed crawls a network search found, their stored
     /// items held as lines.

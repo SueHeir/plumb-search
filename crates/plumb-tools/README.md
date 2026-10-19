@@ -73,6 +73,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `fact-trust` | How often each site's pages state Wikidata's facts right, from Common Crawl's page text |
 | | `summaries pick` | Write the best-scored sites with no text, for a language model to describe |
 | | `summaries apply` | Write the sentences that came back into a copy of the records (see [tools/summaries](../../tools/summaries/README.md)) |
+| | `grades pick` | Write a records file's sites for a language model to grade, those about health, addiction, money or law first and well-known ones left out (see [tools/grades](../../tools/grades/README.md)) |
 | Experiments | `fetch-text`, `terms` | Fetch homepages' visible text once, then try ways of picking each site's search terms |
 | | `relations`, `relate` | Learn kinds of Wikidata facts as maps between article vectors, then follow or check a relation |
 | | `embed-pages`, `page-meaning` | Make a vector for each page of a set that has a snippet (or every page, with `--without-snippet`), then measure which pages searches find by meaning in each file; a node or `eval` takes the vectors, a file or a directory of them, with `--page-vectors` |
@@ -83,6 +84,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `set site-rules` | Write the rules that say which site a host is on, from the Public Suffix List, and list the hosts they move |
 | | `set sites` | Write a node's records file as `plumb/sites`, the set other nodes set up and fill from |
 | | `set adult-sites` | Write an adult blocklist as the layer that labels those sites `adult` |
+| | `set site-grades` | Write a language model's grades as the layer that marks spam and low-value sites |
 | | `set map`, `set vectors` | Write the map file or a node's `vectors.bin` as a set |
 | | `set sign` | Check every part and item of a set, then sign its manifest |
 | | `set check` | Check a set as a node does before taking it |
@@ -185,6 +187,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [link_rank.rs](src/link_rank.rs) | `link-rank` |
 | [fact_check.rs](src/fact_check.rs), [fact_trust.rs](src/fact_trust.rs) | Checking pages' statements against Wikidata (Knowledge-Based Trust) |
 | [summaries.rs](src/summaries.rs), [terms.rs](src/terms.rs) | `summaries`, `fetch-text`, `terms` |
+| [grades.rs](src/grades.rs) | `grades pick` |
 | [set.rs](src/set.rs) | `set`: writing, signing and checking sets in the [plumb-format](../plumb-format/README.md) data format |
 | [page_items.rs](src/page_items.rs) | Today's page sets written as items of the data format |
 | [site_rules.rs](src/site_rules.rs) | Site rules beyond the built-in lists, and the hosts a rules set would move |

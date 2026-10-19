@@ -229,6 +229,8 @@ struct Setup {
     searcher: Searcher,
     meaning: Option<MeaningIndex>,
     pages: Option<PageSearcher>,
+    /// With --site-grades, the grades that push sites down.
+    grades: Option<plumb_index::grades::SiteGrades>,
     /// With --recall, the address of every page in the page sets.
     page_urls: HashSet<String>,
     /// Holds the page index while it is searched, when it is not kept in
@@ -343,10 +345,23 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     } else {
         HashSet::new()
     };
+    let grades = match &args.site_grades {
+        Some(dir) => Some(
+            plumb_node::node::grades::read(dir)
+                .with_context(|| {
+                    format!(
+                        "reading the site grades in {} (signed by any key, such as one from `plumb-tools set new-key`)",
+                        dir.display()
+                    )
+                })?,
+        ),
+        None => None,
+    };
     Ok(Setup {
         searcher,
         meaning,
         pages,
+        grades,
         page_urls,
         _pages_dir: pages_dir,
     })
@@ -690,6 +705,51 @@ mod pages_cache {
     }
 }
 
+/// How many more sites a search ranks for the site grades to push out,
+/// as a node does.
+fn grades_margin(args: &EvalArgs, setup: &Setup) -> usize {
+    match &setup.grades {
+        Some(grades) if args.site_grades_percent > 0 && !grades.is_empty() => {
+            plumb_index::grades::MARGIN
+        }
+        _ => 0,
+    }
+}
+
+/// `results` with the site grades applied, as a node applies them, cut to
+/// the first `limit`. Without grades they are as they came.
+fn graded(
+    args: &EvalArgs,
+    setup: &Setup,
+    query: &str,
+    mut results: plumb_index::SearchResults,
+    limit: usize,
+) -> plumb_index::SearchResults {
+    if let Some(grades) = &setup.grades {
+        let percent = args.site_grades_percent;
+        plumb_index::grades::demote(grades, percent, query, &mut results.hits);
+        results.hits.truncate(limit);
+    }
+    results
+}
+
+/// The first `limit` sites for `query`, graded as a node grades the
+/// searches behind its answers.
+fn lookup_sites(
+    args: &EvalArgs,
+    setup: &Setup,
+    query: &str,
+    limit: usize,
+    cfg: &plumb_index::RankConfig,
+    options: &SearchOptions,
+) -> Result<plumb_index::SearchResults> {
+    let wanted = limit + grades_margin(args, setup);
+    let found = setup
+        .searcher
+        .search_meaning(query, wanted, cfg, options, None)?;
+    Ok(graded(args, setup, query, found, limit))
+}
+
 /// The rank each query's expected answer was found at, within
 /// `args.limit`. With `verbose`, misses are printed (and `--show`,
 /// `--explain` say more).
@@ -724,7 +784,7 @@ fn evaluate(
     let mut ranks = Vec::with_capacity(queries.len());
     for q in queries {
         if args.facts {
-            ranks.push(fact_rank(args, q, searcher, cfg, pages.as_ref(), verbose)?);
+            ranks.push(fact_rank(args, q, setup, cfg, pages.as_ref(), verbose)?);
             continue;
         }
         let options = SearchOptions {
@@ -742,7 +802,7 @@ fn evaluate(
             let results = searcher
                 .search_meaning(
                     query,
-                    fetched,
+                    fetched + grades_margin(args, setup),
                     &search_cfg,
                     &options,
                     query_meaning
@@ -750,7 +810,7 @@ fn evaluate(
                         .map(|m| m as &dyn plumb_index::Meaning),
                 )
                 .with_context(|| format!("searching for {query:?}"));
-            results.map(|results| (results, query_meaning))
+            results.map(|results| (graded(args, setup, query, results, fetched), query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
         // As a node with pages does (`add_pages`): a query that names a
@@ -882,7 +942,7 @@ fn evaluate(
                 let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
                     None
                 } else {
-                    profile_shown(args, &searched, searcher, cfg, pages)?
+                    profile_shown(args, &searched, setup, cfg, pages)?
                 };
                 let mut rows = listed_with_pages(&lifted, placed);
                 // The profile asked for ("bohemian rhapsody lyrics") is
@@ -1149,7 +1209,7 @@ fn format_sweep(
 fn profile_shown(
     args: &EvalArgs,
     query: &str,
-    searcher: &Searcher,
+    setup: &Setup,
     cfg: &plumb_index::RankConfig,
     pages: &PageSearcher,
 ) -> Result<Option<String>> {
@@ -1171,7 +1231,7 @@ fn profile_shown(
             continue;
         }
         for lookup in answers::song_lookups(&name, &resolution) {
-            let mut sites = searcher.search_meaning(&lookup, 5, cfg, &options, None)?;
+            let mut sites = lookup_sites(args, setup, &lookup, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
             let found = place_pages(&lookup, &sites.hits, pages.search(&lookup, 10)?);
             if let Some(profile) = answers::songs_profile(query, &resolution, found) {
@@ -1189,7 +1249,7 @@ fn profile_shown(
 fn fact_rank(
     args: &EvalArgs,
     q: &EvalQuery,
-    searcher: &Searcher,
+    setup: &Setup,
     cfg: &plumb_index::RankConfig,
     pages: Option<&PageSearcher>,
     verbose: bool,
@@ -1203,7 +1263,7 @@ fn fact_rank(
                 language: args.lang.clone(),
                 ..SearchOptions::default()
             };
-            let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let mut sites = lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
             let found = pages.search(&asked.subject, 10)?;
             let placed = place_pages(&asked.subject, &sites.hits, found);

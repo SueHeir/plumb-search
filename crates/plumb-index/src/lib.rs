@@ -71,6 +71,7 @@
 
 mod analysis;
 pub mod candidates;
+pub mod grades;
 pub mod health;
 mod hits;
 mod indexing;

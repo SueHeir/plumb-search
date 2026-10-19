@@ -59,6 +59,10 @@ pub(in crate::web) struct SettingsForm {
     /// Sent by forms that show the page sets; without it they are kept.
     #[serde(default)]
     pub(in crate::web) page_sets_shown: Option<String>,
+    /// How much the site grades count, in percent; without it the setting
+    /// is kept.
+    #[serde(default)]
+    pub(in crate::web) site_grades_percent: Option<String>,
     /// `page_set.<id>`: a [`PageSetSize`] for each page set shown.
     #[serde(flatten)]
     pub(in crate::web) other: std::collections::HashMap<String, String>,
@@ -341,6 +345,20 @@ pub(in crate::web) fn settings_from_form(
             }
         },
     };
+    let site_grades_percent = match &form.site_grades_percent {
+        None => current.site_grades_percent,
+        Some(text) => match text.trim().parse::<u8>().ok().filter(|p| *p <= 100) {
+            Some(percent) => percent,
+            None => {
+                return Err(settings_error(
+                    StatusCode::BAD_REQUEST,
+                    form,
+                    base,
+                    "Site grades count from 0 to 100 percent. Nothing was changed.",
+                ))
+            }
+        },
+    };
     let mut page_sets = current.page_sets.clone();
     if form.page_sets_shown.is_some() {
         for set in SETS {
@@ -382,6 +400,7 @@ pub(in crate::web) fn settings_from_form(
         } else {
             current.focus_topics.clone()
         },
+        site_grades_percent,
     };
     settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
     Ok(settings)

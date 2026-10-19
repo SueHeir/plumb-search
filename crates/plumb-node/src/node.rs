@@ -113,6 +113,7 @@ mod denylist;
 mod embedding;
 pub mod features;
 mod fill;
+pub mod grades;
 pub mod journal;
 mod network;
 pub mod newer;
@@ -594,6 +595,10 @@ pub struct NodeSettings {
     /// first and twice as often, and keeps more of them when filling a
     /// storage limit. Public in effect: other nodes see what it crawls.
     pub focus_topics: Vec<String>,
+    /// How much the project's site grades ([`grades`]) count, 0 to 100:
+    /// the share of its penalty a site graded spam or low value loses.
+    /// 0 turns them off.
+    pub site_grades_percent: u8,
 }
 
 impl Default for NodeSettings {
@@ -609,6 +614,7 @@ impl Default for NodeSettings {
             setup_chosen: true,
             page_sets: Default::default(),
             focus_topics: Vec::new(),
+            site_grades_percent: 100,
         }
     }
 }
@@ -972,7 +978,13 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     // Before anything is shown.
     {
         let inner = inner.clone();
-        tokio::task::spawn_blocking(move || inner.load_denylist()).await?;
+        tokio::task::spawn_blocking(move || {
+            inner.load_denylist();
+            if !inner.config.crawl_only {
+                inner.grades_from_set();
+            }
+        })
+        .await?;
     }
     inner.journal.info(format!(
         "Plumb Search {} started",
@@ -1394,6 +1406,8 @@ struct Inner {
     wanted_pages: crate::wanted_pages::WantedPages,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
+    /// The project's site grades, once the node holds a set of them.
+    grades: RwLock<Option<Arc<plumb_index::grades::SiteGrades>>>,
     /// The project's denylist, once the node holds one, with its stamp
     /// ([`denylist::read_held`]).
     denylist: RwLock<Option<(Arc<plumb_format::deny::Denylist>, String)>>,
@@ -1468,6 +1482,9 @@ fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
         } else {
             format!("focus topics {}", new.focus_topics.join(", "))
         });
+    }
+    if old.site_grades_percent != new.site_grades_percent {
+        parts.push(format!("site grades count {}%", new.site_grades_percent));
     }
     if old.crawl_hours != new.crawl_hours {
         parts.push(match new.crawl_hours {
@@ -1626,6 +1643,7 @@ impl Inner {
             news,
             wanted_pages,
             adult: RwLock::new(None),
+            grades: RwLock::new(None),
             denylist: RwLock::new(None),
         }
     }
@@ -1897,7 +1915,8 @@ impl Inner {
 
     /// Saves new settings and puts them in force; the background work
     /// looks at them again at once.
-    fn change_settings(&self, new: NodeSettings) -> Result<()> {
+    fn change_settings(&self, mut new: NodeSettings) -> Result<()> {
+        new.site_grades_percent = new.site_grades_percent.min(100);
         {
             let mut settings = self.settings.locked();
             if *settings != new {
@@ -2332,8 +2351,14 @@ impl Inner {
             Some(list) if !list.is_empty() => wanted + denylist::MARGIN,
             _ => wanted,
         };
+        // And sites the project's grades push down, to fill their places.
+        let grades = self.grades_in_force();
+        let wanted = match grades {
+            Some(_) => wanted + plumb_index::grades::MARGIN,
+            None => wanted,
+        };
         let run = |options: &SearchOptions| -> Result<SearchResults> {
-            Ok(match network::handle(self).map(|net| net.popularity()) {
+            let mut results = match network::handle(self).map(|net| net.popularity()) {
                 None => index.backend().search_full_with(
                     query,
                     wanted,
@@ -2353,7 +2378,11 @@ impl Inner {
                     network::apply_popularity(&table, query, &mut results.hits);
                     results
                 }
-            })
+            };
+            if let Some((grades, percent)) = &grades {
+                plumb_index::grades::demote(grades, *percent, query, &mut results.hits);
+            }
+            Ok(results)
         };
         let mut results = run(options)?;
         // Results shown for a spelling are for what was typed after all
@@ -2442,6 +2471,10 @@ impl StatusSource for Inner {
 
     fn blocks_adult(&self, domain: &str) -> bool {
         self.adult_list().is_some_and(|list| list.contains(domain))
+    }
+
+    fn site_grades(&self) -> Option<(Arc<plumb_index::grades::SiteGrades>, u8)> {
+        self.grades_in_force()
     }
 
     fn keep_from_network(&self, sites: plumb_core::sites::SiteList) {

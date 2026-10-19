@@ -445,6 +445,26 @@ async fn network_results_go_through_the_denylist() {
         assert!(!page.contains("facebook.com/marketplace"), "{path}: {page}");
     }
 
+    // A site graded spam loses 90% of its score, as in the node's own
+    // results.
+    let score = |body: &str| {
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        let hits = body["hits"].as_array().unwrap().clone();
+        let hit = hits
+            .into_iter()
+            .find(|hit| hit["domain"] == "lighthouse-keepers.org");
+        hit.unwrap()["score"].as_f64().unwrap()
+    };
+    let ungraded = score(&body);
+    hold_grades(
+        dir.path(),
+        &publisher,
+        &[("lighthouse-keepers.org", "spam")],
+    );
+    node.inner.grades_from_set();
+    let (_, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
+    assert!((score(&body) / ungraded - 0.1).abs() < 1e-5, "{body}");
+
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }

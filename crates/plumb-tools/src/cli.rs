@@ -56,6 +56,9 @@ pub enum Command {
     /// One sentence about each well-known site with no text, written by a
     /// language model: `pick` the sites, then `apply` the sentences.
     Summaries(crate::summaries::SummariesArgs),
+    /// The sites a language model grades (spam, low value) for the
+    /// `plumb/site-grades` set: `pick` them from a records file.
+    Grades(crate::grades::GradesArgs),
     /// Measure node storage and private-search bucket sizes without changing data.
     Storage(StorageArgs),
     /// Rank the sites in a records file by the links their homepages make
@@ -617,6 +620,14 @@ pub struct EvalArgs {
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
     pub rank: Option<plumb_index::RankConfig>,
+    /// A site grades set (`plumb-tools set site-grades`, signed by any
+    /// key) whose grades push sites down, as on a node that holds it.
+    #[arg(long, value_name = "DIR")]
+    pub site_grades: Option<PathBuf>,
+    /// How much the site grades count, 0 to 100, as a node's setting.
+    #[arg(long, value_name = "PERCENT", default_value_t = 100,
+        value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub site_grades_percent: u8,
     /// For each miss, also show how the first site and the expected one
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]

@@ -263,11 +263,16 @@ pub(super) fn render_settings(body: &mut String, settings: &NodeSettings, base: 
          often, and keeps more of them when the storage limit is tight, so the more nodes \
          focus on a topic, the better Plumb knows it. Other nodes can tell from what this \
          node crawls. The interests on a browser\u{2019}s About you page stay private: they \
-         only change which sites this node keeps.</p>\n",
+         only change which sites this node keeps.</p>\n\
+         <label>Site grades <input type=\"number\" name=\"site_grades_percent\" min=\"0\" \
+         max=\"100\" step=\"1\" value=\"{}\"> %</label>\n\
+         <p class=\"hint\">How much the project\u{2019}s grades push down sites a language \
+         model judged spam or of little use. 100 follows them fully, 0 turns them off.</p>\n",
         limit(settings.download_limit_mb_per_day),
         limit(settings.storage_limit_mb),
         checked(settings.fill_from_network),
-        escape_html(&settings.focus_topics.join("\n"))
+        escape_html(&settings.focus_topics.join("\n")),
+        settings.site_grades_percent
     ));
     let hours = settings
         .crawl_hours

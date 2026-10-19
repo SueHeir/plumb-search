@@ -711,7 +711,7 @@ fn complaint_in_body(words: &[&str]) -> bool {
 }
 
 /// Whether `query` asks about a person's illness, symptom or drug.
-pub(crate) fn is_medical(query: &str) -> bool {
+pub fn is_medical(query: &str) -> bool {
     let query = normalize_text(query);
     let padded = format!(" {query} ");
     if NOT_MEDICAL

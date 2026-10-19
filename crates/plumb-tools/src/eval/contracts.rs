@@ -489,9 +489,14 @@ fn observe(
     let words = if ops.any() { &ops.words } else { &query };
     let meaning = setup.meaning.as_ref().and_then(|m| m.query(words));
     let semantic = meaning.as_ref().map(|m| m as &dyn Meaning);
-    let mut found = setup
-        .searcher
-        .search_meaning(&query, args.limit, cfg, &options, semantic)?;
+    let found = setup.searcher.search_meaning(
+        &query,
+        args.limit + super::grades_margin(args, setup),
+        cfg,
+        &options,
+        semantic,
+    )?;
+    let mut found = super::graded(args, setup, &query, found, args.limit);
     let paper = plumb_core::paper_query::PaperQuery::parse(&query)?;
     let typed = case
         .options
@@ -584,10 +589,7 @@ fn observe(
             plumb_core::facts::fact_asked(&case.query),
             scoped_pages.as_ref(),
         ) {
-            let lookup_sites =
-                setup
-                    .searcher
-                    .search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let lookup_sites = super::lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
             let lookup_pages = pages.search(&asked.subject, 10)?;
             let lookup = place_pages(&asked.subject, &lookup_sites.hits, lookup_pages);
             answer = plumb_node::web::answers::fact_answer(&asked, &lookup, now);
