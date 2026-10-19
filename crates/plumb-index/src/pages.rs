@@ -55,6 +55,7 @@ pub use self::placing::{
 };
 pub(crate) use self::placing::{
     asked_as_question, is_record, is_year, kept_below, named_page_site, names_best_site_page,
+    only_meant,
 };
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};

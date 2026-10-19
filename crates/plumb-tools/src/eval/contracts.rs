@@ -511,10 +511,11 @@ fn observe(
     } else {
         Vec::new()
     };
+    let mut meant = None;
     if typed.is_none() && !ops.any() {
         if let Some(pages) = &scoped_pages {
             pages.add_other_number(words, &found.hits, &mut raw_pages, 10)?;
-            pages.add_meant(&found.meant, &mut raw_pages)?;
+            meant = pages.add_meant(&found.meant, &mut raw_pages)?;
         }
     }
     let mut filtered: Vec<_> = raw_pages
@@ -569,6 +570,7 @@ fn observe(
             cfg,
             words,
             found.sites_ordered,
+            meant.as_deref(),
             &mut found.hits,
             &mut placed,
         );
