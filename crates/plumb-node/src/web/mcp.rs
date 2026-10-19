@@ -33,6 +33,10 @@
 //! allows it: a lead goes out signed with the node's key. Behind a reverse proxy on the
 //! same computer that does not say who it forwards for, every request looks
 //! local (see `docs/docker.md`), so such a node should not share findings.
+//!
+//! The tools that change what the node shows (`fetch_pages`,
+//! `focus_topics`) and `node_tuning` go to the same apps as findings: those
+//! on the node's own computer, or every client with `--mcp-manage`.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -335,6 +339,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let reads_pages = state.settings.read_pages_for_all || here;
     let no_findings = wants_no_findings(request.uri());
     let keeps_findings = !no_findings && (state.settings.findings_for_all || here);
+    let manages = state.settings.manage_for_all || here;
     let text_answers = wants_text_answers(request.uri());
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
@@ -410,6 +415,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
             None
         })
         .with_leads(here && !no_findings)
+        .with_manage(manages)
         .with_plugin_results(plugins);
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;

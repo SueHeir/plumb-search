@@ -353,3 +353,78 @@ fn searches_and_pages_are_forgotten_on_time() {
     assert!(saved.contains("/brackets"));
     assert!(!saved.contains("/limits"));
 }
+
+#[test]
+fn pages_an_app_asks_for_are_kept_a_year_and_summed_up_by_site() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = WantedPages::open(dir.path()).for_asks();
+    let lead = Lead {
+        url: "https://www.nasa.gov/exoplanets/".into(),
+        label: "Exoplanets".into(),
+        depth: 1,
+    };
+    let asked = |start, now| {
+        store.ask(
+            "nasa.gov",
+            "https://nasa.gov/",
+            start,
+            words(&["exoplanet"]),
+            now,
+        )
+    };
+    let target = asked(None, NOW);
+    assert_eq!(target.max_fetches, ASKED_FETCHES);
+    assert!(target.leads.is_empty());
+    let page = |path: &str, depth| WantedPage {
+        url: format!("https://www.nasa.gov/{path}"),
+        title: "Exoplanet".into(),
+        depth,
+        ..WantedPage::default()
+    };
+    let followed = Followed {
+        domain: "nasa.gov".into(),
+        pages: vec![
+            (page("exoplanets/kepler", 2), 0),
+            (page("exoplanets/", 1), 0),
+        ],
+        leads: vec![lead.clone()],
+        elsewhere: vec![(
+            Lead {
+                url: "https://www.esa.int/exoplanets".into(),
+                ..lead.clone()
+            },
+            0,
+        )],
+        ..Followed::default()
+    };
+    assert_eq!(store.apply(&[target], vec![followed], NOW, |_| true), 2);
+    // Asked again, the visit starts on the page given, then the leads of
+    // the last one.
+    let given = Lead {
+        url: "https://www.nasa.gov/exoplanets/catalog".into(),
+        label: "exoplanet".into(),
+        depth: 1,
+    };
+    assert_eq!(
+        asked(Some(given.clone()), NOW + 1).leads,
+        [given, lead.clone()]
+    );
+    let pages = store.pages_of("nasa.gov");
+    assert_eq!(
+        pages,
+        [page("exoplanets/", 1), page("exoplanets/kepler", 2)]
+    );
+    assert!(store.pages_of("esa.int").is_empty());
+    let (sites, kept) = store.summary();
+    assert_eq!(kept, 2);
+    // No one chose the sites its pages link to.
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].site, "nasa.gov");
+    assert_eq!(sites[0].pages, 2);
+    assert_eq!(sites[0].words, ["exoplanet"]);
+    // Kept past a search's month, gone after a year.
+    store.prune(NOW + WANT_KEPT * 2, 10);
+    assert_eq!(store.summary().1, 2);
+    store.prune(NOW + 1 + ASKED_KEPT, 10);
+    assert_eq!(store.summary(), (Vec::new(), 0));
+}

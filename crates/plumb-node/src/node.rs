@@ -127,6 +127,7 @@ pub(crate) mod signed_sets;
 mod site_set;
 pub(crate) mod store;
 mod trim;
+mod tuning;
 mod wanted_pages;
 mod worker;
 
@@ -137,6 +138,8 @@ pub use fill::FillStatus;
 pub use journal::{LogEntry, LogLevel};
 pub use schedule::{CrawlHours, Workload};
 use store::{DirLock, Paths, SavedState};
+pub use tuning::Tuning;
+pub use wanted_pages::Fetched;
 
 /// How long a count of the data folder's size is used before counting again.
 const DISK_COUNT_MAX_AGE: Duration = Duration::from_secs(30);
@@ -199,6 +202,9 @@ pub struct NodeConfig {
     /// Every client of `/mcp` may keep and see findings, not only this
     /// computer's.
     pub mcp_findings: bool,
+    /// Every client of `/mcp` may use the tools that change what the node
+    /// shows, not only this computer's.
+    pub mcp_manage: bool,
     /// How `read_page` fetches pages.
     pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
@@ -357,6 +363,7 @@ impl NodeConfig {
             web_search: None,
             mcp_read_pages: false,
             mcp_findings: false,
+            mcp_manage: false,
             page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
@@ -997,6 +1004,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
         findings_for_all: inner.config.mcp_findings,
+        manage_for_all: inner.config.mcp_manage,
         page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };
@@ -1404,6 +1412,10 @@ struct Inner {
     news: crate::news::NewsStore,
     /// The inner pages this node's searches wanted, and the ones found.
     wanted_pages: crate::wanted_pages::WantedPages,
+    /// The inner pages AI apps asked for with `fetch_pages`.
+    asked_pages: crate::wanted_pages::WantedPages,
+    /// Held while `fetch_pages` follows a site's links: one site at a time.
+    asking: tokio::sync::Mutex<()>,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
     /// The project's site grades, once the node holds a set of them.
@@ -1590,6 +1602,9 @@ impl Inner {
         let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
         let wanted_pages = crate::wanted_pages::WantedPages::open(&opened.paths.wanted)
             .with_budget(storage.clone());
+        let asked_pages = crate::wanted_pages::WantedPages::open(&opened.paths.asked)
+            .with_budget(storage.clone())
+            .for_asks();
         Inner {
             config,
             paths: opened.paths,
@@ -1642,6 +1657,8 @@ impl Inner {
             map,
             news,
             wanted_pages,
+            asked_pages,
+            asking: tokio::sync::Mutex::new(()),
             adult: RwLock::new(None),
             grades: RwLock::new(None),
             denylist: RwLock::new(None),
@@ -1721,32 +1738,38 @@ impl Inner {
 
     /// [`Inner::pause`], with `disk_used` the size of the data folder.
     fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
-        self.download_pause().or_else(|| {
-            let limit = self.settings().storage_limit_mb;
-            (limit > 0
-                && (disk_used() >= limit.saturating_mul(MB)
-                    || self
-                        .storage
-                        .as_ref()
-                        .is_some_and(|budget| budget.status().backpressure)))
-            .then(|| Pause::new("Paused: the storage limit is reached", None))
-        })
+        self.download_pause()
+            .or_else(|| self.storage_pause(disk_used))
+    }
+
+    /// Why downloads must wait for the storage limit, with `disk_used` the
+    /// size of the data folder.
+    fn storage_pause(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
+        let limit = self.settings().storage_limit_mb;
+        (limit > 0
+            && (disk_used() >= limit.saturating_mul(MB)
+                || self
+                    .storage
+                    .as_ref()
+                    .is_some_and(|budget| budget.status().backpressure)))
+        .then(|| Pause::new("Paused: the storage limit is reached", None))
     }
 
     /// Why downloads of page sets, vectors and the meaning model must wait
     /// now, if they must: as crawls, but for the storage limit, which they
     /// keep to by what they download.
     fn download_pause(&self) -> Option<Pause> {
+        self.owner_pause().or_else(|| self.download_limit_pause())
+    }
+
+    /// Why downloads must wait for the day's download limit.
+    fn download_limit_pause(&self) -> Option<Pause> {
         let limit = self.settings().download_limit_mb_per_day;
         let now = now_unix();
-        self.owner_pause().or_else(|| {
-            (limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB)).then(
-                || {
-                    Pause::new(
-                        "Paused until tomorrow: today's download limit is reached",
-                        Some(store::next_day(now)),
-                    )
-                },
+        (limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB)).then(|| {
+            Pause::new(
+                "Paused until tomorrow: today's download limit is reached",
+                Some(store::next_day(now)),
             )
         })
     }
@@ -2411,6 +2434,14 @@ impl Inner {
 impl StatusSource for Inner {
     fn status(&self) -> Status {
         Inner::status(self)
+    }
+
+    fn fetch_pages(&self, start: &str, words: Vec<String>) -> Result<Fetched> {
+        self.fetch_asked(start, words)
+    }
+
+    fn tuning(&self) -> Option<Tuning> {
+        Some(Inner::tuning(self))
     }
 
     fn denies(&self, url: &str) -> bool {

@@ -33,6 +33,8 @@ const ICONS_DIR: &str = "icons";
 const NEWS_DIR: &str = "news";
 /// Inner pages the node's searches wanted (see [`crate::wanted_pages`]).
 const WANTED_DIR: &str = "wanted";
+/// Pages an AI app asked for (see [`crate::wanted_pages`]).
+const ASKED_DIR: &str = "asked";
 
 /// The files and directories of a data directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +51,8 @@ pub(super) struct Paths {
     pub(super) news: PathBuf,
     /// Inner pages the node's searches wanted (see [`crate::wanted_pages`]).
     pub(super) wanted: PathBuf,
+    /// Pages an AI app asked for (see [`crate::wanted_pages`]).
+    pub(super) asked: PathBuf,
     /// Records from other nodes, not yet folded in.
     pub(super) inbox: PathBuf,
     /// The inbox while it is being folded in.
@@ -68,6 +72,7 @@ impl Paths {
             icons: data.join(ICONS_DIR),
             news: data.join(NEWS_DIR),
             wanted: data.join(WANTED_DIR),
+            asked: data.join(ASKED_DIR),
             inbox: data.join(NET_DIR).join("inbox.jsonl"),
             absorbing: data.join(NET_DIR).join("inbox.absorbing"),
         }

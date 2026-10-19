@@ -453,6 +453,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
             web_search: args.web_search.0,
             read_pages_for_all: args.mcp_read_pages,
             findings_for_all: args.mcp_findings,
+            manage_for_all: false,
             page_reader: plumb_crawl::ReadConfig::default(),
             plugins: args
                 .plugins

@@ -2,6 +2,7 @@ use super::*;
 
 mod info;
 mod lookalike;
+mod manage;
 mod official_site;
 mod owners;
 mod protocol;

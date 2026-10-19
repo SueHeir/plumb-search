@@ -418,6 +418,19 @@ pub trait StatusSource: Send + Sync {
         None
     }
 
+    /// `fetch_pages`: looks through the site at `start` (its homepage, or a
+    /// page to start from) for pages with `words` now, and keeps them for
+    /// searches (see [`crate::wanted_pages`]). Blocks for up to a few
+    /// minutes.
+    fn fetch_pages(&self, _start: &str, _words: Vec<String>) -> Result<crate::node::Fetched> {
+        anyhow::bail!("this node keeps no pages of its own")
+    }
+
+    /// What its owner's AI apps asked of the node, for `node_tuning`.
+    fn tuning(&self) -> Option<crate::node::Tuning> {
+        None
+    }
+
     /// Active and next-start feature choices, shared by desktop and Docker.
     fn features(&self) -> crate::node::features::FeatureSettings {
         Default::default()
