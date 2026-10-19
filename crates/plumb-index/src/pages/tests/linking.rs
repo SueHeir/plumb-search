@@ -160,8 +160,8 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     );
     assert_eq!(placed.len(), 1);
     assert!(placed[0].at >= PARTIAL_AFTER && placed[0].under.is_none());
-    // Found by words too: kept as they scored it when that lists it, else
-    // scored and marked as meant.
+    // Found by words too: marked meant, with their score when that lists
+    // it, else scored as meant.
     let found_by_words = |score: f32| PageHit {
         page: sleep.clone(),
         score,
@@ -173,16 +173,39 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     };
     let mut found = vec![found_by_words(0.5)];
     s.add_meant(&meant, &mut found).unwrap();
-    assert!(found.len() == 1 && found[0].score == 0.5 && !found[0].meant);
+    assert!(found.len() == 1 && found[0].score == 0.5 && found[0].meant);
     let mut found = vec![found_by_words(0.1)];
     s.add_meant(&meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score >= MIN_PARTIAL_SCORE && found[0].meant);
-    // Words find a page the query names better.
+    // A page the query names stays as words found it, before the one
+    // meaning adds.
     let mut found = s.search("napoleon", 5).unwrap();
-    let before: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
+    let named = found[0].clone();
+    assert!(named.named);
     s.add_meant(&meant, &mut found).unwrap();
-    let after: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
-    assert_eq!(after, before);
+    assert_eq!(titles(&found)[..2], ["Napoleon", "Microsleep"]);
+    let mut found = vec![named.clone()];
+    let same = [meant_page(&named.page.url, 0.9), meant_page(&url, 0.8)];
+    assert_eq!(s.add_meant(&same, &mut found).unwrap(), None);
+    assert!(found.len() == 1 && !found[0].meant);
+    // An article goes before the pages words found in part, though they
+    // score more, so placing lists it: "eye test chart" listed Eye
+    // examination and Lea test, not Eye chart.
+    let in_part = |page: &Page, score, popularity| PageHit {
+        page: page.clone(),
+        popularity,
+        ..found_by_words(score)
+    };
+    let mut found = vec![in_part(&named.page, 0.45, 1.0), in_part(&spooner, 0.4, 1.0)];
+    s.add_meant(&meant, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Microsleep", "Napoleon", "Ryan Spooner"]);
+    let placed = place_pages("micro naps", &sites, found);
+    assert!(placed.iter().any(|p| p.hit.page.title == "Microsleep"));
+    // One words list but that does not count stays as they found it.
+    let mut found = vec![in_part(&trocar, 0.5, 0.1)];
+    let trocar_meant = [meant_page(&trocar.url, 0.9), meant_page(&url, 0.8)];
+    assert_eq!(s.add_meant(&trocar_meant, &mut found).unwrap(), None);
+    assert!(titles(&found) == ["Trocar"] && !found[0].meant);
     // An address the pages lack adds nothing; the next nearest stands in
     // for it. A package only when words found code too, and as a page that
     // is not an article, only when it is near.
