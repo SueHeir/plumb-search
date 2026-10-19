@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use plumb_core::locks::RwLocked;
+use plumb_core::locks::{Locked, RwLocked};
 use plumb_format::Ref;
 use plumb_index::grades::{Grade, SiteGrades};
 use tracing::{info, warn};
@@ -76,7 +76,7 @@ impl Inner {
     /// The site grades searches use and the share of their penalty they
     /// take, while the node holds grades and its settings take some.
     pub(super) fn grades_in_force(&self) -> Option<(Arc<SiteGrades>, u8)> {
-        let percent = self.settings().site_grades_percent;
+        let percent = self.settings.locked().site_grades_percent;
         let grades = self.grades.read_locked().clone()?;
         (percent > 0 && !grades.is_empty()).then_some((grades, percent))
     }

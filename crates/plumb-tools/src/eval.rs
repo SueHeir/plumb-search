@@ -733,6 +733,23 @@ fn graded(
     results
 }
 
+/// The first `limit` sites for `query`, graded as a node grades the
+/// searches behind its answers.
+fn lookup_sites(
+    args: &EvalArgs,
+    setup: &Setup,
+    query: &str,
+    limit: usize,
+    cfg: &plumb_index::RankConfig,
+    options: &SearchOptions,
+) -> Result<plumb_index::SearchResults> {
+    let wanted = limit + grades_margin(args, setup);
+    let found = setup
+        .searcher
+        .search_meaning(query, wanted, cfg, options, None)?;
+    Ok(graded(args, setup, query, found, limit))
+}
+
 /// The rank each query's expected answer was found at, within
 /// `args.limit`. With `verbose`, misses are printed (and `--show`,
 /// `--explain` say more).
@@ -767,7 +784,7 @@ fn evaluate(
     let mut ranks = Vec::with_capacity(queries.len());
     for q in queries {
         if args.facts {
-            ranks.push(fact_rank(args, q, searcher, cfg, pages.as_ref(), verbose)?);
+            ranks.push(fact_rank(args, q, setup, cfg, pages.as_ref(), verbose)?);
             continue;
         }
         let options = SearchOptions {
@@ -925,7 +942,7 @@ fn evaluate(
                 let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
                     None
                 } else {
-                    profile_shown(args, &searched, searcher, cfg, pages)?
+                    profile_shown(args, &searched, setup, cfg, pages)?
                 };
                 let mut rows = listed_with_pages(&lifted, placed);
                 // The profile asked for ("bohemian rhapsody lyrics") is
@@ -1192,7 +1209,7 @@ fn format_sweep(
 fn profile_shown(
     args: &EvalArgs,
     query: &str,
-    searcher: &Searcher,
+    setup: &Setup,
     cfg: &plumb_index::RankConfig,
     pages: &PageSearcher,
 ) -> Result<Option<String>> {
@@ -1214,7 +1231,7 @@ fn profile_shown(
             continue;
         }
         for lookup in answers::song_lookups(&name, &resolution) {
-            let mut sites = searcher.search_meaning(&lookup, 5, cfg, &options, None)?;
+            let mut sites = lookup_sites(args, setup, &lookup, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
             let found = place_pages(&lookup, &sites.hits, pages.search(&lookup, 10)?);
             if let Some(profile) = answers::songs_profile(query, &resolution, found) {
@@ -1232,7 +1249,7 @@ fn profile_shown(
 fn fact_rank(
     args: &EvalArgs,
     q: &EvalQuery,
-    searcher: &Searcher,
+    setup: &Setup,
     cfg: &plumb_index::RankConfig,
     pages: Option<&PageSearcher>,
     verbose: bool,
@@ -1246,7 +1263,7 @@ fn fact_rank(
                 language: args.lang.clone(),
                 ..SearchOptions::default()
             };
-            let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let mut sites = lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
             let found = pages.search(&asked.subject, 10)?;
             let placed = place_pages(&asked.subject, &sites.hits, found);

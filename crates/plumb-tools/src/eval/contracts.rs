@@ -589,10 +589,7 @@ fn observe(
             plumb_core::facts::fact_asked(&case.query),
             scoped_pages.as_ref(),
         ) {
-            let lookup_sites =
-                setup
-                    .searcher
-                    .search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let lookup_sites = super::lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
             let lookup_pages = pages.search(&asked.subject, 10)?;
             let lookup = place_pages(&asked.subject, &lookup_sites.hits, lookup_pages);
             answer = plumb_node::web::answers::fact_answer(&asked, &lookup, now);

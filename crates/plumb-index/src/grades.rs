@@ -129,22 +129,25 @@ pub fn demote_by<T>(
         if addressed || grade == Grade::LowValue && (hit.named || hit.official) {
             continue;
         }
+        let was = hit.score;
         hit.score -= weight * grade.penalty() * hit.score.abs();
-        demoted.push(at);
+        demoted.push((at, was));
     }
     // The last first, so each moves past hits already in their places.
-    for at in demoted.into_iter().rev() {
+    for (at, was) in demoted.into_iter().rev() {
         let score = hit(&mut results[at]).score;
         let later: Vec<f32> = results[at + 1..]
             .iter_mut()
             .map(|result| hit(result).score)
             .collect();
         // How many later hits are out of order with it, where it is and
-        // after each it could move past.
-        let mut wrong = later.iter().filter(|&&other| other > score).count();
+        // after each it could move past. One a rule put after it while it
+        // scored higher already was is no reason to move.
+        let overtaken = |other: f32| other > score && other <= was;
+        let mut wrong = later.iter().filter(|&&other| overtaken(other)).count();
         let (mut past, mut least) = (0, wrong);
         for (i, &other) in later.iter().enumerate() {
-            if other > score {
+            if overtaken(other) {
                 wrong -= 1;
             } else if other < score {
                 wrong += 1;
@@ -309,6 +312,17 @@ mod tests {
         ];
         demote(&grades, 100, "thin", &mut hits);
         assert_eq!(order(&hits)[1], "thin.example");
+
+        // Nor moved past hits put after it by rule that already scored
+        // higher, however little it loses.
+        let mut hits = vec![
+            hit("thin.example", 0.3, false),
+            hit("a.example", 0.9, false),
+            hit("b.example", 0.4, false),
+            hit("c.example", 0.1, false),
+        ];
+        demote(&grades, 1, "thin", &mut hits);
+        assert_eq!(order(&hits)[0], "thin.example");
 
         // Nor held up by a hit put second with no score, as a spelling's.
         let grades = SiteGrades::new([("rxpills.top".to_string(), Grade::Spam)]);

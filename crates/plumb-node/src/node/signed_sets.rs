@@ -249,10 +249,6 @@ pub(super) enum Looked {
 pub(super) async fn run(inner: Arc<Inner>) {
     let mut stopped = inner.stopped.clone();
     settle_map(&inner);
-    if !inner.config.crawl_only {
-        let held = inner.clone();
-        let _ = tokio::task::spawn_blocking(move || held.grades_from_set()).await;
-    }
     loop {
         let Some(net) = network::handle(&inner).cloned() else {
             return;

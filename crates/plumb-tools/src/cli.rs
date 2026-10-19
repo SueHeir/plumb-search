@@ -625,7 +625,8 @@ pub struct EvalArgs {
     #[arg(long, value_name = "DIR")]
     pub site_grades: Option<PathBuf>,
     /// How much the site grades count, 0 to 100, as a node's setting.
-    #[arg(long, value_name = "PERCENT", default_value_t = 100)]
+    #[arg(long, value_name = "PERCENT", default_value_t = 100,
+        value_parser = clap::value_parser!(u8).range(0..=100))]
     pub site_grades_percent: u8,
     /// For each miss, also show how the first site and the expected one
     /// scored: final score, text match, link score and closeness in meaning.

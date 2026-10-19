@@ -978,7 +978,13 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     // Before anything is shown.
     {
         let inner = inner.clone();
-        tokio::task::spawn_blocking(move || inner.load_denylist()).await?;
+        tokio::task::spawn_blocking(move || {
+            inner.load_denylist();
+            if !inner.config.crawl_only {
+                inner.grades_from_set();
+            }
+        })
+        .await?;
     }
     inner.journal.info(format!(
         "Plumb Search {} started",
@@ -1909,7 +1915,8 @@ impl Inner {
 
     /// Saves new settings and puts them in force; the background work
     /// looks at them again at once.
-    fn change_settings(&self, new: NodeSettings) -> Result<()> {
+    fn change_settings(&self, mut new: NodeSettings) -> Result<()> {
+        new.site_grades_percent = new.site_grades_percent.min(100);
         {
             let mut settings = self.settings.locked();
             if *settings != new {
