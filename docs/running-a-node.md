@@ -134,6 +134,7 @@ Every flag of `plumb run`, grouped. Defaults are in brackets, and those in the p
 | `--embed-threads N` | Threads that embed sites [half the CPUs the node may use] |
 | `--mcp-read-pages` | Let every `/mcp` client use `read_page`, not only AI apps on this computer. Never on a public node |
 | `--mcp-findings` | Let every `/mcp` client keep and see findings, not only AI apps on this computer |
+| `--mcp-manage` | Let every `/mcp` client fetch pages and change focus topics, not only AI apps on this computer ([mcp.md](mcp.md#improving-search-for-you)). Never on a public node |
 
 **Network.** `--network` joins the Plumb network; every other flag here needs it. [network.md](network.md) explains what they do.
 
@@ -189,6 +190,8 @@ Under a storage limit:
 With or without a limit, filling stops before an index build would need more than half the machine's memory (at 2,500 bytes a site, a 4 GB server stops at about 800,000 sites).
 
 **Focus topics** (`--focus games`, repeatable, or the panel's Focus topics; the two add up) make the node crawl sites about those topics first, up to half of each round, and twice as often. With a storage limit, filling keeps a quarter of the limit for sites about its topics and, with search history on, the interests on its browsers' About you pages. Focus topics are public in effect, since other nodes can tell from what this node crawls. Filling asks for the same pages whatever the topics, so the node it asks learns nothing from that.
+
+An AI app on this computer can set the focus topics, and have the node fetch the pages it lacks, with the MCP prompt `improve_search` ([mcp.md](mcp.md#improving-search-for-you)).
 
 ## The data folder and backups
 

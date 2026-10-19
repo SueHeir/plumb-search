@@ -114,7 +114,7 @@ Apply it with `docker compose up -d`. With `docker run`, put the command after t
 | `--https-bind ADDR` | none | Also serve HTTPS, for [remote control](#control-it-from-the-desktop-app) |
 | `--crawl-only` | | Crawl for the network and build no search index, for a small server nobody searches. Leave out `--search-by-meaning` with it. |
 | `--blackhole` | | Collect all the data the network offers, for a server with disk and memory to spare |
-| `--mcp-read-pages`, `--mcp-findings` | | Offer `read_page` or findings to MCP clients on other computers ([mcp.md](mcp.md#reading-pages)) |
+| `--mcp-read-pages`, `--mcp-findings`, `--mcp-manage` | | Offer `read_page`, findings, or the tools that improve search to MCP clients on other computers ([mcp.md](mcp.md#reading-pages)) |
 | `--use-system-proxy` | | Crawl through the proxy in `HTTPS_PROXY` (see [below](#outgoing-proxy)) |
 | `--p2p-port PORT` | 4001 | The network port; publish the same one |
 

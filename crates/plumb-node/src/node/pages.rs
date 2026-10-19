@@ -1212,12 +1212,21 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
-    let wanted = (inner.config.wanted_pages)
-        .then(|| inner.wanted_pages.searcher())
-        .flatten();
+    // The pages found for this node's searches, when it looks for them,
+    // and those its owner's AI apps asked for.
+    let wanted = [
+        (inner.config.wanted_pages)
+            .then(|| inner.wanted_pages.searcher())
+            .flatten(),
+        inner.asked_pages.searcher(),
+    ];
     let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
-    let wanted = wanted.map(|wanted| wanted.in_language(options.language.as_deref()));
+    let wanted: Vec<PageSearcher> = wanted
+        .iter()
+        .flatten()
+        .map(|wanted| wanted.in_language(options.language.as_deref()))
+        .collect();
     let ops = Operators::parse(query);
     if ops.any() {
         if ops.words.is_empty() {
@@ -1253,7 +1262,7 @@ pub(super) fn add_pages(
                     warn!("adding the page nearest in meaning: {err:#}");
                     None
                 });
-            if let Some(wanted) = &wanted {
+            for wanted in &wanted {
                 add_wanted(wanted, query, &mut found);
             }
             found.retain(|hit| options_allow(options, &hit.page));
@@ -1267,7 +1276,7 @@ pub(super) fn add_pages(
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
-            add_named_site_page(&searcher, wanted.as_ref(), query, &results.hits, &mut found);
+            add_named_site_page(&searcher, &wanted, query, &results.hits, &mut found);
             // Pages found for this node's searches come from anywhere on
             // the web, not from sites picked by hand: they are checked as
             // sites are, and against the adult blocklist as it is now.
@@ -1382,10 +1391,10 @@ fn after_learned_order(
 
 /// Puts first in `found` the page of a site `query` names
 /// ([`PageSearcher::add_named_site_page`]): the page sets' when they have
-/// one, else one found for this node's searches.
+/// one, else the first of `wanted` that has one.
 fn add_named_site_page(
     searcher: &PageSearcher,
-    wanted: Option<&PageSearcher>,
+    wanted: &[PageSearcher],
     query: &str,
     sites: &[plumb_index::Hit],
     found: &mut Vec<PageHit>,
@@ -1394,8 +1403,10 @@ fn add_named_site_page(
     if let Err(err) = searcher.add_named_site_page(query, sites, found) {
         warn!("searching the pages of a site the query names: {err:#}");
     }
-    let added = found.first().map(|hit| &hit.page.url) != first.as_ref();
-    if let Some(wanted) = wanted.filter(|_| !added) {
+    for wanted in wanted {
+        if found.first().map(|hit| &hit.page.url) != first.as_ref() {
+            return;
+        }
         if let Err(err) = wanted.add_named_site_page(query, sites, found) {
             warn!("searching the wanted pages of a site the query names: {err:#}");
         }

@@ -4,7 +4,7 @@ use super::*;
 
 /// Calls `tool` on a node's `/mcp` as an AI app on this computer does; the
 /// tool's structured answer and its text.
-async fn mcp_call(
+pub(super) async fn mcp_call(
     addr: SocketAddr,
     tool: &str,
     arguments: serde_json::Value,

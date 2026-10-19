@@ -125,3 +125,70 @@ async fn a_search_sends_the_node_through_a_site_s_links_and_shows_what_it_found(
     assert!(!body.contains("sheets/malaria"), "{body}");
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ai_app_has_the_node_fetch_a_site_s_pages_and_sees_what_it_asked() {
+    let requested = Arc::new(Mutex::new(Vec::new()));
+    let site = health_site(Arc::clone(&requested)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut record = site::new("healthexample.org");
+    record.url = Some("http://healthexample.org/".into());
+    record.title = Some("Health Example".into());
+    write_old_lines(&dir.path().join("records.jsonl"), &[record]);
+    // A page asked for before; the test site answers only plain http.
+    let malaria = "https://healthexample.org/sheets/malaria";
+    let asked = serde_json::json!({
+        "pages": {malaria: {"url": malaria, "title": "Malaria", "depth": 2, "at": now_unix()}},
+        "index": 0,
+    });
+    std::fs::create_dir_all(dir.path().join("asked")).unwrap();
+    std::fs::write(dir.path().join("asked/pages.json"), asked.to_string()).unwrap();
+    let lighthouse = plumb_core::Article {
+        title: "Lighthouse".into(),
+        views: 900,
+        ..Default::default()
+    };
+    super::agents::write_set_file(dir.path(), "wikipedia-en", &[lighthouse]);
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    // Pages asked for show though the node looks for none of its own.
+    config.wanted_pages = false;
+    config
+        .page_reader
+        .resolve
+        .push(("healthexample.org".into(), site));
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=health+example+malaria")
+        .await
+        .2
+        .contains(malaria)
+    {
+        assert!(Instant::now() < deadline, "the asked pages are not shown");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let arguments = serde_json::json!({ "site": "http://healthexample.org/", "about": "Dengue" });
+    let (fetched, text) = super::agents::mcp_call(addr, "fetch_pages", arguments).await;
+    assert_eq!(fetched["site"], "healthexample.org");
+    assert_eq!(fetched["fetched"], 3, "{text}");
+    assert_eq!(fetched["pages"][0]["url"], malaria);
+    let requested = requested.lock().unwrap().clone();
+    assert!(requested.iter().any(|path| path == "/sheets/dengue"));
+    assert!(!requested.iter().any(|path| path == "/about"));
+
+    let (tuning, text) = super::agents::mcp_call(addr, "node_tuning", serde_json::json!({})).await;
+    assert_eq!(tuning["asked_pages"], 1, "{text}");
+    assert_eq!(tuning["asked_sites"][0]["site"], "healthexample.org");
+    // Only https pages are kept, so dengue is still looked for.
+    assert_eq!(
+        tuning["asked_sites"][0]["words"],
+        serde_json::json!(["dengue"])
+    );
+    assert_eq!(tuning["shows_pages"], true);
+    node.shutdown().await.unwrap();
+    let saved = std::fs::read_to_string(dir.path().join("asked/sites.json")).unwrap();
+    assert!(saved.contains("dengue"), "{saved}");
+}

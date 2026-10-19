@@ -32,7 +32,6 @@ pub fn run(args: McpArgs) -> Result<()> {
             let endpoint = mcp_endpoint(&args.node)?;
             let client = reqwest::Client::builder()
                 .user_agent(concat!("plumb-mcp/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .context("making the HTTP client")?;
             serve_lines(stdin, stdout, args.text_answers, |message| {
@@ -147,8 +146,12 @@ async fn forward(
     endpoint: &url::Url,
     message: &Value,
 ) -> Result<Option<Value>> {
+    // `fetch_pages` visits a site before it answers.
+    let fetches = message.pointer("/params/name").and_then(Value::as_str) == Some("fetch_pages");
+    let wait = std::time::Duration::from_secs(if fetches { 300 } else { 30 });
     let response = client
         .post(endpoint.clone())
+        .timeout(wait)
         .header("accept", "application/json, text/event-stream")
         .header("content-type", "application/json")
         .body(serde_json::to_vec(message).unwrap_or_default())

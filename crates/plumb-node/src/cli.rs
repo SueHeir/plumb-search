@@ -337,6 +337,13 @@ pub struct RunArgs {
     /// with other nodes stays with this computer's apps.
     #[arg(long)]
     pub mcp_findings: bool,
+    /// Let every client of `/mcp`, not only AI apps on this computer, change
+    /// what this node shows with its `grade_site`, `fetch_pages` and
+    /// `focus_topics` tools, and see what was asked with `node_tuning`. For
+    /// a node on a home network whose AI apps run on other computers; only
+    /// for a node whose address you give to people you trust.
+    #[arg(long)]
+    pub mcp_manage: bool,
     /// Also find sites by meaning for searches that name no site ("electric
     /// car maker"). Downloads a small embedding model (about 130 MB) into
     /// DIR/model and embeds each site's text in the background after every

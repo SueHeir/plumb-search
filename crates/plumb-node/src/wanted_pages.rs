@@ -25,6 +25,12 @@
 //!   pages.json   the pages found, and the number of their index
 //!   index-N/     the pages' index, built again when pages come or go
 //! ```
+//!
+//! An AI app the node's owner runs can ask for pages too, through the MCP
+//! tool `fetch_pages`. Those go in a store of their own (`DIR/asked/`,
+//! [`WantedPages::ask`]), kept for [`ASKED_KEPT`] and shown whether or
+//! not the node looks for its searches' pages, so that turning
+//! `--wanted-pages` off still hides every page a search led to.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
@@ -45,6 +51,8 @@ use tracing::warn;
 const DAY: u64 = 24 * 60 * 60;
 /// How long a search's words, and a page found, are kept.
 pub const WANT_KEPT: u64 = 30 * DAY;
+/// How long the pages an AI app asked for, and its words, are kept.
+pub const ASKED_KEPT: u64 = 365 * DAY;
 /// Sites kept: the searches' own before those one hop out, the most
 /// recently wanted first.
 pub const MAX_SITES: usize = 2_000;
@@ -55,7 +63,7 @@ const MAX_SITE_LEADS: usize = 20;
 /// A search's best sites whose pages it may want.
 const SITES_PER_SEARCH: usize = 3;
 /// Most words a search wants of a site.
-const MAX_WANT_WORDS: usize = 8;
+pub const MAX_WANT_WORDS: usize = 8;
 /// Soonest a site's links are followed again.
 const LOOK_AGAIN: u64 = 60 * 60;
 /// When a site's leads are followed again though no new search wants it.
@@ -65,6 +73,8 @@ const MAX_HOPS: u8 = 1;
 /// A page's views are this over its depth, so the nearer the homepage the
 /// more it weighs, as with the subpages set.
 const VIEWS: u64 = 1_000;
+/// Pages fetched on a site when an AI app asks for some.
+pub const ASKED_FETCHES: usize = 12;
 const SITES_FILE: &str = "sites.json";
 const PAGES_FILE: &str = "pages.json";
 const INDEX_PREFIX: &str = "index-";
@@ -77,9 +87,13 @@ pub struct WantedPages {
     sites: RwLock<Sites>,
     pages: RwLock<Pages>,
     saving: Mutex<()>,
+    /// Held while the index is built, so two builds never take one number.
+    building: Mutex<()>,
     budget: Option<Arc<plumb_core::storage::StorageBudget>>,
     /// The pages' index and its number.
     index: RwLock<Option<(u64, Arc<PageSearcher>)>>,
+    /// How long words and pages are kept: [`WANT_KEPT`] or [`ASKED_KEPT`].
+    kept: u64,
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +109,21 @@ struct Pages {
     index: u64,
     #[serde(skip)]
     dirty: bool,
+}
+
+/// A site the store holds words or pages of, as
+/// [`WantedPages::summary`] lists it. Times are Unix seconds, 0 for never.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct WantedSite {
+    pub site: String,
+    /// When pages of it were last wanted.
+    pub wanted_at: u64,
+    /// When its links were last followed.
+    pub looked_at: u64,
+    /// The words still looked for: a want leaves once a page answers it.
+    pub words: Vec<String>,
+    /// Its pages kept.
+    pub pages: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -179,16 +208,16 @@ impl Sites {
         self.dirty = true;
     }
 
-    /// Forgets searches older than [`WANT_KEPT`], sites no search wants
-    /// any more, and the sites past [`MAX_SITES`].
-    fn prune(&mut self, now: u64) {
+    /// Forgets searches older than `kept`, sites no search wants any
+    /// more, and the sites past [`MAX_SITES`].
+    fn prune(&mut self, now: u64, kept: u64) {
         let count = |sites: &BTreeMap<String, Site>| -> (usize, usize) {
             let wants = sites.values().map(|site| site.wants.len()).sum();
             (sites.len(), wants)
         };
         let before = count(&self.sites);
         for site in self.sites.values_mut() {
-            site.wants.retain(|want| want.at + WANT_KEPT > now);
+            site.wants.retain(|want| want.at + kept > now);
         }
         self.sites.retain(|_, site| !site.wants.is_empty());
         if self.sites.len() > MAX_SITES {
@@ -216,12 +245,12 @@ impl Pages {
         changed
     }
 
-    /// Forgets the pages not found again in [`WANT_KEPT`]: which pages a
-    /// node went looking for tells what its people searched. Then the least
+    /// Forgets the pages not found again in `kept`: which pages a node
+    /// went looking for tells what its people searched. Then the least
     /// recently found past `max_pages`.
-    fn prune(&mut self, now: u64, max_pages: usize) {
+    fn prune(&mut self, now: u64, max_pages: usize, kept: u64) {
         let before = self.pages.len();
-        self.pages.retain(|_, found| found.at + WANT_KEPT > now);
+        self.pages.retain(|_, found| found.at + kept > now);
         if self.pages.len() != before {
             self.index = 0;
             self.dirty = true;
@@ -265,8 +294,16 @@ impl WantedPages {
             index: RwLock::new(index),
             dir,
             saving: Mutex::new(()),
+            building: Mutex::new(()),
             budget: None,
+            kept: WANT_KEPT,
         }
+    }
+
+    /// Keeps words and pages `kept` seconds instead of [`WANT_KEPT`].
+    pub fn keeping(mut self, kept: u64) -> Self {
+        self.kept = kept;
+        self
     }
 
     pub fn with_budget(mut self, budget: Option<Arc<plumb_core::storage::StorageBudget>>) -> Self {
@@ -337,8 +374,79 @@ impl WantedPages {
     /// Forgets old searches and pages, and the sites and pages past the
     /// most kept.
     pub fn prune(&self, now: u64, max_pages: usize) {
-        self.sites.write_locked().prune(now);
-        self.pages.write_locked().prune(now, max_pages);
+        self.sites.write_locked().prune(now, self.kept);
+        self.pages.write_locked().prune(now, max_pages, self.kept);
+    }
+
+    /// Notes that pages of the site at `homepage` with `words` are wanted,
+    /// as an AI app asked through `fetch_pages`, and gives the visit that
+    /// looks for them now: the site's leads from earlier visits first.
+    pub fn ask(&self, domain: &str, homepage: &str, words: Vec<String>, now: u64) -> FollowTarget {
+        let mut sites = self.sites.write_locked();
+        let want = Want {
+            words: words.clone(),
+            at: now,
+            hops: 0,
+        };
+        sites.want(domain, homepage, want);
+        FollowTarget {
+            domain: domain.to_string(),
+            homepage: homepage.to_string(),
+            leads: sites
+                .sites
+                .get(domain)
+                .map(|site| site.leads.clone())
+                .unwrap_or_default(),
+            wants: vec![words],
+            max_fetches: ASKED_FETCHES,
+        }
+    }
+
+    /// The pages kept of the site `domain`, best first: nearest its
+    /// homepage, then by address.
+    pub fn pages_of(&self, domain: &str) -> Vec<WantedPage> {
+        let mut pages: Vec<WantedPage> = self
+            .pages
+            .read_locked()
+            .pages
+            .values()
+            .filter(|found| registrable_domain(&found.page.url).as_deref() == Some(domain))
+            .map(|found| found.page.clone())
+            .collect();
+        pages.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.url.cmp(&b.url)));
+        pages
+    }
+
+    /// Each site wanted, the most recently first, with the words still
+    /// looked for and the number of its pages kept; and the pages kept in all.
+    pub fn summary(&self) -> (Vec<WantedSite>, usize) {
+        let pages = self.pages.read_locked();
+        let mut kept: BTreeMap<String, usize> = BTreeMap::new();
+        for found in pages.pages.values() {
+            if let Some(domain) = registrable_domain(&found.page.url) {
+                *kept.entry(domain).or_default() += 1;
+            }
+        }
+        let sites = self.sites.read_locked();
+        let mut wanted: Vec<WantedSite> = sites
+            .sites
+            .iter()
+            .map(|(domain, site)| WantedSite {
+                site: domain.clone(),
+                wanted_at: site.last_wanted(),
+                looked_at: site.looked_at,
+                words: site.wants.iter().map(|want| want.words.join(" ")).collect(),
+                pages: kept.remove(domain).unwrap_or(0),
+            })
+            .collect();
+        // Sites whose words were all answered keep their pages.
+        wanted.extend(kept.into_iter().map(|(site, pages)| WantedSite {
+            site,
+            pages,
+            ..WantedSite::default()
+        }));
+        wanted.sort_by_key(|site| Reverse(site.wanted_at.max(site.looked_at)));
+        (wanted, pages.pages.len())
     }
 
     /// The sites whose links are to be followed at `now`, whose homepage
@@ -531,6 +639,7 @@ impl WantedPages {
     /// last build, and searches the new one. Building 50,000 pages takes a
     /// few seconds and up to about 100 MB.
     pub fn build_index(&self) -> Result<()> {
+        let _building = self.building.locked();
         let mut pages: Vec<WantedPage> = {
             let pages = self.pages.read_locked();
             let built = self.index.read_locked().as_ref().map(|(n, _)| *n);

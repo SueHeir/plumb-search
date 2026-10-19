@@ -50,7 +50,7 @@ flowchart LR
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
 | [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs) | Signed sets taken from the network; the project's denylist, applied to sites' stored items as an index is built and to records kept or passed on; the adult blocklist |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |
-| [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs) | Feed checks; following links toward the pages searches wanted |
+| [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs), [node/tuning.rs](src/node/tuning.rs) | Feed checks; following links toward the pages searches and AI apps (`fetch_pages`) wanted; what apps asked, for `node_tuning` |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
 | [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded whole as sites' stored items and compacted from them; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
@@ -59,7 +59,7 @@ flowchart LR
 | **Search features** | |
 | [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding |
 | [pages.rs](src/pages.rs), [places.rs](src/places.rs), [map/](src/map/mod.rs) | Page sets; places; the base map (PMTiles, vector tiles, SVG drawing) |
-| [news.rs](src/news.rs), [wanted_pages.rs](src/wanted_pages.rs) | Recent headlines; inner pages found for this node's searches |
+| [news.rs](src/news.rs), [wanted_pages.rs](src/wanted_pages.rs) | Recent headlines; inner pages found for this node's searches, or that AI apps asked for |
 | [sources.rs](src/sources.rs), [websearch.rs](src/websearch.rs), [country.rs](src/country.rs), [assembly.rs](src/assembly.rs) | Sites for tool searches ("weather"); web search links and bangs; home country; rules shared by MCP and the web |
 | [plugins.rs](src/plugins.rs) | The plugin host: loads `plugins/`, runs each plugin in a wasmi sandbox; `plumb try-plugin` |
 | **Each searcher's data** | |
@@ -74,7 +74,7 @@ flowchart LR
 | [web/private.rs](src/web/private.rs), [relay.rs](src/web/relay.rs) | Private search page and buckets; relaying sealed bucket requests |
 | [web/history.rs](src/web/history.rs), [link.rs](src/web/link.rs), [tune.rs](src/web/tune.rs), [welcome.rs](src/web/welcome.rs) | History, link codes, tuning and About you pages |
 | [web/html.rs](src/web/html.rs), [home.rs](src/web/home.rs), [params.rs](src/web/params.rs) | Page frame, escaping, links; home and setup pages; search parameters |
-| [mcp.rs](src/mcp.rs), [mcp/](src/mcp/tools.rs), [web/mcp.rs](src/web/mcp.rs) | The MCP server and its tools; `POST /mcp`; `plumb mcp` over stdio |
+| [mcp.rs](src/mcp.rs), [mcp/](src/mcp/tools.rs), [web/mcp.rs](src/web/mcp.rs) | The MCP server and its tools, including those that improve search for the node's owner ([mcp/manage.rs](src/mcp/manage.rs)); `POST /mcp`; `plumb mcp` over stdio |
 
 ## How it works
 
@@ -146,7 +146,7 @@ Folds, crawls and index builds run through `blocking()`, on a `plumb-background`
 | search by meaning | [node/embedding.rs](src/node/embedding.rs) | blocking | Downloads the model, takes or makes site vectors after each build |
 | checking feeds | [node/news.rs](src/node/news.rs) | async | Checks due RSS and Atom feeds, shares new headlines |
 | the adult blocklist | [node/adult.rs](src/node/adult.rs) | async | Keeps the list fresh, from a trusted node or its host |
-| following links for searches | [node/wanted_pages.rs](src/node/wanted_pages.rs) | async | Fetches inner pages searches wanted; forgets old ones |
+| following links for searches | [node/wanted_pages.rs](src/node/wanted_pages.rs) | async | Fetches inner pages searches and AI apps wanted; forgets old ones |
 | signed sets | [node/signed_sets.rs](src/node/signed_sets.rs) | async | Every 6 hours, fetches newer signed sets and checks them |
 
 Each starts through `supervise`, which restarts a job that panics after 60 seconds, doubling up to an hour. A `--crawl-only` node runs only the last two. In the network, `network::start` also spawns the receiver of other nodes' records and, as the settings ask, filling free space, profile sync, popularity reports and `--publish-records`.
@@ -172,7 +172,7 @@ Everything a node keeps is under `--data DIR`. Paths are defined in [node/store.
 | `safe/adult-domains.txt` | The adult blocklist ([node/adult.rs](src/node/adult.rs)) |
 | `model/`, `model-gemma/`, `vectors.bin` | The embedding model and site vectors for search by meaning ([meaning.rs](src/meaning.rs)) |
 | `news/` | `feeds.json`, `headlines.json`, `languages.json` ([news.rs](src/news.rs)) |
-| `wanted/` | `sites.json`, `pages.json` and `index-N/` for wanted pages ([wanted_pages.rs](src/wanted_pages.rs)) |
+| `wanted/`, `asked/` | `sites.json`, `pages.json` and `index-N/` for the pages searches wanted, and for those AI apps asked for ([wanted_pages.rs](src/wanted_pages.rs)) |
 | `history/` | Per browser `<id>.json`, `<id>.about.json`, `<id>.sync.json`; `positions.json`, `click-labels.json` ([history.rs](src/history.rs)) |
 | `plugins/` | Installed plugins and `suggest.json` ([plugins.rs](src/plugins.rs)) |
 | `findings.jsonl` | Findings AI agents reported ([findings.rs](src/findings.rs)) |

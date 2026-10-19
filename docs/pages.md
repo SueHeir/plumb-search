@@ -270,6 +270,8 @@ After a search on the results page, `/api/search` or the MCP server's `search`, 
 
 The searches' words and the pages found stay in `DIR/wanted`, which only the node's owner can read, and are forgotten 30 days after they were last wanted or found; the sites see only the fetches. At most 2,000 sites and 50,000 pages are kept (5,000 pages under a storage limit below 1,000 MB, 20,000 below 8,000 MB), about 40 MB. Since it keeps what people searched for, leave it off on a public server.
 
+An AI app on the node's own computer can ask for a site's pages too, with the MCP tool `fetch_pages` ([Improving search for you](mcp.md#improving-search-for-you)). Its pages are kept in `DIR/asked` for a year and shown with or without `--wanted-pages`.
+
 ## Checking a set
 
 `plumb-tools eval --pages FILE` lists a set's pages among the sites as a node does, to measure a set or a ranking change against the test searches in `eval/`; `--pages-top N` keeps each set's first N pages, and `--pages-cache DIR` (or `PLUMB_EVAL_PAGES_CACHE`) reuses the page index between runs. `plumb-tools check-labels --pages FILE --queries eval/article_queries.tsv` checks that the pages a test search expects are in the sets. See [search-quality.md](search-quality.md) for how search is doing.

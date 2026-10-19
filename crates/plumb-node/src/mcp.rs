@@ -23,6 +23,10 @@
 //!   node's own computer, or to every client with `--mcp-read-pages`: on a
 //!   public node it would make an open proxy. Nothing read is kept.
 //!
+//! The node's owner's AI apps also get tools that change what it shows,
+//! and a prompt, `improve_search`, that has an app use them to improve
+//! search for the owner ([`manage`]).
+//!
 //! Each tool's answer comes twice: as short plain text, one line per
 //! result (small local models have little room), and as JSON in
 //! `structuredContent` for programs. Some AI apps give the model the JSON
@@ -64,6 +68,7 @@ mod findings;
 mod identity;
 mod info;
 mod lookalike;
+mod manage;
 mod official_site;
 mod read;
 mod search;
@@ -149,6 +154,8 @@ pub struct Mcp {
     /// let `report_finding` share one when the node allows it (see
     /// [`plumb_net::leads`]).
     leads: bool,
+    /// Offer the tools that change what the node shows ([`manage`]).
+    manage: bool,
 }
 
 /// JSON-RPC error codes.
@@ -171,7 +178,20 @@ impl Mcp {
             plugins: Vec::new(),
             findings: None,
             leads: false,
+            manage: false,
         }
+    }
+
+    /// Offers the tools that change what the node shows, and the
+    /// `improve_search` prompt, when there is a node to change.
+    pub fn with_manage(mut self, manage: bool) -> Self {
+        self.manage = manage;
+        self
+    }
+
+    /// Whether the tools that change what the node shows are offered.
+    fn manages(&self) -> bool {
+        self.manage && self.node.is_some()
     }
 
     /// Lists the pages other nodes shared for a search with its results,
@@ -276,15 +296,27 @@ impl Mcp {
                 self.findings.is_some(),
                 self.net().is_some(),
                 self.shares(),
+                self.manages(),
             )),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({
-                "tools": tools(self.reader.is_some(), self.findings.is_some(), self.shares())
-            })),
+            "tools/list" => {
+                let mut tools = tools(
+                    self.reader.is_some(),
+                    self.findings.is_some(),
+                    self.shares(),
+                );
+                if let (Value::Array(tools), true) = (&mut tools, self.manages()) {
+                    tools.extend(manage::tools());
+                }
+                Ok(json!({ "tools": tools }))
+            }
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-            "prompts/list" => Ok(json!({ "prompts": [] })),
+            "prompts/list" => Ok(json!({
+                "prompts": if self.manages() { manage::prompts() } else { json!([]) }
+            })),
+            "prompts/get" if self.manages() => manage::prompt(&params),
             _ => Err((METHOD_NOT_FOUND, format!("unknown method {method:?}"))),
         };
         Some(match result {
@@ -453,6 +485,7 @@ impl Mcp {
                 let options = self.options(args)?;
                 self.read_page(&read, &options)
             }
+            name if self.manages() && manage::TOOLS.contains(&name) => self.manage(name, args)?,
             _ => return Err((INVALID_PARAMS, format!("unknown tool {name:?}"))),
         };
         Ok(tool_result(name, answer))
@@ -531,26 +564,38 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value, read_pages: bool, findings: bool, leads: bool, share: bool) -> Value {
+fn initialize(
+    params: &Value,
+    read_pages: bool,
+    findings: bool,
+    leads: bool,
+    share: bool,
+    manage: bool,
+) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
         .unwrap_or(&PROTOCOL_VERSIONS[0]);
+    let mut capabilities = json!({ "tools": { "listChanged": false } });
+    if manage {
+        capabilities["prompts"] = json!({ "listChanged": false });
+    }
     json!({
         "_meta": { "plumb.build": crate::build_info::current() },
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": {
             "name": "plumb-search",
             "title": "Plumb Search",
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": format!(
-            "{INSTRUCTIONS}{}{}{}{}",
+            "{INSTRUCTIONS}{}{}{}{}{}",
             if read_pages { READ_INSTRUCTIONS } else { "" },
             if findings { FINDINGS_INSTRUCTIONS } else { "" },
             if leads { LEADS_INSTRUCTIONS } else { "" },
             if share { SHARE_INSTRUCTIONS } else { "" },
+            if manage { manage::INSTRUCTIONS } else { "" },
         ),
     })
 }

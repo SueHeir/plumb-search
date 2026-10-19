@@ -11,6 +11,7 @@ Every node serves MCP at `/mcp` on its web port: `https://plumbsearch.org/mcp`, 
 - [Reading pages](#reading-pages)
 - [Findings](#findings)
 - [Sharing a finding with other nodes](#sharing-a-finding-with-other-nodes)
+- [Improving search for you](#improving-search-for-you)
 - [Limits](#limits)
 - [Code and tests](#code-and-tests)
 
@@ -113,6 +114,12 @@ The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs). 
 | `facts` | `subject` ("Australia"); optional `about` ("ceo"), `more_subjects` (up to 9) | Wikidata facts, each with its item and property to cite | every client |
 | `read_page` | `url`; optional `start`, `max_chars`, `find`, `links`, `outline` | the page's text, or its headings | this computer (see [Reading pages](#reading-pages)) |
 | `report_finding` | `query`, `url`, `why`, `answer`; optional `task`, `share`, `share_query` | that the finding was kept, and whether it was shared | this computer (see [Findings](#findings)) |
+| `node_tuning` | nothing | the node's focus topics, the sites apps asked it to fetch pages of, and whether its crawls run | this computer (see [Improving search for you](#improving-search-for-you)) |
+| `focus_topics` | optional `add`, `remove` (lists of topics) | the focus topics after the change | this computer |
+| `fetch_pages` | `site` (a domain, or a page to start from), `about` (a few words) | the pages fetched, and the pages the node now keeps of the site | this computer |
+| `node_tuning` | nothing | the node's focus topics, the sites apps asked it to fetch pages of, and whether its crawls run | this computer (see [Improving search for you](#improving-search-for-you)) |
+| `focus_topics` | optional `add`, `remove` (lists of topics) | the focus topics after the change | this computer |
+| `fetch_pages` | `site` (a domain, or a page to start from), `about` (a few words) | the pages fetched, and the pages the node now keeps of the site | this computer |
 
 **`check_lookalike` verdicts.** `official` (Wikidata lists it), `known_site`, `little_known`, `lookalike` (the address borrows a far better-known site's name, or is a typo of it: `paypa1.com`, `wellsfargo.com.account-check.io`), `suspected` (another site's exact name on another ending or host, such as `paypal.co`, that Plumb can neither tie to that site's owner nor show to be an imitation) and `unknown` (Plumb does not have the site, which proves nothing). `lookalike` is `true` for both `lookalike` and `suspected`, so an app that checks it before entering credentials stops at either.
 
@@ -184,6 +191,66 @@ Lead shared by 1 other Plumb node, 1 trusted (2 days ago; unchecked, read it fir
 
 Each lead says which nodes reported it, how this node stands to each (`trusted`, `friend_of_friend` or `other`), and when, with `verified: false`: a lead is someone's report, not a crawl other crawlers checked, so an agent should read the page before relying on it. Only leads from nodes the node's search scope asks are listed ([Who a search asks](network.md#who-a-search-asks)), never the node's own, and none whose page is a look-alike. Leads are listed only to apps on the node's own computer. How leads travel and how many a node keeps: [Shared findings](network.md#shared-findings).
 
+## Improving search for you
+
+On a node's own computer, an app can also change what the node shows, so that anyone can ask their AI app to "improve search for me" on their own node. The node offers the prompt `improve_search` (`prompts/get`, with an optional `topic`), which has the app:
+
+1. read `node_tuning`, and ask for the person's topics when the node has no [focus topics](crawling.md) yet;
+2. search a few of the topics as someone who cares about them would;
+3. call `fetch_pages` where a good source shows but none of its pages on the subject, then search again to see that they show;
+4. note the junk in the top results, checking doubtful sites with `site_info` and `check_lookalike`, and report it;
+5. stop after about 15 searches and 10 fetches, with a short report.
+
+The tools ([mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs)):
+
+- **`fetch_pages`** follows the site's links from its homepage, or from the page given, for pages whose title or address has the words of `about`, fetching at most 12 pages and waiting at most 15 seconds for each. It keeps the https pages it finds, as the node keeps the pages its own searches want ([Pages a search wanted](pages.md#pages-a-search-wanted)), but in a store of their own (`asked/` in the data folder) that is shown whether or not the node runs with `--wanted-pages`, and kept for a year. The node follows those sites' links again in the background for the words not found yet. It needs page sets, next to which the pages are shown, and stops at the node's download and storage limits, but not for background updates being off: the owner's own app asked. One site is fetched at a time.
+- **`focus_topics`** adds and removes focus topics, as the panel's settings do: the node crawls sites about them first and twice as often, and keeps more of them under a storage limit. Removing one can let a node with a storage limit drop the sites it kept only for it, so the prompt removes a topic only when the person asks.
+- **`node_tuning`** shows what earlier runs left: the topics, each site asked for with the words still looked for and the pages kept, and why crawls wait, if they do.
+
+Nothing these tools change leaves the node, and none deletes what it holds. Like `report_finding`, they are offered only to apps on the node's own computer. A node run with `--mcp-manage` offers them to every client, for a node whose address only people you trust have: anyone who can reach it could then fill its disk with fetched pages up to its limits.
+
+In Claude Code the prompt is the command `/mcp__plumb__improve_search`. To run it on a schedule, on the node's computer (the first line takes the prompt's text from the node; `?answers=text` keeps the answers short):
+
+```sh
+node=http://127.0.0.1:7586/mcp
+prompt=$(curl -s "$node" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"improve_search"}}' \
+  | jq -r '.result.messages[0].content.text')
+claude -p "$prompt" --output-format json --max-turns 60 \
+  --mcp-config "{\"mcpServers\":{\"plumb\":{\"type\":\"http\",\"url\":\"$node?answers=text\"}}}" \
+  --strict-mcp-config --allowedTools "mcp__plumb__*"
+```
+
+## Improving search for you
+
+On a node's own computer, an app can also change what the node shows, so that anyone can ask their AI app to "improve search for me" on their own node. The node offers the prompt `improve_search` (`prompts/get`, with an optional `topic`), which has the app:
+
+1. read `node_tuning`, and ask for the person's topics when the node has no [focus topics](running-a-node.md#storage-limits-and-focus-topics) yet;
+2. search a few of the topics as someone who cares about them would;
+3. call `fetch_pages` where a good source shows but none of its pages on the subject, then search again to see that they show;
+4. note the junk in the top results, checking doubtful sites with `site_info` and `check_lookalike`, and report it;
+5. stop after about 15 searches and 10 fetches, with a short report.
+
+The tools ([mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs)):
+
+- **`fetch_pages`** follows the site's links from its homepage, or from the page given, for pages whose title or address has the words of `about`, fetching at most 12 pages and waiting at most 15 seconds for each. It keeps the https pages it finds as the node keeps the pages its own searches want ([Pages a node finds for its own searches](pages.md#pages-a-node-finds-for-its-own-searches)), but in a store of their own (`asked/` in the data folder) that is shown whether or not the node runs with `--wanted-pages`, and kept for a year. The node follows those sites' links again in the background for the words not found yet. It needs page sets, next to which the pages are shown, and stops at the node's download and storage limits, but not because background updates are off: the owner's own app asked. One site is fetched at a time.
+- **`focus_topics`** adds and removes focus topics, as the panel's settings do: the node crawls sites about them first and twice as often, and keeps more of them under a storage limit. Removing one can let a node with a storage limit drop the sites it kept only for it, so the prompt removes a topic only when the person asks.
+- **`node_tuning`** shows what earlier runs left: the topics, each site asked for with the words still looked for and the pages kept, and why crawls wait, if they do.
+
+Nothing these tools change leaves the node, and none deletes what it holds. Like `report_finding`, they are offered only to apps on the node's own computer. A node run with `--mcp-manage` offers them to every client, for a node whose address only people you trust have: anyone who can reach it could then fill its disk with fetched pages up to its limits.
+
+In Claude Code the prompt is the command `/mcp__plumb__improve_search`. To run it on a schedule, on the node's computer (the first line takes the prompt's text from the node; `?answers=text` keeps the answers short):
+
+```sh
+node=http://127.0.0.1:7586/mcp
+prompt=$(curl -s "$node" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"improve_search"}}' \
+  | jq -r '.result.messages[0].content.text')
+claude -p "$prompt" --output-format json --max-turns 60 \
+  --mcp-config "{\"mcpServers\":{\"plumb\":{\"type\":\"http\",\"url\":\"$node?answers=text\"}}}" \
+  --strict-mcp-config --allowedTools "mcp__plumb__*"
+```
+
 ## Limits
 
 How `/mcp` is served ([web/mcp.rs](../crates/plumb-node/src/web/mcp.rs)):
@@ -204,6 +271,8 @@ How `/mcp` is served ([web/mcp.rs](../crates/plumb-node/src/web/mcp.rs)):
 | [mcp/text.rs](../crates/plumb-node/src/mcp/text.rs) | The short text form of each answer |
 | [web/mcp.rs](../crates/plumb-node/src/web/mcp.rs) | `POST /mcp`: origin check, rate limits, who counts as this computer |
 | [findings.rs](../crates/plumb-node/src/findings.rs) | Keeping and matching findings |
+| [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs) | `node_tuning`, `focus_topics`, `fetch_pages` and the `improve_search` prompt |
+| [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs) | `node_tuning`, `focus_topics`, `fetch_pages` and the `improve_search` prompt |
 
 The end-to-end tests run every tool over the fixture index, through `plumb mcp --index` and through `/mcp`:
 
