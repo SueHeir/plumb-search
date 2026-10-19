@@ -887,7 +887,7 @@ fn evaluate(
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
                 pages.add_other_number(&searched, &hits, &mut found, 10)?;
-                let meant = pages.add_meant(&results.meant, &mut found)?;
+                let meant = pages.add_meant(&searched, &results.meant, &mut found)?;
                 let mut lifted = hits.clone();
                 if cfg.add_named_site {
                     add_named_site(&mut lifted, &found, |domain| {
