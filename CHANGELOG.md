@@ -18,6 +18,11 @@
 
 - The private search page now gets each site of a bucket as its item in Plumb's data format, trimmed, in place of the site's trimmed record (`GET /api/buckets/{table}/{n}`). Buckets come out the same size (measured on 64 buckets of a live node), and searches find and rank the same sites. The page reads both forms, so buckets a browser kept from before the upgrade still work. A private search tab left open across the upgrade can find nothing until it is reloaded.
 
+### Search
+
+- Sites a language model graded spam or low value are pushed down, in other nodes' answers too. The grades come as the signed set `plumb/site-grades`, which every searching node takes: a spam site loses 90% of its score and a low-value one 30%, unless the search names it. The panel's **Site grades** setting says how far they count (100% by default, 0 turns them off). See [tools/grades](tools/grades/README.md).
+- A node given page vectors (`--page-vectors`, for trying out) searches each page set's vectors by meaning, not only articles'. It lists the nearest article only when it is as near as the sites listed, places it before pages found by some of the search's words, and keeps it out of the learned order. Without the flag nothing changes. See [docs/pages.md](docs/pages.md).
+
 ### Tools
 
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
