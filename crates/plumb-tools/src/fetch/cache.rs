@@ -12,9 +12,15 @@ use tracing::{info, warn};
 use super::site_pages::{fetch_site_pages_with_extraction, SitePageOutcome, SitePagesTarget};
 
 const SCHEMA: u32 = 1;
-/// Bump when extraction, passage/symbol limits or title policies change.
+/// Bump when extraction, passage/symbol limits, title policies or the pages
+/// picked change.
 /// Kept here so richer FetchedDoc fields can be added independently.
-pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-4-boilerplate";
+pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-5-spares";
+/// Requests of an attempt that may fail, one in this many, for its pages
+/// still to stand for the site. When none could, webmd.com's 9,711 pages
+/// were set aside for 3 failures in 10,092 requests, and healthline.com's
+/// 10,000 for 46 (32 of them HTTP 502).
+const FAILED_SHARE: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Envelope {
@@ -122,6 +128,26 @@ fn fresh(envelope: &Envelope, key: &str, fingerprint: &str, policy: Policy, now:
         && now - envelope.fetched_at < policy.max_age
 }
 
+/// Whether an attempt with `outcomes` and `pages` fetched can replace its
+/// site's pages: it has some, and few of its requests failed. Network,
+/// bot-check and HTTP 5xx or 429 failures count; robots, non-HTML pages,
+/// repeats and pages gone are what the site holds. A failed refresh of a
+/// site already held is also kept from shrinking it when the set is merged.
+fn complete(outcomes: &[SitePageOutcome], pages: usize) -> bool {
+    let failed = outcomes
+        .iter()
+        .filter(|o| {
+            o.status == "failed"
+                || o.status == "discovery-failed"
+                || o.status == "a bot check"
+                || o.status == "robots.txt could not be read"
+                || o.status.starts_with("HTTP 5")
+                || o.status == "HTTP 429"
+        })
+        .count();
+    pages > 0 && failed.saturating_mul(FAILED_SHARE) <= outcomes.len()
+}
+
 fn write(path: &Path, envelope: &Envelope) -> Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let mut part = tempfile::NamedTempFile::new_in(parent)?;
@@ -140,10 +166,17 @@ pub(super) async fn fetch(
     policy: Policy,
 ) -> Cached {
     let fingerprint = fingerprint(target, profile, cfg, policy.extraction);
-    if let Some(envelope) = path
-        .and_then(read)
-        .filter(|e| fresh(e, key, &fingerprint, policy, now()))
-    {
+    let reusable = |e: &Envelope| fresh(e, key, &fingerprint, policy, now());
+    let kept = path.and_then(|path| {
+        read(path).filter(reusable).or_else(|| {
+            // An attempt is judged again, so one set aside by a stricter
+            // rule stands without its pages fetched again.
+            let mut attempt = read(&path.with_extension("attempt.json"))?;
+            attempt.complete = complete(&attempt.outcomes, attempt.docs.len());
+            Some(attempt).filter(reusable)
+        })
+    });
+    if let Some(envelope) = kept {
         info!(
             "{key}: {} fresh compatible pages reused",
             envelope.docs.len()
@@ -154,16 +187,6 @@ pub(super) async fn fetch(
         };
     }
     let result = fetch_site_pages_with_extraction(target, cfg, policy.extraction).await;
-    // Allowed skips (robots, non-HTML and duplicates) are recorded but do not
-    // mean an interrupted run. Network/bot/HTTP failures cannot replace a host.
-    let failed = result.outcomes.iter().any(|o| {
-        o.status == "failed"
-            || o.status == "discovery-failed"
-            || o.status == "a bot check"
-            || o.status == "robots.txt could not be read"
-            || o.status.starts_with("HTTP 5")
-            || o.status == "HTTP 429"
-    });
     let envelope = Envelope {
         schema: SCHEMA,
         key: key.into(),
@@ -171,7 +194,7 @@ pub(super) async fn fetch(
         extractor: EXTRACTOR_VERSION.into(),
         fetched_at: now(),
         source_observed_at: None,
-        complete: result.finished && !failed && !result.pages.is_empty(),
+        complete: result.finished && complete(&result.outcomes, result.pages.len()),
         found: result.found,
         skipped: result.skipped,
         capped: result.found > target.max_pages,
@@ -283,6 +306,81 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), good);
         assert!(path.with_extension("attempt.json").exists());
         server.abort();
+    }
+
+    fn outcomes(statuses: &[(&str, usize)]) -> Vec<SitePageOutcome> {
+        statuses
+            .iter()
+            .flat_map(|&(status, n)| std::iter::repeat_n(status, n))
+            .map(|status| SitePageOutcome {
+                url: "https://example.com/a".into(),
+                final_url: None,
+                status: status.into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_few_failed_requests_leave_an_attempt_complete() {
+        assert!(complete(&outcomes(&[("fetched", 19), ("HTTP 502", 1)]), 19));
+        assert!(!complete(&outcomes(&[("discovery-failed", 1)]), 0));
+        let failing = [("fetched", 19), ("HTTP 502", 1), ("failed", 1)];
+        assert!(!complete(&outcomes(&failing), 19));
+        // Robots, pages gone and repeats are not failures, but count as requests.
+        let answered = [
+            ("fetched", 19),
+            ("HTTP 502", 1),
+            ("failed", 1),
+            ("HTTP 410", 17),
+            ("disallowed by robots.txt", 1),
+            ("a page fetched before", 1),
+        ];
+        assert!(complete(&outcomes(&answered), 19));
+    }
+
+    #[tokio::test]
+    async fn an_attempt_set_aside_by_a_stricter_rule_is_reused() {
+        // Nothing listens on the discard port: a fetch would get no pages.
+        let target = SitePagesTarget {
+            domain: "example.test".into(),
+            roots: vec!["http://127.0.0.1:9/docs/".into()],
+            max_pages: 4,
+            ..Default::default()
+        };
+        let cfg = CrawlConfig {
+            allow_private_addresses: true,
+            timeout: std::time::Duration::from_secs(1),
+            ..Default::default()
+        };
+        let policy = Policy {
+            max_age: 100,
+            force: false,
+            extraction: plumb_crawl::InnerPageExtraction::Docs,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference-test.json");
+        let attempt = Envelope {
+            schema: SCHEMA,
+            key: "test".into(),
+            fingerprint: fingerprint(&target, "profile", &cfg, policy.extraction),
+            extractor: EXTRACTOR_VERSION.into(),
+            fetched_at: now(),
+            source_observed_at: None,
+            complete: false,
+            found: 20,
+            skipped: 1,
+            capped: false,
+            outcomes: outcomes(&[("fetched", 20), ("HTTP 502", 1)]),
+            docs: vec![FetchedDoc {
+                url: "http://127.0.0.1:9/docs/guide".into(),
+                title: Some("Guide".into()),
+                ..Default::default()
+            }],
+        };
+        write(&path.with_extension("attempt.json"), &attempt).unwrap();
+        let cached = fetch("test", &target, "profile", &cfg, Some(&path), policy).await;
+        assert!(cached.reused && cached.envelope.complete);
+        assert_eq!(cached.envelope.docs, attempt.docs);
     }
 
     #[test]
