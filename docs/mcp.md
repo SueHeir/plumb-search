@@ -196,7 +196,7 @@ On a node's own computer, an app can also change what the node shows, so that an
 1. read `node_tuning`, and ask for the person's topics when the node has no [focus topics](running-a-node.md#storage-limits-and-focus-topics) yet;
 2. search a few of the topics as someone who cares about them would;
 3. call `fetch_pages` where a good source shows but none of its pages on the subject, then search again to see that they show;
-4. check the junk in the top results with `site_info` and `check_lookalike`, and grade it with `grade_site` when sure, never a site the person named or uses, an official or well known one, or one that is only off-topic;
+4. check the junk in the top results with `site_info` and `check_lookalike`, and grade it with `grade_site` when sure, never a site the person named or uses, or one that is only off-topic, nor an official or well known one unless the organization itself is a scam or the site is now parked or dead;
 5. stop after about 15 searches, 10 fetches and 10 grades, with a short report.
 
 The tools ([mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs)):
