@@ -277,6 +277,7 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             && subpage_asked(query, sites, hit)
             && !covered_elsewhere(hit, sites, home.as_deref())
     });
+    crate::health::sources_pages_first(query, &mut pages);
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
         // ([`keep_page_rules`]).
@@ -294,6 +295,8 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             None => {}
         }
     }
+    let led = crate::health::sources_leading(query, sites);
+    crate::health::pages_after_sources(sites, led, &mut placed);
     placed.extend(records.into_iter().map(|hit| PlacedPage {
         hit,
         under: None,
@@ -338,7 +341,8 @@ const TITLE_STOP_WORDS: &[&str] = &[
 
 /// Whether `hit`, when it is a subpage or reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
-/// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
+/// ("rotten tomatoes oppenheimer", "met museum hours"; a reference page
+/// with a word of the query there besides the site's name), or with most of
 /// its title's words, or of its title before a colon, in the query
 /// ("amazon leadership principles" for "Amazon Leadership Principles:
 /// Values and company culture"), or, for a reference page, with all of the
@@ -371,7 +375,8 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
-    if on_best_site() {
+    let reference = hit.page.set != SUBPAGES_SET;
+    if !reference && on_best_site() {
         return true;
     }
     static STEMS: std::sync::LazyLock<TextAnalyzer> =
@@ -380,6 +385,8 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         .filter(|language| *language != "en")
         .map(|language| analysis::content_analyzer(Some(language)));
     let words = |text: &str| -> Vec<String> {
+        // "1,500" is one number, not "500".
+        let text = &join_digit_groups(text);
         if let Some(analyzer) = &content_analyzer {
             return analysis::tokens(analyzer, text)
                 .into_iter()
@@ -398,11 +405,27 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     };
     let query_words = words(query);
     let asked: HashSet<String> = query_words.iter().cloned().collect();
+    // A reference page on one of the best sites shares a word with the
+    // query besides the site's name, as a site's own key pages need not:
+    // "webmd zyrtec mucinex interaction" is not WebMD's "Self-Care for
+    // Eczema", nor "the cornell system" law.cornell.edu's list of Supreme
+    // Court decisions.
+    if reference && on_best_site() {
+        let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+        let label = domain.trim_start_matches("www.").split('.').next();
+        let named = words(label.unwrap_or_default());
+        let title: HashSet<String> = words(&hit.page.title).into_iter().collect();
+        if asked
+            .iter()
+            .any(|word| title.contains(word) && !named.contains(word))
+        {
+            return true;
+        }
+    }
     let fewest = asked.len().min(2);
     if fewest == 0 {
         return false;
     }
-    let reference = hit.page.set != SUBPAGES_SET;
     let has_most = |title: &str| {
         let in_order = words(title);
         let title: HashSet<String> = in_order.iter().cloned().collect();
@@ -458,6 +481,26 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// `text` with the commas between a number's groups of digits left out:
+/// "1,500" for "1500".
+fn join_digit_groups(text: &str) -> std::borrow::Cow<'_, str> {
+    let chars: Vec<char> = text.chars().collect();
+    let between_digits = |at: usize| {
+        chars[at] == ','
+            && at > 0
+            && chars[at - 1].is_ascii_digit()
+            && chars.get(at + 1).is_some_and(char::is_ascii_digit)
+    };
+    if !(0..chars.len()).any(between_digits) {
+        return text.into();
+    }
+    (0..chars.len())
+        .filter(|&at| !between_digits(at))
+        .map(|at| chars[at])
+        .collect::<String>()
+        .into()
 }
 
 /// Whether `url` is on one of the query's best [`SUBPAGE_SITES`] sites.

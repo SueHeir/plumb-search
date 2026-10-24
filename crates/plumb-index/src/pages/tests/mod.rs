@@ -6,6 +6,7 @@ mod docs;
 mod finding;
 mod golden;
 mod linking;
+mod listing;
 mod media;
 mod named_site;
 mod papers_and_entities;
