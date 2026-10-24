@@ -79,6 +79,30 @@ impl SiteGrades {
             .map(|at| self.0[at].1)
     }
 
+    /// These grades with `own` in their place for each site it names: a
+    /// grade, or `None` for a site that is fine whatever these say. For
+    /// the grades a node's owner gives over the project's.
+    pub fn overridden(&self, own: &[(String, Option<Grade>)]) -> SiteGrades {
+        let own: Vec<(u64, Option<Grade>)> = own
+            .iter()
+            .map(|(domain, grade)| (hash(&domain.to_ascii_lowercase()), *grade))
+            .collect();
+        let named: std::collections::HashSet<u64> = own.iter().map(|(hash, _)| *hash).collect();
+        let mut grades: Vec<(u64, Grade)> = self
+            .0
+            .iter()
+            .filter(|(hash, _)| !named.contains(hash))
+            .copied()
+            .chain(
+                own.into_iter()
+                    .filter_map(|(hash, grade)| Some((hash, grade?))),
+            )
+            .collect();
+        grades.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        grades.dedup_by_key(|(hash, _)| *hash);
+        SiteGrades(grades)
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -212,6 +236,21 @@ mod tests {
         assert_eq!(grades.get("nba.com"), None);
         assert_eq!(Grade::parse("ok"), None);
         assert_eq!(Grade::parse(Grade::LowValue.name()), Some(Grade::LowValue));
+    }
+
+    #[test]
+    fn a_node_s_own_grades_take_the_place_of_the_set_s() {
+        let own = [
+            ("NFLBOX.sx".to_string(), None),
+            ("thin.example".to_string(), Some(Grade::LowValue)),
+            ("new.example".to_string(), Some(Grade::Spam)),
+        ];
+        let grades = grades().overridden(&own);
+        assert_eq!(grades.get("nflbox.sx"), None);
+        // Milder than the set's, but the node's own.
+        assert_eq!(grades.get("thin.example"), Some(Grade::LowValue));
+        assert_eq!(grades.get("new.example"), Some(Grade::Spam));
+        assert_eq!(grades.len(), 2);
     }
 
     #[test]

@@ -135,10 +135,11 @@ mod worker;
 mod tests;
 
 pub use fill::FillStatus;
+pub use grades::{Graded, OwnGrade};
 pub use journal::{LogEntry, LogLevel};
 pub use schedule::{CrawlHours, Workload};
 use store::{DirLock, Paths, SavedState};
-pub use tuning::Tuning;
+pub use tuning::{SiteGraded, Tuning};
 pub use wanted_pages::Fetched;
 
 /// How long a count of the data folder's size is used before counting again.
@@ -987,6 +988,8 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         let inner = inner.clone();
         tokio::task::spawn_blocking(move || {
             inner.load_denylist();
+            // Even a crawl-only node's MCP tools grade sites.
+            inner.load_own_grades();
             if !inner.config.crawl_only {
                 inner.grades_from_set();
             }
@@ -1418,8 +1421,13 @@ struct Inner {
     asking: tokio::sync::Mutex<()>,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
-    /// The project's site grades, once the node holds a set of them.
+    /// The site grades searches use: the project's set, with the owner's
+    /// own in their place ([`grades`]).
     grades: RwLock<Option<Arc<plumb_index::grades::SiteGrades>>>,
+    /// The project's site grades, once the node holds a set of them.
+    set_grades: RwLock<Option<Arc<plumb_index::grades::SiteGrades>>>,
+    /// The grades the owner's AI apps gave, by site.
+    own_grades: RwLock<std::collections::BTreeMap<String, grades::OwnGrade>>,
     /// The project's denylist, once the node holds one, with its stamp
     /// ([`denylist::read_held`]).
     denylist: RwLock<Option<(Arc<plumb_format::deny::Denylist>, String)>>,
@@ -1661,6 +1669,8 @@ impl Inner {
             asking: tokio::sync::Mutex::new(()),
             adult: RwLock::new(None),
             grades: RwLock::new(None),
+            set_grades: RwLock::new(None),
+            own_grades: RwLock::default(),
             denylist: RwLock::new(None),
         }
     }
@@ -2438,6 +2448,10 @@ impl StatusSource for Inner {
 
     fn fetch_pages(&self, start: &str, words: Vec<String>) -> Result<Fetched> {
         self.fetch_asked(start, words)
+    }
+
+    fn grade_site(&self, site: &str, grade: &str, why: &str) -> Result<grades::Graded> {
+        Inner::grade_site(self, site, grade, why)
     }
 
     fn tuning(&self) -> Option<Tuning> {

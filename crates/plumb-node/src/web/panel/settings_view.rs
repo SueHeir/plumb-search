@@ -266,8 +266,9 @@ pub(super) fn render_settings(body: &mut String, settings: &NodeSettings, base: 
          only change which sites this node keeps.</p>\n\
          <label>Site grades <input type=\"number\" name=\"site_grades_percent\" min=\"0\" \
          max=\"100\" step=\"1\" value=\"{}\"> %</label>\n\
-         <p class=\"hint\">How much the project\u{2019}s grades push down sites a language \
-         model judged spam or of little use. 100 follows them fully, 0 turns them off.</p>\n",
+         <p class=\"hint\">How much the project\u{2019}s grades, and those your AI apps gave, \
+         push down sites judged spam or of little use. 100 follows them fully, 0 turns them \
+         off.</p>\n",
         limit(settings.download_limit_mb_per_day),
         limit(settings.storage_limit_mb),
         checked(settings.fill_from_network),

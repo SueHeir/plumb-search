@@ -4,18 +4,20 @@
 use std::sync::Mutex;
 
 use crate::mcp::manage::{MAX_FOCUS_TOPICS, TOOLS};
-use crate::node::{Fetched, NodeSettings, Status, Tuning};
+use crate::node::{Fetched, Graded, NodeSettings, OwnGrade, SiteGraded, Status, Tuning};
 use crate::wanted_pages::WantedSite;
 use plumb_crawl::WantedPage;
 
 use super::*;
 
-/// A node that keeps its settings and notes what it was asked to fetch.
+/// A node that keeps its settings and notes what it was asked to fetch
+/// and grade.
 #[derive(Default)]
 struct Owned {
     settings: Mutex<NodeSettings>,
     changes: Mutex<usize>,
     fetched: Mutex<Vec<(String, Vec<String>)>>,
+    graded: Mutex<Vec<[String; 3]>>,
 }
 
 impl StatusSource for Owned {
@@ -52,6 +54,18 @@ impl StatusSource for Owned {
         })
     }
 
+    fn grade_site(&self, site: &str, grade: &str, why: &str) -> Result<Graded> {
+        let mut graded = self.graded.lock().unwrap();
+        graded.push([site.into(), grade.into(), why.into()]);
+        Ok(Graded {
+            site: site.into(),
+            grade: grade.into(),
+            set_grade: (site == "nflbox.sx").then_some("spam"),
+            percent: 50,
+            own_grades: graded.len(),
+        })
+    }
+
     fn tuning(&self) -> Option<Tuning> {
         Some(Tuning {
             focus_topics: self.settings().unwrap().focus_topics,
@@ -66,6 +80,17 @@ impl StatusSource for Owned {
                 pages: 3,
             }],
             asked_pages: 3,
+            site_grades: vec![SiteGraded {
+                site: "thin.example".into(),
+                grade: OwnGrade {
+                    grade: "low_value".into(),
+                    why: "A parked page".into(),
+                    at: plumb_core::now_unix(),
+                },
+            }],
+            graded_sites: 1,
+            project_grades: 40,
+            site_grades_percent: 100,
         })
     }
 }
@@ -95,7 +120,7 @@ fn offered_only_when_allowed_and_there_is_a_node() {
     let node = Arc::new(Owned::default());
     let mcp = managed(&node);
     let listed = names(&mcp);
-    assert_eq!(&listed[listed.len() - 3..], TOOLS);
+    assert_eq!(&listed[listed.len() - TOOLS.len()..], TOOLS);
     let tools = rpc(&mcp, "tools/list", Value::Null);
     for tool in tools["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
@@ -258,7 +283,52 @@ fn node_tuning_shows_what_was_asked() {
         "Crawls wait: Background updates are off",
         "Pages kept for AI apps' asks: 3 on 1 sites.",
         "- nasa.gov: 3 pages, asked 0 days ago, still looking for: discoveries exoplanet",
+        "Sites AI apps graded: 1 (the project's set grades 40; grades count 100% here).",
+        "- thin.example: low_value, 0 days ago: A parked page",
     ] {
         assert!(text.contains(line), "{line:?} in {text}");
     }
+}
+
+#[test]
+fn grade_site_grades_the_site_of_the_address_given() {
+    let node = Arc::new(Owned::default());
+    let mcp = managed(&node);
+    let reply = call(
+        &mcp,
+        "grade_site",
+        json!({ "site": "https://www.NFLBOX.sx/live/", "grade": "spam", "why": "Pirated streams" }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["site"], "nflbox.sx");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    for line in [
+        "Graded nflbox.sx spam: searches here take 45% off its score.",
+        "The project's set graded it spam; this grade takes its place.",
+    ] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
+    let reply = call(
+        &mcp,
+        "grade_site",
+        json!({ "site": "thin.example", "grade": "ok", "why": "A real shop" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("thin.example is fine here"), "{text}");
+
+    for arguments in [
+        json!({ "site": "nflbox.sx", "grade": "spam" }),
+        json!({ "site": "nflbox.sx", "grade": "bad", "why": "Pirated streams" }),
+        json!({ "site": "localhost", "grade": "spam", "why": "Pirated streams" }),
+        json!({ "site": "", "grade": "spam", "why": "Pirated streams" }),
+    ] {
+        let reply = call(&mcp, "grade_site", arguments.clone());
+        assert_eq!(reply["error"]["code"], INVALID_PARAMS, "{arguments}");
+    }
+    assert_eq!(
+        *node.graded.lock().unwrap(),
+        [
+            ["nflbox.sx", "spam", "Pirated streams"].map(String::from),
+            ["thin.example", "ok", "A real shop"].map(String::from),
+        ]
+    );
 }

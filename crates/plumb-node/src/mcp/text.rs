@@ -41,7 +41,7 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
             }
         }
         "read_page" => read_page(&mut out, answer),
-        "node_tuning" | "focus_topics" | "fetch_pages" => {
+        "node_tuning" | "focus_topics" | "fetch_pages" | "grade_site" => {
             super::manage::render(&mut out, tool, answer)
         }
         _ => out = serde_json::to_string(answer).unwrap_or_default(),
