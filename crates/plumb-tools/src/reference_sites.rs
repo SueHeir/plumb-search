@@ -192,7 +192,20 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     whole("www.niddk.nih.gov", 5),
     whole("www.nhlbi.nih.gov", 5),
     whole("www.merckmanuals.com", 6),
-    whole("www.babycenter.com", 6),
+    // Not its baby names: a page titled just "Zara" or "Jordan" for every
+    // name took a place among the first results of a search for it.
+    under(
+        "www.babycenter.com",
+        &[
+            "https://www.babycenter.com/getting-pregnant/",
+            "https://www.babycenter.com/pregnancy/",
+            "https://www.babycenter.com/baby/",
+            "https://www.babycenter.com/toddler/",
+            "https://www.babycenter.com/health/",
+            "https://www.babycenter.com/family/",
+        ],
+        6,
+    ),
     whole("www.whattoexpect.com", 5),
     whole("www.testing.com", 4),
     whole("www.verywellmind.com", 5),

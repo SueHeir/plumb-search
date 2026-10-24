@@ -261,22 +261,9 @@ fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
-    // The site of what the query names, when it is listed.
-    let home = pages
-        .iter()
-        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
-        .and_then(|hit| hit.page.site.as_deref())
-        .and_then(registrable_domain)
-        .filter(|home| {
-            sites
-                .iter()
-                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
-        });
-    pages.retain(|hit| {
-        crate::health::page_allowed(query, &hit.page)
-            && subpage_asked(query, sites, hit)
-            && !covered_elsewhere(hit, sites, home.as_deref())
-    });
+    let home = named_home(&pages, sites);
+    pages.retain(|hit| listable(query, sites, home.as_deref(), hit));
+    crate::health::sources_pages_first(query, &mut pages);
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
         // ([`keep_page_rules`]).
@@ -294,6 +281,8 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             None => {}
         }
     }
+    let led = crate::health::sources_leading(query, sites);
+    crate::health::pages_after_sources(sites, led, &mut placed);
     placed.extend(records.into_iter().map(|hit| PlacedPage {
         hit,
         under: None,
@@ -301,6 +290,49 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     }));
     keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// The site of what the query names, when it is listed among `sites`: the
+/// best named article's ([`covered_elsewhere`]).
+fn named_home(pages: &[PageHit], sites: &[crate::Hit]) -> Option<String> {
+    pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
+        .and_then(|hit| hit.page.site.as_deref())
+        .and_then(registrable_domain)
+        .filter(|home| {
+            sites
+                .iter()
+                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
+        })
+}
+
+/// Whether [`place_pages`] may list `hit` for `query` among `sites`,
+/// `home` being their [`named_home`].
+fn listable(query: &str, sites: &[crate::Hit], home: Option<&str>, hit: &PageHit) -> bool {
+    crate::health::page_allowed(query, &hit.page)
+        && subpage_asked(query, sites, hit)
+        && !covered_elsewhere(hit, sites, home)
+}
+
+/// Pages looked at for each one [`keep_listable`] keeps.
+pub const LOOKED_AT_PER_PAGE: usize = 2;
+
+/// Cuts `pages`, found best first for `query`
+/// ([`PageSearcher::search`](super::PageSearcher::search) with
+/// [`LOOKED_AT_PER_PAGE`] times `limit`), to `limit` that [`place_pages`]
+/// may list among `sites`, with the sources the query asks for first
+/// ([`crate::health::sources_pages_first`]). Those it would leave out stay
+/// where they are among them, for the steps before it that look at every
+/// page found, and take none of their places: Healthline's and WebMD's
+/// pages, as read as the most read articles, filled the places of
+/// "Presidency of William McKinley" for "mckinley president" and of
+/// "Naval aviation" for "us naval aircraft", and were then left out.
+pub fn keep_listable(query: &str, sites: &[crate::Hit], pages: &mut Vec<PageHit>, limit: usize) {
+    let home = named_home(pages, sites);
+    crate::health::sources_pages_first(query, pages);
+    let counts = |hit: &PageHit| is_record(hit) || listable(query, sites, home.as_deref(), hit);
+    super::scoring::truncate_counting(pages, limit, &counts);
 }
 
 /// Whether `hit` is a record the query names by its identifier
@@ -338,7 +370,8 @@ const TITLE_STOP_WORDS: &[&str] = &[
 
 /// Whether `hit`, when it is a subpage or reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
-/// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
+/// ("rotten tomatoes oppenheimer", "met museum hours"; a reference page
+/// with a word of the query there besides the site's name), or with most of
 /// its title's words, or of its title before a colon, in the query
 /// ("amazon leadership principles" for "Amazon Leadership Principles:
 /// Values and company culture"), or, for a reference page, with all of the
@@ -371,7 +404,8 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
-    if on_best_site() {
+    let reference = hit.page.set != SUBPAGES_SET;
+    if !reference && on_best_site() {
         return true;
     }
     static STEMS: std::sync::LazyLock<TextAnalyzer> =
@@ -380,6 +414,8 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         .filter(|language| *language != "en")
         .map(|language| analysis::content_analyzer(Some(language)));
     let words = |text: &str| -> Vec<String> {
+        // "1,500" is one number, not "500".
+        let text = &join_digit_groups(text);
         if let Some(analyzer) = &content_analyzer {
             return analysis::tokens(analyzer, text)
                 .into_iter()
@@ -398,11 +434,27 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     };
     let query_words = words(query);
     let asked: HashSet<String> = query_words.iter().cloned().collect();
+    // A reference page on one of the best sites shares a word with the
+    // query besides the site's name, as a site's own key pages need not:
+    // "webmd zyrtec mucinex interaction" is not WebMD's "Self-Care for
+    // Eczema", nor "the cornell system" law.cornell.edu's list of Supreme
+    // Court decisions.
+    if reference && on_best_site() {
+        let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+        let label = domain.trim_start_matches("www.").split('.').next();
+        let named = words(label.unwrap_or_default());
+        let title: HashSet<String> = words(&hit.page.title).into_iter().collect();
+        if asked
+            .iter()
+            .any(|word| title.contains(word) && !named.contains(word))
+        {
+            return true;
+        }
+    }
     let fewest = asked.len().min(2);
     if fewest == 0 {
         return false;
     }
-    let reference = hit.page.set != SUBPAGES_SET;
     let has_most = |title: &str| {
         let in_order = words(title);
         let title: HashSet<String> = in_order.iter().cloned().collect();
@@ -458,6 +510,26 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// `text` with the commas between a number's groups of digits left out:
+/// "1,500" for "1500".
+fn join_digit_groups(text: &str) -> std::borrow::Cow<'_, str> {
+    let chars: Vec<char> = text.chars().collect();
+    let between_digits = |at: usize| {
+        chars[at] == ','
+            && at > 0
+            && chars[at - 1].is_ascii_digit()
+            && chars.get(at + 1).is_some_and(char::is_ascii_digit)
+    };
+    if !(0..chars.len()).any(between_digits) {
+        return text.into();
+    }
+    (0..chars.len())
+        .filter(|&at| !between_digits(at))
+        .map(|at| chars[at])
+        .collect::<String>()
+        .into()
 }
 
 /// Whether `url` is on one of the query's best [`SUBPAGE_SITES`] sites.

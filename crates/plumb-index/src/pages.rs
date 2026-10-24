@@ -48,10 +48,10 @@ pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_E
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
 pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
-    add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,
-    operators_allow, options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN,
-    MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
-    WEAK_SITE_MATCH,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_listable, keep_page_rules,
+    lift_named_sites, operators_allow, options_allow, page_key, place_operator_pages, place_pages,
+    DEMAND_MARGIN, LOOKED_AT_PER_PAGE, MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE,
+    OPERATOR_PAGES, PARTIAL_AFTER, WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{
     asked_as_question, is_record, is_year, kept_below, named_page_site, names_best_site_page,

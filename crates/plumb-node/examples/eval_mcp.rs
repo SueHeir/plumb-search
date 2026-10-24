@@ -102,7 +102,7 @@ impl FrozenBackend {
             .filter(|spelling| spelling.applied)
             .map(|spelling| spelling.query.clone());
         let query = applied.as_deref().unwrap_or(query);
-        let mut found = pages.search(query, DISPLAY_CANDIDATES)?;
+        let mut found = pages.search_among(query, &results.hits, DISPLAY_CANDIDATES)?;
         pages.add_other_number(query, &results.hits, &mut found, DISPLAY_CANDIDATES)?;
         let meant = pages.add_meant(query, &results.meant, &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));

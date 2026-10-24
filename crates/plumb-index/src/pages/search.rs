@@ -14,7 +14,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
-use super::placing::{is_year, options_allow};
+use super::placing::{is_year, options_allow, LOOKED_AT_PER_PAGE};
 use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
 use super::sites::{base_title, describes_a_drug, describes_an_event, names_a_kind_of_drug};
@@ -1521,6 +1521,20 @@ impl PageSearcher {
         Ok(records)
     }
 
+    /// The pages [`search`](Self::search) finds for `query` among the
+    /// sites `sites`, `limit` that [`super::place_pages`] may list and
+    /// those before them it would not ([`super::keep_listable`]).
+    pub fn search_among(
+        &self,
+        query: &str,
+        sites: &[crate::Hit],
+        limit: usize,
+    ) -> Result<Vec<PageHit>> {
+        let mut found = self.search(query, limit.saturating_mul(LOOKED_AT_PER_PAGE))?;
+        super::keep_listable(query, sites, &mut found, limit);
+        Ok(found)
+    }
+
     pub(crate) fn search_general(
         &self,
         query: &str,
@@ -1867,12 +1881,14 @@ impl PageSearcher {
         Ok(best)
     }
 
-    /// Adds to `found`, the pages [`PageSearcher::search`] found for
+    /// Adds to `found`, the pages [`PageSearcher::search_among`] found for
     /// `query`, the article titled in the other number of its last word
     /// when none is named as typed and the best of `sites` only shares a
     /// word with the query ([`only_shares_a_word`]): "tariffs" names the
     /// article Tariff over tariffs.net. A query that sites answer well
-    /// keeps its sites: "used cars" is not the article Used car.
+    /// keeps its sites: "used cars" is not the article Used car. It keeps
+    /// `limit` that may be listed, as [`keep_listable`](super::keep_listable)
+    /// does.
     pub fn add_other_number(
         &self,
         query: &str,
@@ -1903,7 +1919,7 @@ impl PageSearcher {
         }
         if added {
             found.sort_by(|a, b| b.score.total_cmp(&a.score));
-            found.truncate(limit);
+            super::keep_listable(query, sites, found, limit);
         }
         Ok(())
     }

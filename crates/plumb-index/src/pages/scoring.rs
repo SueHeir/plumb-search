@@ -1603,6 +1603,17 @@ pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
+    truncate_counting(hits, limit, &|_| true);
+}
+
+/// [`truncate_keeping_inner_pages`] counting only the hits `counts`
+/// takes: those it does not are kept where they are among the first
+/// `limit` it does, and take none of their places.
+pub(crate) fn truncate_counting(
+    hits: &mut Vec<PageHit>,
+    limit: usize,
+    counts: &dyn Fn(&PageHit) -> bool,
+) {
     let kept = [
         DOCS_SET,
         SUBPAGES_SET,
@@ -1610,24 +1621,39 @@ pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize
         REFERENCE2_SET,
         WANTED_SET,
     ];
+    // Just after the `limit`th hit counted, or the end.
+    let end = |hits: &[PageHit]| {
+        hits.iter()
+            .enumerate()
+            .filter(|(_, hit)| counts(hit))
+            .nth(limit.saturating_sub(1))
+            .map_or(hits.len(), |(at, _)| at + 1)
+    };
+    if limit == 0 {
+        hits.clear();
+        return;
+    }
     for set in kept {
-        if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
+        let cut = end(hits);
+        let of_set = |hit: &PageHit| hit.page.set == set && counts(hit);
+        if hits[..cut].iter().any(of_set) {
             continue;
         }
-        let Some(best) = hits.iter().position(|h| h.page.set == set) else {
+        let Some(best) = hits[cut..].iter().position(of_set).map(|at| at + cut) else {
             continue;
         };
-        // In place of the last hit that is not one kept already.
-        let Some(last) = (0..limit)
+        // In place of the last hit counted that is not one kept already.
+        let Some(last) = (0..cut)
             .rev()
-            .find(|&i| !kept.contains(&hits[i].page.set.as_str()))
+            .find(|&i| counts(&hits[i]) && !kept.contains(&hits[i].page.set.as_str()))
         else {
             continue;
         };
         let hit = hits.remove(best);
         hits.insert(last, hit);
     }
-    hits.truncate(limit);
+    let cut = end(hits);
+    hits.truncate(cut);
 }
 
 pub(crate) fn scoped_query(query: &dyn Query, scope: Option<&dyn Query>) -> Box<dyn Query> {

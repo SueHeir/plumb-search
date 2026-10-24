@@ -50,7 +50,8 @@ const LIST_CHANGES_EVERY: Duration = Duration::from_secs(0);
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a wait looks for shutdown.
 const TICK: Duration = Duration::from_millis(250);
-/// Pages looked at per search, before [`place_pages`] picks.
+/// Pages per search that [`place_pages`] may list, before it picks
+/// ([`PageSearcher::search_among`]).
 const PAGES_PER_SEARCH: usize = 10;
 /// Eligible pages scored for typed search. Docs kind and host constraints
 /// narrow retrieval before its internal candidate windows.
@@ -1249,7 +1250,7 @@ pub(super) fn add_pages(
         .filter(|spelling| spelling.applied)
         .map(|spelling| spelling.query.clone());
     let query = applied.as_deref().unwrap_or(query);
-    match searcher.search(query, PAGES_PER_SEARCH) {
+    match searcher.search_among(query, &results.hits, PAGES_PER_SEARCH) {
         Ok(mut found) => {
             if let Err(err) =
                 searcher.add_other_number(query, &results.hits, &mut found, PAGES_PER_SEARCH)
