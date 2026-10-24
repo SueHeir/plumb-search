@@ -338,8 +338,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub mcp_findings: bool,
     /// Let every client of `/mcp`, not only AI apps on this computer, change
-    /// what this node shows with its `fetch_pages` and `focus_topics`
-    /// tools, and see what was asked with `node_tuning`. For
+    /// what this node shows with its `fetch_pages`, `focus_topics` and
+    /// `grade_site` tools, and see what was asked with `node_tuning`. For
     /// a node on a home network whose AI apps run on other computers; only
     /// for a node whose address you give to people you trust.
     #[arg(long)]

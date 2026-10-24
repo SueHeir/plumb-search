@@ -426,6 +426,12 @@ pub trait StatusSource: Send + Sync {
         anyhow::bail!("this node keeps no pages of its own")
     }
 
+    /// `grade_site`: the owner's grade of a site (`spam`, `low_value` or
+    /// `ok`), which its searches use over the project's.
+    fn grade_site(&self, _site: &str, _grade: &str, _why: &str) -> Result<crate::node::Graded> {
+        anyhow::bail!("this node keeps no grades of its own")
+    }
+
     /// What its owner's AI apps asked of the node, for `node_tuning`.
     fn tuning(&self) -> Option<crate::node::Tuning> {
         None

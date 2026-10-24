@@ -114,9 +114,10 @@ The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs). 
 | `facts` | `subject` ("Australia"); optional `about` ("ceo"), `more_subjects` (up to 9) | Wikidata facts, each with its item and property to cite | every client |
 | `read_page` | `url`; optional `start`, `max_chars`, `find`, `links`, `outline` | the page's text, or its headings | this computer (see [Reading pages](#reading-pages)) |
 | `report_finding` | `query`, `url`, `why`, `answer`; optional `task`, `share`, `share_query` | that the finding was kept, and whether it was shared | this computer (see [Findings](#findings)) |
-| `node_tuning` | nothing | the node's focus topics, the sites apps asked it to fetch pages of, and whether its crawls run | this computer (see [Improving search for you](#improving-search-for-you)) |
+| `node_tuning` | nothing | the node's focus topics, the sites apps asked it to fetch pages of or graded, and whether its crawls run | this computer (see [Improving search for you](#improving-search-for-you)) |
 | `focus_topics` | optional `add`, `remove` (lists of topics) | the focus topics after the change | this computer |
 | `fetch_pages` | `site` (a domain, or a page to start from), `about` (a few words) | the pages fetched, and the pages the node now keeps of the site | this computer |
+| `grade_site` | `site`, `grade` (`spam`, `low_value` or `ok`), `why` | how far the node's searches now push the site down | this computer |
 
 **`check_lookalike` verdicts.** `official` (Wikidata lists it), `known_site`, `little_known`, `lookalike` (the address borrows a far better-known site's name, or is a typo of it: `paypa1.com`, `wellsfargo.com.account-check.io`), `suspected` (another site's exact name on another ending or host, such as `paypal.co`, that Plumb can neither tie to that site's owner nor show to be an imitation) and `unknown` (Plumb does not have the site, which proves nothing). `lookalike` is `true` for both `lookalike` and `suspected`, so an app that checks it before entering credentials stops at either.
 
@@ -195,16 +196,17 @@ On a node's own computer, an app can also change what the node shows, so that an
 1. read `node_tuning`, and ask for the person's topics when the node has no [focus topics](running-a-node.md#storage-limits-and-focus-topics) yet;
 2. search a few of the topics as someone who cares about them would;
 3. call `fetch_pages` where a good source shows but none of its pages on the subject, then search again to see that they show;
-4. note the junk in the top results, checking doubtful sites with `site_info` and `check_lookalike`, and report it;
-5. stop after about 15 searches and 10 fetches, with a short report.
+4. check the junk in the top results with `site_info` and `check_lookalike`, and grade it with `grade_site` when sure, never a site the person named or uses, an official or well known one, or one that is only off-topic;
+5. stop after about 15 searches, 10 fetches and 10 grades, with a short report.
 
 The tools ([mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs)):
 
 - **`fetch_pages`** looks through the site for pages whose title or address has the words of `about`, starting with the page given, if any, then following links from it and from the homepage. It fetches at most 12 pages, waiting at most 15 seconds for each, on the site's usual port. It keeps the https pages it finds as the node keeps the pages its own searches want ([Pages a node finds for its own searches](pages.md#pages-a-node-finds-for-its-own-searches)), but in a store of their own (`asked/` in the data folder) that is shown whether or not the node runs with `--wanted-pages`, and kept for a year. When its crawls run, the node follows the site's links again in the background for the words not found yet, but never goes on to the other sites its pages link to. It needs page sets, next to which the pages are shown, and stops at the node's download and storage limits, but not because background updates are off: the owner's own app asked. One site is fetched at a time; a call that waits more than 30 seconds for another to end is told to try again.
 - **`focus_topics`** adds and removes focus topics, as the panel's settings do: the node crawls sites about them first and twice as often, and keeps more of them under a storage limit. Removing one can let a node with a storage limit drop the sites it kept only for it, so the prompt removes a topic only when the person asks.
-- **`node_tuning`** shows what earlier runs left: the topics, each site asked for with the words still looked for and the pages kept, and why crawls wait, if they do.
+- **`grade_site`** grades a site as the project's [site grades](running-a-node.md#the-panel-and-saved-settings) do: `spam` takes 90% off its score in the node's searches, `low_value` 30%, each scaled by the panel's Site grades setting, and `ok` lifts the project's grade or an earlier one. The grades, with why and when, are kept in `site-grades.json` in the data folder and take the place of the set's for the sites they name; the node uses them in its own results and in the answers other nodes send it, but never sends them on. A node keeps at most 10,000.
+- **`node_tuning`** shows what earlier runs left: the topics, each site asked for with the words still looked for and the pages kept, the sites graded and why, and why crawls wait, if they do.
 
-Nothing these tools change leaves the node, and only removing a focus topic can lose anything. Like `report_finding`, they are offered only to apps on the node's own computer. A node run with `--mcp-manage` offers them to every client, for a node whose address only people you trust have: anyone who can reach it could then fill its disk with fetched pages up to its limits.
+Nothing these tools change leaves the node, and only removing a focus topic can lose anything. Like `report_finding`, they are offered only to apps on the node's own computer. A node run with `--mcp-manage` offers them to every client, for a node whose address only people you trust have: anyone who can reach it could then fill its disk with fetched pages up to its limits, or lift the project's grade of a spam site.
 
 In Claude Code the prompt is the command `/mcp__plumb__improve_search`. To run it on a schedule, on the node's computer (the first line takes the prompt's text from the node; `?answers=text` keeps the answers short):
 
@@ -238,7 +240,7 @@ How `/mcp` is served ([web/mcp.rs](../crates/plumb-node/src/web/mcp.rs)):
 | [mcp/text.rs](../crates/plumb-node/src/mcp/text.rs) | The short text form of each answer |
 | [web/mcp.rs](../crates/plumb-node/src/web/mcp.rs) | `POST /mcp`: origin check, rate limits, who counts as this computer |
 | [findings.rs](../crates/plumb-node/src/findings.rs) | Keeping and matching findings |
-| [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs) | `node_tuning`, `focus_topics`, `fetch_pages` and the `improve_search` prompt |
+| [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs) | `node_tuning`, `focus_topics`, `fetch_pages`, `grade_site` and the `improve_search` prompt |
 
 The end-to-end tests run every tool over the fixture index, through `plumb mcp --index` and through `/mcp`:
 

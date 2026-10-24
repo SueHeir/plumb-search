@@ -48,7 +48,7 @@ flowchart LR
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
 | [node/fill.rs](src/node/fill.rs), [node/site_set.rs](src/node/site_set.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from the set of sites or trusted nodes (and first setup from them); fetching the parts of the set it reads; staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
-| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs), [node/grades.rs](src/node/grades.rs) | Signed sets taken from the network; the project's denylist, applied to sites' stored items as an index is built and to records kept or passed on; the adult blocklist; the site grades searches push spam down by |
+| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs), [node/grades.rs](src/node/grades.rs) | Signed sets taken from the network; the project's denylist, applied to sites' stored items as an index is built and to records kept or passed on; the adult blocklist; the site grades searches push spam down by, the set's and those AI apps gave (`grade_site`) |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |
 | [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs), [node/tuning.rs](src/node/tuning.rs) | Feed checks; following links toward the pages searches and AI apps (`fetch_pages`) wanted; what apps asked, for `node_tuning` |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
@@ -160,6 +160,7 @@ Everything a node keeps is under `--data DIR`. Paths are defined in [node/store.
 | `node.lock` | Locked while a node runs, so two never share a folder |
 | `state.json` | Progress that survives restarts: homepages left, last refresh, downloads counted |
 | `settings.json` | The panel's settings (`NodeSettings`) |
+| `site-grades.json` | The grades AI apps gave sites with `grade_site`, by site ([node/grades.rs](src/node/grades.rs)) |
 | `features.json` | The panel's optional features, applied at start ([node/features.rs](src/node/features.rs)) |
 | `records.jsonl`, `records.jsonl.journal` | Every known site, one JSON line each, its stored item (`plumb_core::stored`; lines versions up to 0.4 wrote hold the record's JSON and are read as well); crawl results not yet folded in ([records.rs](src/records.rs)) |
 | `seed/` | First-start downloads: Tranco, Wikidata, Wikipedia intros, Common Crawl ranks |

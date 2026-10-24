@@ -5,6 +5,7 @@
 use plumb_core::locks::RwLocked;
 use serde::Serialize;
 
+use super::grades::OwnGrade;
 use super::Inner;
 use crate::wanted_pages::WantedSite;
 
@@ -31,6 +32,23 @@ pub struct Tuning {
     pub asked_sites: Vec<WantedSite>,
     /// Pages kept for them in all.
     pub asked_pages: usize,
+    /// The grades AI apps gave sites (`grade_site`), the most recent
+    /// first.
+    pub site_grades: Vec<SiteGraded>,
+    /// Sites they graded in all.
+    pub graded_sites: usize,
+    /// Sites the project's grades set grades.
+    pub project_grades: usize,
+    /// How much of its penalty a graded site loses on this node.
+    pub site_grades_percent: u8,
+}
+
+/// A grade an AI app gave a site, as [`Tuning`] lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiteGraded {
+    pub site: String,
+    #[serde(flatten)]
+    pub grade: OwnGrade,
 }
 
 impl Inner {
@@ -38,6 +56,10 @@ impl Inner {
         let (mut asked_sites, asked_pages) = self.asked_pages.summary();
         asked_sites.retain(|site| !self.denies(&format!("https://{}/", site.site)));
         asked_sites.truncate(MAX_SITES_LISTED);
+        let mut site_grades = self.own_grades();
+        let graded_sites = site_grades.len();
+        site_grades.retain(|(site, _)| !self.denies(&format!("https://{site}/")));
+        site_grades.truncate(MAX_SITES_LISTED);
         Tuning {
             focus_topics: self.settings().focus_topics,
             fixed_focus_topics: self.config.focus_topics.clone(),
@@ -45,6 +67,13 @@ impl Inner {
             shows_pages: self.pages.read_locked().is_some(),
             asked_sites,
             asked_pages,
+            site_grades: site_grades
+                .into_iter()
+                .map(|(site, grade)| SiteGraded { site, grade })
+                .collect(),
+            graded_sites,
+            project_grades: self.set_grades_len(),
+            site_grades_percent: self.settings().site_grades_percent,
         }
     }
 }

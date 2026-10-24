@@ -35,7 +35,7 @@
 //! local (see `docs/docker.md`), so such a node should not share findings.
 //!
 //! The tools that change what the node shows (`fetch_pages`,
-//! `focus_topics`) and `node_tuning` go to the same apps as findings: those
+//! `focus_topics`, `grade_site`) and `node_tuning` go to the same apps as findings: those
 //! on the node's own computer, or every client with `--mcp-manage`.
 
 use std::collections::HashMap;

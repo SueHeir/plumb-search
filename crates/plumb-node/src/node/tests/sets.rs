@@ -1119,7 +1119,7 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_pushes_down_the_sites_its_grades_set_marks_as_far_as_its_setting_says() {
+async fn a_node_pushes_down_the_sites_its_grades_set_and_owner_mark_as_far_as_its_setting_says() {
     use ed25519_dalek::SigningKey;
     use plumb_format::PublicKey;
 
@@ -1151,8 +1151,44 @@ async fn a_node_pushes_down_the_sites_its_grades_set_marks_as_far_as_its_setting
 
     let mut settings = node.inner.settings();
     settings.site_grades_percent = 0;
-    node.inner.change_settings(settings).unwrap();
+    node.inner.change_settings(settings.clone()).unwrap();
     assert_eq!(domains(search(addr, "bank").await), ungraded);
+    settings.site_grades_percent = 100;
+    node.inner.change_settings(settings).unwrap();
+
+    // The owner's grades take the place of the set's: ok lifts the first
+    // site, and spam pushes down the second.
+    let graded = node
+        .inner
+        .grade_site(&ungraded[0], "ok", "A real bank")
+        .unwrap();
+    assert_eq!(graded.set_grade, Some("spam"));
+    assert_eq!(domains(search(addr, "bank").await), ungraded);
+    let graded = node
+        .inner
+        .grade_site(&ungraded[1], "spam", "A fake bank")
+        .unwrap();
+    assert_eq!((graded.set_grade, graded.own_grades), (None, 2));
+    let pushed = domains(search(addr, "bank").await);
+    assert_eq!(pushed[0], ungraded[0]);
+    assert_ne!(pushed[1], ungraded[1]);
+    assert!(node.inner.grade_site(&ungraded[1], "bad", "").is_err());
+
+    // They are kept for the next start.
+    node.inner.own_grades.write_locked().clear();
+    node.inner.load_own_grades();
+    let own = node.inner.own_grades();
+    assert_eq!(own.len(), 2);
+    assert!(own
+        .iter()
+        .any(|(site, own)| *site == ungraded[0] && own.why == "A real bank"));
+    assert_eq!(domains(search(addr, "bank").await), pushed);
+    // A file it can't read is moved aside, not written over.
+    let file = node.inner.paths.data.join("site-grades.json");
+    std::fs::write(&file, "{").unwrap();
+    node.inner.load_own_grades();
+    assert!(node.inner.own_grades().is_empty());
+    assert!(file.with_extension("json.bad").exists());
     node.shutdown().await.unwrap();
 }
 
