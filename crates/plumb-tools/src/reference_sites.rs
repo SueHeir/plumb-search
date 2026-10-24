@@ -127,20 +127,10 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         weight: 6,
         max_pages: Some(500),
     },
-    // Health.
-    // WebMD names no sitemap: its pages are followed from its sitemap page.
-    ReferenceSite {
-        host: "www.webmd.com",
-        roots: &[],
-        sitemaps: &[],
-        index_pages: &[
-            "https://www.webmd.com/sitemap",
-            "https://www.webmd.com/a-to-z-guides/health-topics",
-        ],
-        weight: 10,
-        max_pages: Some(10_000),
-    },
-    big("www.healthline.com", 10, 10_000),
+    // Health. Not WebMD, Healthline or eMedicineHealth: with their pages,
+    // a medical search listed one of theirs above the NHS, the CDC, the WHO
+    // or MedlinePlus ("seasonal influenza", "CDC how flu spreads"), even
+    // with public sources' pages listed first.
     big("www.mayoclinic.org", 10, 10_000),
     big("www.drugs.com", 9, 10_000),
     big("www.medicinenet.com", 8, 10_000),
@@ -173,7 +163,6 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     whole("www.medicalnewstoday.com", 7),
     whole("www.verywellhealth.com", 7),
     whole("www.everydayhealth.com", 6),
-    whole("www.emedicinehealth.com", 5),
     whole("www.rxlist.com", 6),
     whole("patient.info", 6),
     under(
@@ -229,7 +218,16 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     // Learning and reference.
     big("www.britannica.com", 9, 10_000),
     whole("www.thoughtco.com", 8),
-    whole("www.history.com", 6),
+    // Its articles, not its videos, authors or "this day in history" pages,
+    // whose titles are events ("“Ocean’s Eleven” remake opens in theaters").
+    under(
+        "www.history.com",
+        &[
+            "https://www.history.com/articles/",
+            "https://www.history.com/topics/",
+        ],
+        6,
+    ),
     whole("www.biography.com", 6),
     whole("www.khanacademy.org", 6),
     whole("www.mathsisfun.com", 6),
@@ -244,7 +242,9 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     whole("www.calculator.net", 5),
     whole("www.omnicalculator.com", 5),
     whole("www.rapidtables.com", 4),
-    whole("www.unitconverters.net", 4),
+    // Not unitconverters.net: its pages name one pair of units, often not
+    // the pair a search converts ("convert 5 miles to kilometers" listed
+    // kilometers to nautical miles), and the node converts units itself.
     whole("www.scienceabc.com", 3),
     whole("study.com", 6),
     whole("www.sparknotes.com", 5),
@@ -442,8 +442,8 @@ mod tests {
 
     #[test]
     fn finds_the_site_of_a_page() {
-        let site = site_of_url("https://www.healthline.com/health/foul-smelling-stool").unwrap();
-        assert_eq!(site.key(), "healthline.com");
+        let site = site_of_url("https://www.medicinenet.com/hair_loss/article.htm").unwrap();
+        assert_eq!(site.key(), "medicinenet.com");
         assert!(site_of_url("https://example.com/").is_none());
         assert_eq!(super::site("merriam-webster.com").unwrap().weight, 10);
     }

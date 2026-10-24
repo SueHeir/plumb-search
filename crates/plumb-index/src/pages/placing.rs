@@ -261,8 +261,22 @@ fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
-    let home = named_home(&pages, sites);
-    pages.retain(|hit| listable(query, sites, home.as_deref(), hit));
+    // The site of what the query names, when it is listed.
+    let home = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
+        .and_then(|hit| hit.page.site.as_deref())
+        .and_then(registrable_domain)
+        .filter(|home| {
+            sites
+                .iter()
+                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
+        });
+    pages.retain(|hit| {
+        crate::health::page_allowed(query, &hit.page)
+            && subpage_asked(query, sites, hit)
+            && !covered_elsewhere(hit, sites, home.as_deref())
+    });
     crate::health::sources_pages_first(query, &mut pages);
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
@@ -290,49 +304,6 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     }));
     keep_page_rules(query, sites, &mut placed);
     placed
-}
-
-/// The site of what the query names, when it is listed among `sites`: the
-/// best named article's ([`covered_elsewhere`]).
-fn named_home(pages: &[PageHit], sites: &[crate::Hit]) -> Option<String> {
-    pages
-        .iter()
-        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
-        .and_then(|hit| hit.page.site.as_deref())
-        .and_then(registrable_domain)
-        .filter(|home| {
-            sites
-                .iter()
-                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
-        })
-}
-
-/// Whether [`place_pages`] may list `hit` for `query` among `sites`,
-/// `home` being their [`named_home`].
-fn listable(query: &str, sites: &[crate::Hit], home: Option<&str>, hit: &PageHit) -> bool {
-    crate::health::page_allowed(query, &hit.page)
-        && subpage_asked(query, sites, hit)
-        && !covered_elsewhere(hit, sites, home)
-}
-
-/// Pages looked at for each one [`keep_listable`] keeps.
-pub const LOOKED_AT_PER_PAGE: usize = 2;
-
-/// Cuts `pages`, found best first for `query`
-/// ([`PageSearcher::search`](super::PageSearcher::search) with
-/// [`LOOKED_AT_PER_PAGE`] times `limit`), to `limit` that [`place_pages`]
-/// may list among `sites`, with the sources the query asks for first
-/// ([`crate::health::sources_pages_first`]). Those it would leave out stay
-/// where they are among them, for the steps before it that look at every
-/// page found, and take none of their places: Healthline's and WebMD's
-/// pages, as read as the most read articles, filled the places of
-/// "Presidency of William McKinley" for "mckinley president" and of
-/// "Naval aviation" for "us naval aircraft", and were then left out.
-pub fn keep_listable(query: &str, sites: &[crate::Hit], pages: &mut Vec<PageHit>, limit: usize) {
-    let home = named_home(pages, sites);
-    crate::health::sources_pages_first(query, pages);
-    let counts = |hit: &PageHit| is_record(hit) || listable(query, sites, home.as_deref(), hit);
-    super::scoring::truncate_counting(pages, limit, &counts);
 }
 
 /// Whether `hit` is a record the query names by its identifier

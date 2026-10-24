@@ -1,5 +1,5 @@
-//! Which pages found for a search may be listed, which keep places among
-//! the pages looked at, and the order a medical search lists them in.
+//! Which reference pages found for a search may be listed, and the order a
+//! medical search lists pages in.
 
 use super::*;
 
@@ -23,94 +23,6 @@ fn reference(url: &str, title: &str, score: f32) -> PageHit {
         learned: None,
         meant: false,
     }
-}
-
-#[test]
-fn pages_that_cannot_be_listed_take_no_place_of_those_that_can() {
-    let sites = [
-        site("mckinleymuseum.org", false),
-        site("mckinley.com", false),
-    ];
-    let article = |title: &str, score: f32| found(title, None, true, score);
-    // Too few of their titles' words are asked for.
-    let facts = reference(
-        "https://www.history.com/articles/william-mckinley",
-        "William McKinley: Facts, Assassination & Presidency",
-        0.95,
-    );
-    let tour = reference(
-        "https://www.history.com/articles/mckinley-birthplace",
-        "Niles, Ohio Birthplace Tour",
-        0.94,
-    );
-    let asked = reference(
-        "https://www.history.com/articles/mckinley-presidency",
-        "McKinley Presidency",
-        0.5,
-    );
-    let kept = |pages: Vec<PageHit>| {
-        let mut pages = pages;
-        keep_listable("mckinley president", &sites, &mut pages, 2);
-        pages
-            .into_iter()
-            .map(|hit| hit.page.title)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        kept(vec![
-            article("William McKinley", 0.99),
-            facts.clone(),
-            tour.clone(),
-            article("Presidency of William McKinley", 0.8),
-            article("McKinley Tariff", 0.7),
-        ]),
-        [
-            "William McKinley",
-            facts.page.title.as_str(),
-            tour.page.title.as_str(),
-            "Presidency of William McKinley"
-        ]
-    );
-    // The best reference page that may be listed still takes the last
-    // place, and one that may not is not brought in.
-    assert_eq!(
-        kept(vec![
-            article("William McKinley", 0.99),
-            article("Presidency of William McKinley", 0.8),
-            article("McKinley Tariff", 0.7),
-            asked.clone(),
-        ]),
-        ["William McKinley", asked.page.title.as_str()]
-    );
-    assert_eq!(
-        kept(vec![
-            article("William McKinley", 0.99),
-            article("Presidency of William McKinley", 0.8),
-            facts,
-        ]),
-        ["William McKinley", "Presidency of William McKinley"]
-    );
-}
-
-#[test]
-fn the_article_in_the_other_number_takes_no_place_of_a_page_that_may_be_listed() {
-    let (_dir, s) = searcher(&[page("Tariff", 90_000, &[])]);
-    let sites = [known_site("tariffs.net", true, 0.015)];
-    let mut pages = vec![
-        reference(
-            "https://www.history.com/articles/customs",
-            "Customs Duties Explained",
-            0.99,
-        ),
-        found("History of tariffs", None, false, 0.01),
-    ];
-    s.add_other_number("tariffs", &sites, &mut pages, 2)
-        .unwrap();
-    // The reference page shares no word of the search, so may not be listed.
-    assert_eq!(
-        titles(&pages),
-        ["Tariff", "Customs Duties Explained", "History of tariffs"]
-    );
 }
 
 #[test]

@@ -820,7 +820,7 @@ fn evaluate(
         let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
         if !args.exact && !applied {
             if let Some(pages) = pages.as_ref() {
-                let found = pages.search_among(&q.query, &results.hits, 10)?;
+                let found = pages.search(&q.query, 10)?;
                 let spelled_right =
                     pages.spelled_right(&q.query, &found, results.spelling.as_ref());
                 results.spelling = match results.spelling.take() {
@@ -884,7 +884,7 @@ fn evaluate(
             }
             Some(pages) => {
                 let mut found = pages
-                    .search_among(&searched, &hits, 10)
+                    .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
                 pages.add_other_number(&searched, &hits, &mut found, 10)?;
                 let meant = pages.add_meant(&searched, &results.meant, &mut found)?;
@@ -1233,8 +1233,7 @@ fn profile_shown(
         for lookup in answers::song_lookups(&name, &resolution) {
             let mut sites = lookup_sites(args, setup, &lookup, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
-            let found = pages.search_among(&lookup, &sites.hits, 10)?;
-            let found = place_pages(&lookup, &sites.hits, found);
+            let found = place_pages(&lookup, &sites.hits, pages.search(&lookup, 10)?);
             if let Some(profile) = answers::songs_profile(query, &resolution, found) {
                 return Ok(Some(profile.url));
             }
@@ -1266,7 +1265,7 @@ fn fact_rank(
             };
             let mut sites = lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
             pages.note_demand(&mut sites.hits)?;
-            let found = pages.search_among(&asked.subject, &sites.hits, 10)?;
+            let found = pages.search(&asked.subject, 10)?;
             let placed = place_pages(&asked.subject, &sites.hits, found);
             plumb_node::web::answers::fact_answer(asked, &placed, plumb_core::now_unix())
         }

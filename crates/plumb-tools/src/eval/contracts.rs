@@ -511,7 +511,7 @@ fn observe(
         } else if typed.is_some() || ops.any() {
             pages.search_naming_docs(words, &ops, typed == Some("docs"), 200)?
         } else {
-            pages.search_among(words, &found.hits, 10)?
+            pages.search(words, 10)?
         }
     } else {
         Vec::new()
@@ -590,7 +590,7 @@ fn observe(
             scoped_pages.as_ref(),
         ) {
             let lookup_sites = super::lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
-            let lookup_pages = pages.search_among(&asked.subject, &lookup_sites.hits, 10)?;
+            let lookup_pages = pages.search(&asked.subject, 10)?;
             let lookup = place_pages(&asked.subject, &lookup_sites.hits, lookup_pages);
             answer = plumb_node::web::answers::fact_answer(&asked, &lookup, now);
             fact_lookup = Some(
