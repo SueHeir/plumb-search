@@ -6,7 +6,7 @@
 //! The pages are fetched by `plumb-tools fetch-pages --set reference` (with
 //! `crate::fetch::site_pages`); this turns what was fetched into the
 //! set's articles. A page is named by its own title without the site's
-//! name ("Foul-Smelling Stool: Causes and Treatment | Healthline" is
+//! name ("Foul-Smelling Stool: Causes and Treatment | MedicineNet" is
 //! "Foul-Smelling Stool: Causes and Treatment"), and described by its own
 //! description, or else the start of its text. Its views are the site's
 //! weight over how deep the page is, so a site's main pages come before
@@ -24,7 +24,7 @@ pub const VIEWS_PER_WEIGHT: u64 = 1_000;
 /// Most pages fetched from each site, unless the site or the run asks
 /// otherwise.
 pub const DEFAULT_MAX_PER_SITE: usize = 5_000;
-/// Pages of a site whose titles share an ending ("| Healthline"), a title
+/// Pages of a site whose titles share an ending ("| MedicineNet"), a title
 /// or a description for it to be the site's rather than theirs.
 const SHARED_BY: usize = 3;
 /// What ends a title before the site's name.
@@ -98,7 +98,7 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
 
 /// The titles of `docs` without the site's name: its endings that
 /// [`SHARED_BY`] or more pages share ("Foul-Smelling Stool: Causes and
-/// Treatment | Healthline" is "Foul-Smelling Stool: Causes and
+/// Treatment | MedicineNet" is "Foul-Smelling Stool: Causes and
 /// Treatment"). A title that many pages in one language still share is
 /// the site's ("Access Denied", the homepage's title on pages that are
 /// gone): `None`, unless they differ once the last ending dropped is put
@@ -369,30 +369,30 @@ mod tests {
 
     #[test]
     fn articles_drop_the_sites_name_and_shared_text() {
-        let site = crate::reference_sites::site("healthline.com").unwrap();
+        let site = crate::reference_sites::site("medicinenet.com").unwrap();
         let docs = vec![
             doc(
-                "https://www.healthline.com/health/foul-smelling-stool",
-                "Foul-Smelling Stool: Causes and Treatment | Healthline",
+                "https://www.medicinenet.com/health/foul-smelling-stool",
+                "Foul-Smelling Stool: Causes and Treatment | MedicineNet",
                 "What makes stool smell bad.",
             ),
             doc(
-                "https://www.healthline.com/health/high-tsh",
-                "High TSH Levels - What They Mean | Healthline",
+                "https://www.medicinenet.com/health/high-tsh",
+                "High TSH Levels - What They Mean | MedicineNet",
                 "Medical information you can trust",
             ),
             doc(
-                "https://www.healthline.com/health/gone",
-                "Page Not Found | Healthline",
+                "https://www.medicinenet.com/health/gone",
+                "Page Not Found | MedicineNet",
                 "Medical information you can trust",
             ),
             doc(
-                "https://www.healthline.com/a/b/c",
+                "https://www.medicinenet.com/a/b/c",
                 "Medical information you can trust",
                 "Medical information you can trust",
             ),
             doc(
-                "https://www.healthline.com/d/e/f/g",
+                "https://www.medicinenet.com/d/e/f/g",
                 "Medical information you can trust",
                 "x",
             ),
@@ -417,15 +417,15 @@ mod tests {
         // instead.
         assert_eq!(
             articles[1].description.as_deref(),
-            Some("Text of High TSH Levels - What They Mean | Healthline")
+            Some("Text of High TSH Levels - What They Mean | MedicineNet")
         );
         assert_eq!(
             articles[0].item.as_deref(),
-            Some("https://www.healthline.com/health/foul-smelling-stool")
+            Some("https://www.medicinenet.com/health/foul-smelling-stool")
         );
-        // Weight 10 over two segments deep; three deep weighs less.
-        assert_eq!(articles[0].views, 5_000);
-        assert_eq!(articles[2].views, 3_333);
+        // Weight 8 over two segments deep; three deep weighs less.
+        assert_eq!(articles[0].views, 4_000);
+        assert_eq!(articles[2].views, 2_666);
     }
 
     #[test]
@@ -460,12 +460,12 @@ mod tests {
     #[test]
     fn a_title_most_pages_share_is_none() {
         // Pages that are gone, showing the homepage's title.
-        let site = crate::reference_sites::site("healthline.com").unwrap();
+        let site = crate::reference_sites::site("medicinenet.com").unwrap();
         let docs: Vec<FetchedDoc> = (0..3)
             .map(|i| {
                 doc(
-                    &format!("https://www.healthline.com/{i}"),
-                    "Healthline: Medical information and health advice you can trust.",
+                    &format!("https://www.medicinenet.com/{i}"),
+                    "MedicineNet: Medical information and health advice you can trust.",
                     "",
                 )
             })
@@ -540,25 +540,25 @@ mod tests {
     fn a_page_in_other_countries_is_one_page() {
         // Its title, ending and description are the page's own, not the
         // site's, though three copies share them.
-        let site = crate::reference_sites::site("healthline.com").unwrap();
+        let site = crate::reference_sites::site("medicinenet.com").unwrap();
         let mut docs: Vec<FetchedDoc> = ["en-us", "en-gb", "en-au"]
             .into_iter()
             .map(|locale| {
                 doc(
-                    &format!("https://www.healthline.com/{locale}/health/high-tsh"),
-                    "Overview - High TSH Levels | Healthline",
+                    &format!("https://www.medicinenet.com/{locale}/health/high-tsh"),
+                    "Overview - High TSH Levels | MedicineNet",
                     "What a high TSH level means.",
                 )
             })
             .collect();
         docs.push(doc(
-            "https://www.healthline.com/health/gout",
-            "Gout | Healthline",
+            "https://www.medicinenet.com/health/gout",
+            "Gout | MedicineNet",
             "About gout.",
         ));
         docs.push(doc(
-            "https://www.healthline.com/health/asthma",
-            "Asthma | Healthline",
+            "https://www.medicinenet.com/health/asthma",
+            "Asthma | MedicineNet",
             "About asthma.",
         ));
         let pages: Vec<(String, String, Option<String>)> = reference_articles(site, &docs)
@@ -568,7 +568,7 @@ mod tests {
         let page = |title: &str, path: &str, description: &str| {
             (
                 title.to_string(),
-                format!("https://www.healthline.com/{path}"),
+                format!("https://www.medicinenet.com/{path}"),
                 Some(description.to_string()),
             )
         };
@@ -589,18 +589,18 @@ mod tests {
     #[test]
     fn the_front_page_and_pages_with_its_title_are_left_out() {
         let titles = titles_of(
-            "healthline.com",
-            "https://www.healthline.com/",
+            "medicinenet.com",
+            "https://www.medicinenet.com/",
             &[
-                ("", "Healthline: Medical information you can trust"),
+                ("", "MedicineNet: Medical information you can trust"),
                 (
                     "health/old",
-                    "Healthline: Medical information you can trust",
+                    "MedicineNet: Medical information you can trust",
                 ),
                 // Not a locale folder, though it reads like one.
-                ("ai", "AI in Health | Healthline"),
-                ("health/gout", "Gout | Healthline"),
-                ("health/asthma", "Asthma | Healthline"),
+                ("ai", "AI in Health | MedicineNet"),
+                ("health/gout", "Gout | MedicineNet"),
+                ("health/asthma", "Asthma | MedicineNet"),
             ],
         );
         assert_eq!(titles, ["AI in Health", "Gout", "Asthma"]);

@@ -169,7 +169,7 @@ flowchart LR
 - **Site search.** When the query's first words name the first result and words are left over, the results offer to search that site for them through its own search address (`SiteSearch`): "github plumb search".
 - **News sites.** A query asking only for the news ("world news") lists the well-known news sites, by popularity and home country ([topics.rs](../crates/plumb-index/src/topics.rs), `news_sites`).
 - **Intent words.** A query ending in intent words is ranked again without them; a well-known site that name alone names keeps the better of its two scores, look-alikes go, and a docs site goes first for a docs query ("postgres docs").
-- **Health.** For a medical query, health authorities go above other sites ([health.rs](../crates/plumb-index/src/health.rs), `health_authorities`).
+- **Health.** For a medical query, health authorities go above other sites ([health.rs](../crates/plumb-index/src/health.rs), `health_authorities`), and their pages above other sites' pages ([pages.md](pages.md#how-pages-are-searched-and-shown)).
 
 ## Spelling
 

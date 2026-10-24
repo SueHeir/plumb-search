@@ -60,7 +60,7 @@ About 43,000 lines, tests included.
 | [grades.rs](src/grades.rs) | sites a language model graded spam or low value, moved down by the share a node chooses, with the node owner's own grades in place of the set's for the sites they name; nothing else moves, so rule-placed sites keep their places |
 | [language.rs](src/language.rs) | whether a query is written in another language than the one chosen |
 | [topics.rs](src/topics.rs) | searches for the news itself ("world news") |
-| [health.rs](src/health.rs) | health authorities first for medical searches, and source quality |
+| [health.rs](src/health.rs) | health authorities and their pages first for medical searches, and source quality |
 | [states.rs](src/states.rs) | towns and counties with namesakes elsewhere: the one meant first |
 
 ### Spelling

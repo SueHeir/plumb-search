@@ -6,7 +6,7 @@
 use plumb_core::normalize_text;
 use serde::{Deserialize, Serialize};
 
-use crate::pages::{LearnedPlace, PlacedPage};
+use crate::pages::{LearnedPlace, PageHit, PlacedPage};
 use crate::{Hit, WELL_KNOWN_LINK_SCORE};
 
 /// How many health authorities go first.
@@ -768,6 +768,26 @@ const SOURCES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Public and clinical health sites, by domain with their subdomains,
+/// whose pages come before other sites' in a medical search
+/// ([`sources_pages_first`]): MedlinePlus and the NIH, the NHS, the CDC,
+/// the FDA, the WHO, the ECDC, Germany's gesund.bund.de, the AAP's
+/// healthychildren.org, the Mayo Clinic and the Cleveland Clinic. Not all
+/// of europa.eu or bund.de, whose other sites are not about health.
+const PUBLIC_HEALTH: &[&str] = &[
+    "medlineplus.gov",
+    "nih.gov",
+    "nhs.uk",
+    "cdc.gov",
+    "fda.gov",
+    "who.int",
+    "ecdc.europa.eu",
+    "gesund.bund.de",
+    "healthychildren.org",
+    "mayoclinic.org",
+    "clevelandclinic.org",
+];
+
 /// The sites `query` asks for as its source, by domain: a health source
 /// it names ([`SOURCES`]) or an address typed in it ("acetaminophen dose
 /// healthychildren.org", "cetirizine (site:drugs.com)", which is not an
@@ -946,8 +966,9 @@ pub(crate) fn authorities_first(
 /// ([`names_site`]) first among the sites again, once the learned ranking
 /// has had its say: it lists a homepage [`authorities_first`] put in under
 /// the authorities ("NHS paracetamol for children dose" had nhs.uk
-/// fourth). Pages listed on their own keep their places, and the moved
-/// sites trade scores so that scores still go down the list, as
+/// fourth). Pages listed on their own keep their places, but for another
+/// site's own pages ([`pages_after_sources`]), and the moved sites trade
+/// scores so that scores still go down the list, as
 /// [`crate::learned::reorder`] leaves them.
 pub fn sources_lead(
     query: &str,
@@ -979,20 +1000,23 @@ pub fn sources_lead(
             .filter(|(at, _)| !lead.contains(at))
             .map(|(_, hit)| hit.clone()),
     );
-    let Some(moved) = new_hits
+    let moved = new_hits
         .iter()
         .zip(hits.iter())
         .rposition(|(new, old)| new.domain != old.domain)
-        .map(|last| last + 1)
-    else {
+        .map(|last| last + 1);
+    if moved.is_none() && lead.is_empty() {
         return;
-    };
-    let mut scores: Vec<f32> = new_hits[..moved].iter().map(|hit| hit.score).collect();
-    scores.sort_by(|a, b| b.total_cmp(a));
-    for (hit, score) in new_hits.iter_mut().zip(scores) {
-        hit.score = score;
     }
-    *hits = new_hits;
+    if let Some(moved) = moved {
+        let mut scores: Vec<f32> = new_hits[..moved].iter().map(|hit| hit.score).collect();
+        scores.sort_by(|a, b| b.total_cmp(a));
+        for (hit, score) in new_hits.iter_mut().zip(scores) {
+            hit.score = score;
+        }
+        *hits = new_hits;
+    }
+    pages_after_sources(hits, lead.len(), placed);
     for page in placed.iter_mut().filter(|page| page.under.is_none()) {
         if matches!(page.hit.learned, Some(LearnedPlace::Before(_))) {
             if let Some(site) = hits.get(page.at) {
@@ -1000,6 +1024,91 @@ pub fn sources_lead(
             }
         }
     }
+}
+
+/// How many of `sites` lead as sources `query` asks for
+/// ([`asked_sources`]): the first ones, each such a source.
+pub(crate) fn sources_leading(query: &str, sites: &[Hit]) -> usize {
+    if plumb_core::Operators::parse(query).any() || crate::names::typed_domain(query).is_some() {
+        return 0;
+    }
+    let asked = asked_sources(query, is_medical(query));
+    sites
+        .iter()
+        .take_while(|site| asked.iter().any(|domain| same_site(&site.domain, domain)))
+        .count()
+}
+
+/// `placed` with the pages of other sites' own (site pages) after the
+/// first `led` of `sites`, the sources the query asks for: "CDC how flu
+/// spreads contagious period" listed Healthline's page on the flu above
+/// cdc.gov, and "NHS sprained ankle RICE" WebMD's on sprains above nhs.uk.
+pub(crate) fn pages_after_sources(sites: &[Hit], led: usize, placed: &mut [PlacedPage]) {
+    let sources = &sites[..led.min(sites.len())];
+    for page in placed
+        .iter_mut()
+        .filter(|page| page.under.is_none() && page.hit.page.is_site_page())
+    {
+        if !sources
+            .iter()
+            .any(|site| under_domain(&page.hit.page.url, &site.domain))
+        {
+            page.at = page.at.max(led);
+        }
+    }
+}
+
+/// Whether `url` is on `domain` or one of its subdomains, with or without
+/// `www.`: www.nhs.uk's pages for nhs.uk, gesund.bund.de's for bund.de.
+fn under_domain(url: &str, domain: &str) -> bool {
+    let domain = domain.trim_start_matches("www.");
+    plumb_core::host_of(url).is_some_and(|host| {
+        let host = host.trim_start_matches("www.");
+        host == domain || host.ends_with(&format!(".{domain}"))
+    })
+}
+
+/// `pages` (best first) with the site pages of the sources `query` asks
+/// for ([`asked_sources`]) first among the site pages, and in a medical
+/// search those of public and clinical health sites ([`PUBLIC_HEALTH`])
+/// next, as [`authorities_first`] lists the sites: WebMD's guide took
+/// the places of medlineplus.gov's and nhs.uk's pages for "urinary tract
+/// infection symptoms men". Pages of other sets keep their places.
+pub(crate) fn sources_pages_first(query: &str, pages: &mut Vec<PageHit>) {
+    if plumb_core::Operators::parse(query).any() || crate::names::typed_domain(query).is_some() {
+        return;
+    }
+    let medical = is_medical(query);
+    let asked = asked_sources(query, medical);
+    if !medical && asked.is_empty() {
+        return;
+    }
+    let rank = |hit: &PageHit| {
+        let url = hit.page.url.as_str();
+        if asked.iter().any(|domain| under_domain(url, domain)) {
+            0
+        } else if medical && PUBLIC_HEALTH.iter().any(|domain| under_domain(url, domain)) {
+            1
+        } else {
+            2
+        }
+    };
+    let all = std::mem::take(pages);
+    let slots: Vec<bool> = all.iter().map(|hit| hit.page.is_site_page()).collect();
+    let (mut site_pages, others): (Vec<PageHit>, Vec<PageHit>) =
+        all.into_iter().partition(|hit| hit.page.is_site_page());
+    site_pages.sort_by_key(|hit| rank(hit));
+    let (mut site_pages, mut others) = (site_pages.into_iter(), others.into_iter());
+    *pages = slots
+        .into_iter()
+        .filter_map(|site| {
+            if site {
+                site_pages.next()
+            } else {
+                others.next()
+            }
+        })
+        .collect();
 }
 
 /// Drugs that spam pill shops put in their names.
@@ -1638,11 +1747,12 @@ mod tests {
         );
         let scores: Vec<f32> = hits.iter().map(|hit| hit.score).collect();
         assert_eq!(scores, [0.9, 0.8, 0.7, 0.6, 0.5]);
-        // The page listed above the sites stays above them.
-        assert_eq!(placed[0].at, 0);
+        // Another site's page listed above the sites goes after the
+        // source the search names, and stays above the rest.
+        assert_eq!(placed[0].at, 1);
         assert_eq!(
             placed[0].hit.learned,
-            Some(LearnedPlace::Before("www.nhs.uk".to_string()))
+            Some(LearnedPlace::Before("clevelandclinic.org".to_string()))
         );
 
         // No source asked for, an operator, or not medical: as it was.
