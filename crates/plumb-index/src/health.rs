@@ -771,8 +771,9 @@ const SOURCES: &[(&str, &[&str])] = &[
 /// Public and clinical health sites, by domain with their subdomains,
 /// whose pages come before other sites' in a medical search
 /// ([`sources_pages_first`]): MedlinePlus and the NIH, the NHS, the CDC,
-/// the FDA, the WHO, the ECDC (europa.eu), Germany's gesund.bund.de, the
-/// AAP's healthychildren.org, the Mayo Clinic and the Cleveland Clinic.
+/// the FDA, the WHO, the ECDC, Germany's gesund.bund.de, the AAP's
+/// healthychildren.org, the Mayo Clinic and the Cleveland Clinic. Not all
+/// of europa.eu or bund.de, whose other sites are not about health.
 const PUBLIC_HEALTH: &[&str] = &[
     "medlineplus.gov",
     "nih.gov",
@@ -780,8 +781,8 @@ const PUBLIC_HEALTH: &[&str] = &[
     "cdc.gov",
     "fda.gov",
     "who.int",
-    "europa.eu",
-    "bund.de",
+    "ecdc.europa.eu",
+    "gesund.bund.de",
     "healthychildren.org",
     "mayoclinic.org",
     "clevelandclinic.org",
