@@ -836,7 +836,7 @@ fn evaluate(
         }
         let mut searched = q.query.clone();
         // As a node does, a sure spelling's results are shown, searched as
-        // spelled ("abrahm").
+        // spelled ("ballrat").
         let mut sure = false;
         if let (Some(pages), Some(spelling)) = (pages.as_ref(), results.spelling.clone()) {
             if pages.sure_spelling(&q.query, &spelling, &options, &results.hits, &site_words)? {

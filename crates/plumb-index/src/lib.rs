@@ -621,7 +621,7 @@ pub struct Spelling {
     /// The results are for this spelling, not the query as typed: nothing
     /// found had all the typed words, and the spelling finds a site that
     /// does ("kayne west stronger"), or on a node with pages the spelling
-    /// is sure ([`pages::PageSearcher::sure_spelling`]: "abrahm"). Shown as
+    /// is sure ([`pages::PageSearcher::sure_spelling`]: "ballrat"). Shown as
     /// "Showing results for ...".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub applied: bool,

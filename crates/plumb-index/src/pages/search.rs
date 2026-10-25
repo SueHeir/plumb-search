@@ -815,6 +815,11 @@ const SUGGESTED_PAGES: usize = 10;
 /// times that; Stephen Hawkins, a name of its own, has 48.
 const WELL_READ_NAME: f32 = 0.55;
 
+/// Fewest letters of a one-word search whose spelling is shown in its place
+/// ([`PageSearcher::sure_spelling`]). A shorter word is a slip of too many
+/// others: "sinze" of size as much as since, "hcnn" of CNN as much as Hann.
+const SURE_WORD_CHARS: usize = 7;
+
 /// Most of a query's first words read as one name
 /// ([`PageSearcher::fix_page_name`]).
 const MAX_NAME_WORDS: usize = 4;
@@ -1301,15 +1306,16 @@ impl PageSearcher {
     }
 
     /// Whether `spelling`, suggested for `query`, is sure enough that its
-    /// results are shown instead ("Showing results for"): "abrahm" is
-    /// Abraham, "knewledge" knowledge. Each word it changes is one the
-    /// pages do not know ([`PageSearcher::knows_word`]) and that names
+    /// results are shown instead ("Showing results for"): "ballrat" is
+    /// Ballarat, "delta debtal" Delta Dental. Each word it changes is one
+    /// the pages do not know ([`PageSearcher::knows_word`]) and that names
     /// nothing ([`PageSearcher::names_something`]), in fewer than
     /// [`crate::KNOWN_WORD_SITES`] sites (`site_words`) and no site's name
     /// among `sites`, the results as typed, none of which the query names
     /// either; and the spelling names a page `options` keep. The site the
-    /// spelling names does not count. A web address, an exact search and
-    /// words split or joined stay as typed.
+    /// spelling names does not count. A web address, an exact search, words
+    /// split or joined and one word shorter than [`SURE_WORD_CHARS`] stay
+    /// as typed.
     pub fn sure_spelling(
         &self,
         query: &str,
@@ -1330,7 +1336,8 @@ impl PageSearcher {
         }
         let typed = analysis::tokens(&self.words, query);
         let fixed: Vec<&str> = spelling.query.split_whitespace().collect();
-        if typed.len() != fixed.len() {
+        let short = matches!(typed.as_slice(), [word] if word.chars().count() < SURE_WORD_CHARS);
+        if typed.len() != fixed.len() || short {
             return Ok(false);
         }
         for (word, fix) in typed.iter().zip(fixed) {

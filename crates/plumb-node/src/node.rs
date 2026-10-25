@@ -2439,7 +2439,7 @@ impl Inner {
         pages::add_pages(self, query, options, &mut results);
         self.drop_denied(&mut results);
         // A sure slip of what a page is named shows the spelling's results,
-        // searched as spelled: "abrahm" is Abraham.
+        // searched as spelled: "ballrat" is Ballarat.
         let spelling = results.spelling.as_ref();
         if let Some(spelling) = pages::sure_spelling(self, query, options, spelling, &typed) {
             let as_spelled = SearchOptions {

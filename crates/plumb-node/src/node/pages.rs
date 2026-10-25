@@ -1049,7 +1049,7 @@ pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Sp
 
 /// `spelling`, suggested for `query`, when it is sure and its results are
 /// shown instead of `sites`, the sites found as typed
-/// ([`PageSearcher::sure_spelling`]): "abrahm" is Abraham.
+/// ([`PageSearcher::sure_spelling`]): "ballrat" is Ballarat.
 pub(super) fn sure_spelling(
     inner: &Inner,
     query: &str,

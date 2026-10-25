@@ -1090,7 +1090,12 @@ fn words_nothing_has_are_slips_of_rare_page_words() {
 
 #[test]
 fn sure_spellings_name_a_page_and_change_words_nothing_has() {
-    let mut pages = vec![page("Abraham", 50_000, &[]), page("Knowledge", 40_000, &[])];
+    let mut pages = vec![
+        page("Ballarat", 50_000, &[]),
+        page("Abraham", 50_000, &[]),
+        page("Abraham Lincoln", 60_000, &[]),
+        page("Knowledge", 40_000, &[]),
+    ];
     for i in 0..3 {
         pages.push(page(&format!("Knewledge band {i}"), 10, &[]));
     }
@@ -1110,37 +1115,40 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
         sure_with(typed, &spelling(fixed, None), &options, sites)
     };
     assert!(sure(
-        "abrahm",
-        "abraham",
-        &[site("rulesforrebels.info", false)]
+        "ballrat",
+        "ballarat",
+        &[site("goldfields.org", false)]
     ));
     // The query names a site as typed, or a site is named by the word.
-    assert!(!sure("abrahm", "abraham", &[site("abrahm.info", true)]));
-    assert!(!sure("abrahm", "abraham", &[site("abrahm.org", false)]));
+    assert!(!sure("ballrat", "ballarat", &[site("ballrat.info", true)]));
+    assert!(!sure("ballrat", "ballarat", &[site("ballrat.org", false)]));
     // The site the spelling names does not count.
-    let named = spelling("abraham", Some("abraham.com"));
+    let named = spelling("ballarat", Some("ballarat.com"));
     assert!(sure_with(
-        "abrahm",
+        "ballrat",
         &named,
         &options,
-        &[site("abraham.com", true)]
+        &[site("ballarat.com", true)]
     ));
     // Pages know the word, or the spelling names no page.
     assert!(!sure("knewledge", "knowledge", &[]));
-    assert!(!sure("abrahm lincoln", "abraham lincoln", &[]));
+    assert!(!sure("ballrat lake", "ballarat lake", &[]));
+    // One short word is a slip of too many; with another it is not.
+    assert!(!sure("abrahm", "abraham", &[]));
+    assert!(sure("abrahm lincoln", "abraham lincoln", &[]));
     // Many sites say the word.
     let many = |_: &str| crate::KNOWN_WORD_SITES;
-    let fixed = spelling("abraham", None);
+    let fixed = spelling("ballarat", None);
     assert!(!searcher
-        .sure_spelling("abrahm", &fixed, &options, &[], &many)
+        .sure_spelling("ballrat", &fixed, &options, &[], &many)
         .unwrap());
     // Searched as typed, or a web address.
     let exact = crate::SearchOptions {
         exact: true,
         ..crate::SearchOptions::default()
     };
-    assert!(!sure_with("abrahm", &fixed, &exact, &[]));
-    assert!(!sure("abrahm.com", "abraham com", &[]));
+    assert!(!sure_with("ballrat", &fixed, &exact, &[]));
+    assert!(!sure("ballrat.com", "ballarat com", &[]));
 }
 
 #[test]
