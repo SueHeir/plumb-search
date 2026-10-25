@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif">
-<title>Mean grade of 1,000 searches</title><desc>Mean grade by run: run 1 1.86, run 2 1.87, run 3 1.97, run 4 2.00, run 5 2.06</desc>
+<title>Mean grade of 1,000 searches</title><desc>Mean grade by run: run 1 1.86, run 2 1.87, run 3 1.97, run 4 2.00, run 5 2.06, run 7 2.08</desc>
 <text x="0.0" y="18.0" font-size="15" fill="#1f2328" text-anchor="start" font-weight="600">Mean grade of 1,000 searches</text>
 <text x="0.0" y="38.0" font-size="12" fill="#59636e" text-anchor="start" font-weight="400">Each search graded 0 (useless) to 3 (great) by an LLM reviewer</text>
 <line x1="44.0" y1="254.0" x2="570.0" y2="254.0" stroke="#e6e9ed" stroke-width="1"/>
@@ -19,22 +19,25 @@
 <line x1="44.0" y1="254.0" x2="570.0" y2="254.0" stroke="#b9c0c8" stroke-width="1"/>
 <line x1="44.0" y1="127.3" x2="570.0" y2="127.3" stroke="#a3abb5" stroke-width="1.5"/>
 <text x="578.0" y="131.3" font-size="11" fill="#818b98" text-anchor="start" font-weight="400">Goal 2.0</text>
-<polyline points="68.0,172.3 187.5,167.2 307.0,138.4 426.5,127.7 546.0,109.9" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="68.0,172.3 163.6,167.2 259.2,138.4 354.8,127.7 450.4,109.9 546.0,103.3" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="68.0" cy="172.3" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
-<circle cx="187.5" cy="167.2" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
-<circle cx="307.0" cy="138.4" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
-<circle cx="426.5" cy="127.7" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
-<circle cx="546.0" cy="109.9" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="163.6" cy="167.2" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="259.2" cy="138.4" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="354.8" cy="127.7" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="450.4" cy="109.9" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<circle cx="546.0" cy="103.3" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
 <text x="68.0" y="160.3" font-size="11" fill="#59636e" text-anchor="middle" font-weight="400">1.86</text>
-<text x="558.0" y="113.9" font-size="12" fill="#1f2328" text-anchor="start" font-weight="600">2.06  all searches</text>
+<text x="558.0" y="107.3" font-size="12" fill="#1f2328" text-anchor="start" font-weight="600">2.08  all searches</text>
 <text x="68.0" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 1</text>
 <text x="68.0" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 13</text>
-<text x="187.5" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 2</text>
-<text x="187.5" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 13</text>
-<text x="307.0" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 3</text>
-<text x="307.0" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 13</text>
-<text x="426.5" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 4</text>
-<text x="426.5" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 14</text>
-<text x="546.0" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 5</text>
-<text x="546.0" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 14</text>
+<text x="163.6" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 2</text>
+<text x="163.6" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 13</text>
+<text x="259.2" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 3</text>
+<text x="259.2" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 13</text>
+<text x="354.8" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 4</text>
+<text x="354.8" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 14</text>
+<text x="450.4" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 5</text>
+<text x="450.4" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 14</text>
+<text x="546.0" y="272.0" font-size="12" fill="#59636e" text-anchor="middle" font-weight="400">Run 7</text>
+<text x="546.0" y="287.0" font-size="11" fill="#818b98" text-anchor="middle" font-weight="400">Oct 25</text>
 </svg>
