@@ -313,7 +313,11 @@ fn search(out: &mut String, answer: &Value) {
     }
     if let Some(spelling) = answer.get("spelling").filter(|s| s.is_object()) {
         let query = text(spelling, "query").unwrap_or("");
-        let _ = writeln!(out, "Did you mean \"{query}\"?");
+        if flag(spelling, "applied") {
+            let _ = writeln!(out, "Showing results for \"{query}\".");
+        } else {
+            let _ = writeln!(out, "Did you mean \"{query}\"?");
+        }
     }
 
     let sites = list(answer, "results");

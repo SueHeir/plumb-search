@@ -1071,7 +1071,7 @@ fn a_slip_in_a_well_read_name_is_corrected() {
         page("Bezos family", 200, &[]),
     ]);
     let suggest = |query: &str| {
-        s.suggest_spelling(query, None, &|_| false)
+        s.suggest_spelling(query, None, &|_| 0)
             .unwrap()
             .map(|s| s.query)
     };

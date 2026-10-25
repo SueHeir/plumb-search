@@ -610,9 +610,9 @@ pub struct SearchResults {
 /// A suggested spelling of a query: "amazom" -> "amazon".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spelling {
-    /// The corrected query, in lowercase words without punctuation. The
-    /// hits are always for the query as typed; this is only a suggestion
-    /// ("Did you mean ...?").
+    /// The corrected query, in lowercase words without punctuation. Unless
+    /// [`Spelling::applied`], the hits are for the query as typed and this
+    /// is only a suggestion ("Did you mean ...?").
     pub query: String,
     /// The well-known site the corrected spelling names, when the typo was
     /// in a site's name ("youtbue": youtube.com), offered with it.
@@ -620,7 +620,9 @@ pub struct Spelling {
     pub site: Option<String>,
     /// The results are for this spelling, not the query as typed: nothing
     /// found had all the typed words, and the spelling finds a site that
-    /// does ("kayne west stronger"). Shown as "Showing results for ...".
+    /// does ("kayne west stronger"), or on a node with pages the spelling
+    /// is sure ([`pages::PageSearcher::sure_spelling`]: "abrahm"). Shown as
+    /// "Showing results for ...".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub applied: bool,
 }

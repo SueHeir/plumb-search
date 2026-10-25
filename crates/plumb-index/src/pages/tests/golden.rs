@@ -1220,7 +1220,7 @@ fn golden_text(dir: &Path, searcher: &PageSearcher) -> String {
             searcher.spelled_right(query, &found, None)
         )
         .unwrap();
-        if let Some(spelling) = searcher.suggest_spelling(query, None, &|_| false).unwrap() {
+        if let Some(spelling) = searcher.suggest_spelling(query, None, &|_| 0).unwrap() {
             writeln!(out, "  spelling {}", json(&spelling)).unwrap();
             let checked = searcher.check_spelling(query, spelling.clone()).unwrap();
             writeln!(out, "  checked {}", json(&checked)).unwrap();

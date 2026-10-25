@@ -891,7 +891,7 @@ fn words_of_things_are_corrected_from_page_names() {
         pages.push(page(&format!("Erft river {i}"), 10, &[]));
     }
     let (_dir, searcher) = searcher(&pages);
-    let nothing_known = |_: &str| false;
+    let nothing_known = |_: &str| 0;
     let suggest = |query: &str| {
         searcher
             .suggest_spelling(query, None, &nothing_known)
@@ -915,7 +915,13 @@ fn words_of_things_are_corrected_from_page_names() {
     // Nor of a common one with another first letter: "erft".
     assert_eq!(suggest("perft"), None);
     // A word the sites know is spelled right.
-    let sites_know = |word: &str| word == "budafest";
+    let sites_know = |word: &str| {
+        if word == "budafest" {
+            crate::KNOWN_WORD_SITES
+        } else {
+            0
+        }
+    };
     assert_eq!(
         searcher
             .suggest_spelling("budafest", None, &sites_know)
@@ -947,7 +953,7 @@ fn slips_people_make_are_corrected_though_pages_name_them() {
         &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
         1e-6,
     );
-    let nothing_known = |_: &str| false;
+    let nothing_known = |_: &str| 0;
     let suggest = |query: &str, model| {
         searcher
             .suggest_spelling(query, model, &nothing_known)
@@ -1034,7 +1040,7 @@ fn names_are_not_taken_for_slips() {
     );
     let suggest = |query: &str| {
         searcher
-            .suggest_spelling(query, Some(&model), &|_| false)
+            .suggest_spelling(query, Some(&model), &|_| 0)
             .unwrap()
             .map(|s| s.query)
     };
@@ -1060,6 +1066,81 @@ fn names_are_not_taken_for_slips() {
     // However few pages have it, a name is no slip.
     assert_eq!(suggest("trifling glyph of magicka"), None);
     assert_eq!(suggest("great wall baidu baike"), None);
+}
+
+#[test]
+fn words_nothing_has_are_slips_of_rare_page_words() {
+    let pages: Vec<Page> = (0..25)
+        .map(|i| page(&format!("Rhinoplasty clinic {i}"), 10, &[]))
+        .collect();
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(&[("ty", "y", 0.0005)], 1e-6);
+    let suggest = |query: &str, sites: u64| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| sites)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // No page and no site has it, so the slip is likelier, however few
+    // pages have the near word.
+    assert_eq!(suggest("rhinoplasy", 0).as_deref(), Some("rhinoplasty"));
+    // A few sites say it: as likely as the slip of a word in 25 pages.
+    assert_eq!(suggest("rhinoplasy", 3), None);
+}
+
+#[test]
+fn sure_spellings_name_a_page_and_change_words_nothing_has() {
+    let mut pages = vec![page("Abraham", 50_000, &[]), page("Knowledge", 40_000, &[])];
+    for i in 0..3 {
+        pages.push(page(&format!("Knewledge band {i}"), 10, &[]));
+    }
+    let (_dir, searcher) = searcher(&pages);
+    let spelling = |query: &str, site: Option<&str>| crate::Spelling {
+        query: query.into(),
+        site: site.map(str::to_string),
+        applied: false,
+    };
+    let sure_with = |typed: &str, fixed: &crate::Spelling, options, sites: &[crate::Hit]| {
+        searcher
+            .sure_spelling(typed, fixed, options, sites, &|_| 0)
+            .unwrap()
+    };
+    let options = crate::SearchOptions::default();
+    let sure = |typed: &str, fixed: &str, sites: &[crate::Hit]| {
+        sure_with(typed, &spelling(fixed, None), &options, sites)
+    };
+    assert!(sure(
+        "abrahm",
+        "abraham",
+        &[site("rulesforrebels.info", false)]
+    ));
+    // The query names a site as typed, or a site is named by the word.
+    assert!(!sure("abrahm", "abraham", &[site("abrahm.info", true)]));
+    assert!(!sure("abrahm", "abraham", &[site("abrahm.org", false)]));
+    // The site the spelling names does not count.
+    let named = spelling("abraham", Some("abraham.com"));
+    assert!(sure_with(
+        "abrahm",
+        &named,
+        &options,
+        &[site("abraham.com", true)]
+    ));
+    // Pages know the word, or the spelling names no page.
+    assert!(!sure("knewledge", "knowledge", &[]));
+    assert!(!sure("abrahm lincoln", "abraham lincoln", &[]));
+    // Many sites say the word.
+    let many = |_: &str| crate::KNOWN_WORD_SITES;
+    let fixed = spelling("abraham", None);
+    assert!(!searcher
+        .sure_spelling("abrahm", &fixed, &options, &[], &many)
+        .unwrap());
+    // Searched as typed, or a web address.
+    let exact = crate::SearchOptions {
+        exact: true,
+        ..crate::SearchOptions::default()
+    };
+    assert!(!sure_with("abrahm", &fixed, &exact, &[]));
+    assert!(!sure("abrahm.com", "abraham com", &[]));
 }
 
 #[test]

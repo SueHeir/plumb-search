@@ -185,7 +185,7 @@ The results stay those of the query as typed unless nothing else works:
 | A typed domain is a slip of a site 0.3 more popular | that site first if no site has the typed address, else second |
 | The correction finds nothing | results as typed, no suggestion |
 
-On a node with page sets, the pages' names check the suggestion again: a query the pages know as typed drops it, results for a correction are searched as typed again when the pages know the typed words, and words of things rather than sites ("photosynthsis") get a suggestion from the page titles.
+On a node with page sets, the pages' names check the suggestion again: a query the pages know as typed drops it, results for a correction are searched as typed again when the pages know the typed words, and words of things rather than sites ("photosynthsis") get a suggestion from the page titles. A word no page and no site has is taken for a slip of the likeliest near word of the titles however few pages have it ("rhinoplasy" is rhinoplasty), since the web does not know it either. A suggestion is shown in place of the results ("Showing results for", searched as spelled) when it is sure (`PageSearcher::sure_spelling`): each word it changes is one the pages neither know nor are named by and fewer than 20 sites have, no site of the results as typed is named by the query or by that word, and the spelling names a page: "abrahm" shows Abraham's results, but "corvel website for providers" stays as typed, since corvel.com is listed.
 
 ## Pages and the node's own steps
 

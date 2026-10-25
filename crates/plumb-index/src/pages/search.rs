@@ -1125,8 +1125,9 @@ impl PageSearcher {
     /// A suggested spelling of `query` from the words of the pages' names,
     /// for queries about things rather than sites ("anubas", "budafest"),
     /// whose words the sites index hardly has. Each word the pages do not
-    /// know ([`PageSearcher::knows_word`]) and `site_known` does not either
-    /// is replaced by the near word found in the most pages, at least
+    /// know ([`PageSearcher::knows_word`]) and fewer than
+    /// [`crate::KNOWN_WORD_SITES`] sites have (`site_words` counts them) is
+    /// replaced by the near word found in the most pages, at least
     /// [`PAGE_FIX_RATIO`] times as many as have the word typed and at least
     /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
     /// the noisy channel ([`crate::spell_model`]). With the model, a word
@@ -1134,7 +1135,10 @@ impl PageSearcher {
     /// has counting as if one did ("perft" is not "perf"), or the slip is
     /// one the model learned and is likelier than the word with how much
     /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
-    /// holds for a word the pages know too ("recieve", "definately").
+    /// holds for a word the pages know too ("recieve", "definately"). A
+    /// word no page and no site has is no word of the web's, and is taken
+    /// for a slip of the likeliest near word however rare that is:
+    /// "rhinoplasy" is "rhinoplasty", "thorocentesis" "thoracentesis".
     /// A word typed in capitals, with letters English does not use, or in
     /// a web address is kept, and so is a word that names something
     /// ([`PageSearcher::names_something`]), however few pages have it:
@@ -1144,7 +1148,7 @@ impl PageSearcher {
         &self,
         query: &str,
         model: Option<&crate::spell_model::Model>,
-        site_known: &dyn Fn(&str) -> bool,
+        site_words: &dyn Fn(&str) -> u64,
     ) -> Result<Option<crate::Spelling>> {
         // A web address is a name, not words: "amazn.com" is not "amazon
         // com". The sites suggest the address it is a slip of.
@@ -1177,9 +1181,10 @@ impl PageSearcher {
         for word in fixed.iter_mut().skip(named) {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
+            let sites = site_words(word);
             if edits == 0
                 || !word.chars().all(char::is_alphabetic)
-                || site_known(word)
+                || sites >= crate::KNOWN_WORD_SITES
                 || kept.contains(word.as_str())
             {
                 continue;
@@ -1189,6 +1194,7 @@ impl PageSearcher {
                 continue;
             }
             let typed_docs = docs(word)?;
+            let unseen = typed_docs == 0 && sites == 0;
             let needed = MIN_PAGE_FIX_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
             let mut best: Option<(f64, String)> = None;
             for (term, distance) in
@@ -1211,8 +1217,9 @@ impl PageSearcher {
                 if let Some(model) = model {
                     let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
                     // As likely as the word typed, a word no page has
-                    // counting as if one did: "perft" is not "perf".
-                    let rare = !known && cost + commoner >= 0.0;
+                    // counting as if one did: "perft" is not "perf". Unless
+                    // no site has it either.
+                    let rare = !known && (unseen || cost + commoner >= 0.0);
                     let slip =
                         model.learned(word, &term) && cost + PAGE_SLIP_WEIGHT * commoner >= 0.0;
                     if !rare && !slip {
@@ -1252,12 +1259,7 @@ impl PageSearcher {
         if spelling.applied {
             return Ok(());
         }
-        let found = self.search(&spelling.query, SUGGESTED_PAGES)?;
-        let Some(mut hit) = found.into_iter().find(|hit| {
-            hit.named
-                && options_allow(options, &hit.page)
-                && crate::health::page_allowed(&spelling.query, &hit.page)
-        }) else {
+        let Some(mut hit) = self.page_named_by(spelling, options)? else {
             return Ok(());
         };
         // A page only meant ([`PageHit::meant`]) moves up: "dextocardia"
@@ -1282,6 +1284,68 @@ impl PageSearcher {
             },
         );
         Ok(())
+    }
+
+    /// The page `spelling` names, when `options` keep it.
+    fn page_named_by(
+        &self,
+        spelling: &crate::Spelling,
+        options: &crate::SearchOptions,
+    ) -> Result<Option<PageHit>> {
+        let found = self.search(&spelling.query, SUGGESTED_PAGES)?;
+        Ok(found.into_iter().find(|hit| {
+            hit.named
+                && options_allow(options, &hit.page)
+                && crate::health::page_allowed(&spelling.query, &hit.page)
+        }))
+    }
+
+    /// Whether `spelling`, suggested for `query`, is sure enough that its
+    /// results are shown instead ("Showing results for"): "abrahm" is
+    /// Abraham, "knewledge" knowledge. Each word it changes is one the
+    /// pages do not know ([`PageSearcher::knows_word`]) and that names
+    /// nothing ([`PageSearcher::names_something`]), in fewer than
+    /// [`crate::KNOWN_WORD_SITES`] sites (`site_words`) and no site's name
+    /// among `sites`, the results as typed, none of which the query names
+    /// either; and the spelling names a page `options` keep. The site the
+    /// spelling names does not count. A web address, an exact search and
+    /// words split or joined stay as typed.
+    pub fn sure_spelling(
+        &self,
+        query: &str,
+        spelling: &crate::Spelling,
+        options: &crate::SearchOptions,
+        sites: &[crate::Hit],
+        site_words: &dyn Fn(&str) -> u64,
+    ) -> Result<bool> {
+        if spelling.applied || options.exact || crate::names::typed_domain(query).is_some() {
+            return Ok(false);
+        }
+        let others: Vec<&crate::Hit> = sites
+            .iter()
+            .filter(|hit| spelling.site.as_deref() != Some(hit.domain.as_str()))
+            .collect();
+        if others.iter().any(|hit| hit.named) {
+            return Ok(false);
+        }
+        let typed = analysis::tokens(&self.words, query);
+        let fixed: Vec<&str> = spelling.query.split_whitespace().collect();
+        if typed.len() != fixed.len() {
+            return Ok(false);
+        }
+        for (word, fix) in typed.iter().zip(fixed) {
+            if word != fix
+                && (site_words(word) >= crate::KNOWN_WORD_SITES
+                    || others
+                        .iter()
+                        .any(|hit| plumb_core::domain_label(&hit.domain) == *word)
+                    || self.knows_word(word)?
+                    || self.names_something(word, &typed)?)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(self.page_named_by(spelling, options)?.is_some())
     }
 
     /// Corrects the first words of `words`, two or more, when they are a
