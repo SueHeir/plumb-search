@@ -1062,8 +1062,8 @@ pub(super) fn sure_spelling(
     let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     let index = inner.current()?;
-    let sites = index.backend().searcher();
-    let site_words = |word: &str| sites.word_sites(word);
+    let words = index.backend().searcher();
+    let site_words = |word: &str| words.word_sites(word);
     match searcher.sure_spelling(query, spelling, options, sites, &site_words) {
         Ok(sure) => sure.then(|| spelling.clone()),
         Err(err) => {
