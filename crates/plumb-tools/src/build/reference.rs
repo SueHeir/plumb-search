@@ -11,6 +11,14 @@
 //! description, or else the start of its text. Its views are the site's
 //! weight over how deep the page is, so a site's main pages come before
 //! its deep ones and the most used sites before others.
+//!
+//! A reference page keeps no section headings or passages of its text. It
+//! is listed only for words of its title (`subpage_asked` in plumb-index),
+//! so words only its headings or text have let it take one of a search's
+//! places for pages and be left out: with its text, BabyCenter's "Baby ear
+//! infections" and eight more of its pages took every place for "what good
+//! for diarrhea", and the search lost the article Diarrhea. Subpages, which
+//! are listed on the best sites without words of their title, keep both.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,6 +38,19 @@ const SHARED_BY: usize = 3;
 /// What ends a title before the site's name.
 const TITLE_SEPARATORS: &[&str] = &[" | ", " - ", " – ", " — ", " :: ", " · ", " » "];
 
+/// The reference set's articles of `site`'s pages `docs`: its
+/// [`site_articles`] without their headings and passages.
+pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> {
+    site_articles(site, docs)
+        .into_iter()
+        .map(|article| Article {
+            sections: Vec::new(),
+            search: None,
+            ..article
+        })
+        .collect()
+}
+
 /// The articles of `site`'s pages `docs`, in the order given, named by
 /// [`page_titles`]. Of the pages with the same title in one language, only
 /// the shallowest is kept (the first of equally deep ones): the copies of
@@ -38,7 +59,7 @@ const TITLE_SEPARATORS: &[&str] = &[" | ", " - ", " – ", " — ", " :: ", " ·
 /// has its title (one that is gone, sent back to it). A description
 /// [`SHARED_BY`] or more pages share is the site's: the page's text is used
 /// instead, or none.
-pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> {
+pub fn site_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> {
     let pages: Vec<String> = docs.iter().map(|doc| unlocalized(&doc.url)).collect();
     let languages: Vec<Option<String>> = docs
         .iter()
@@ -426,6 +447,33 @@ mod tests {
         // Weight 8 over two segments deep; three deep weighs less.
         assert_eq!(articles[0].views, 4_000);
         assert_eq!(articles[2].views, 2_666);
+    }
+
+    #[test]
+    fn reference_articles_keep_no_headings_or_passages() {
+        let site = crate::reference_sites::site("babycenter.com").unwrap();
+        let mut page = doc(
+            "https://www.babycenter.com/health/illness-and-infection/ear-infections",
+            "Baby ear infections: Signs, symptoms, and treatment | BabyCenter",
+            "How to tell if your baby has an ear infection.",
+        );
+        page.sections = vec!["Symptoms".into(), "Diarrhea and vomiting".into()];
+        page.search = Some(plumb_core::article::SearchContent {
+            passages: vec![plumb_core::article::SearchPassage {
+                heading: "Symptoms".into(),
+                text: "Some babies have diarrhea.".into(),
+                anchor: None,
+            }],
+            ..Default::default()
+        });
+        let pages = [page];
+        let site_pages = site_articles(site, &pages);
+        assert_eq!(site_pages[0].sections.len(), 2);
+        assert!(site_pages[0].search.is_some());
+        let articles = reference_articles(site, &pages);
+        assert_eq!(articles.len(), 1);
+        assert!(articles[0].sections.is_empty());
+        assert_eq!(articles[0].search, None);
     }
 
     #[test]
