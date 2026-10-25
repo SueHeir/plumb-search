@@ -58,7 +58,7 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
 /// itself. The site's front page is left out, and with it any page that
 /// has its title (one that is gone, sent back to it). A description
 /// [`SHARED_BY`] or more pages share is the site's: the page's text is used
-/// instead, or none.
+/// instead, or none. Pages under the site's skipped paths are left out.
 pub fn site_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> {
     let pages: Vec<String> = docs.iter().map(|doc| unlocalized(&doc.url)).collect();
     let languages: Vec<Option<String>> = docs
@@ -76,7 +76,12 @@ pub fn site_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> 
             continue;
         };
         let lower = title.to_lowercase();
-        if !useful_page(doc) || NOT_PAGES.contains(&lower.as_str()) || !seen_urls.insert(&doc.url) {
+        let skipped = site.skipped.iter().any(|path| url.path().starts_with(path));
+        if skipped
+            || !useful_page(doc)
+            || NOT_PAGES.contains(&lower.as_str())
+            || !seen_urls.insert(&doc.url)
+        {
             continue;
         }
         let depth = url.path().split('/').filter(|s| !s.is_empty()).count();
@@ -447,6 +452,25 @@ mod tests {
         // Weight 8 over two segments deep; three deep weighs less.
         assert_eq!(articles[0].views, 4_000);
         assert_eq!(articles[2].views, 2_666);
+    }
+
+    #[test]
+    fn pages_under_skipped_paths_are_left_out() {
+        let site = crate::reference_sites::site("uscis.gov").unwrap();
+        let docs = [
+            doc("https://www.uscis.gov/i-9", "I-9, Employment Eligibility Verification", "Form I-9."),
+            doc(
+                "https://www.uscis.gov/newsroom/alerts/new-photo-policy-helps-prevent-immigration-fraud",
+                "New Photo Policy Helps Prevent Immigration Fraud",
+                "A photo policy.",
+            ),
+            doc("https://www.uscis.gov/archive/fact-sheet", "Fact Sheet", "An old fact sheet."),
+        ];
+        let urls: Vec<String> = reference_articles(site, &docs)
+            .into_iter()
+            .filter_map(|article| article.item)
+            .collect();
+        assert_eq!(urls, ["https://www.uscis.gov/i-9"]);
     }
 
     #[test]
