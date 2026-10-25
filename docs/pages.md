@@ -27,7 +27,7 @@ views  title  description  item  site  aliases          (tab-separated)
 81234  Marie Curie  Polish-French physicist ...  Q7186    Maria Curie|Madame Curie
 ```
 
-A page may be followed by a `profiles` line of extra entries for it (official profiles, facts, a lead, docs sections), which readers that do not know an entry skip. Plumb keeps a page's names and a few facts about it, not its text: pages are found by name, and some kinds also by the words of their title, tags and description. Docs and reference pages are the exception, with a few short passages (see [the table below](#what-each-page-keeps)).
+A page may be followed by a `profiles` line of extra entries for it (official profiles, facts, a lead, docs sections), which readers that do not know an entry skip. Plumb keeps a page's names and a few facts about it, not its text: pages are found by name, and some kinds also by the words of their title, tags and description. Docs pages and subpages are the exception, with a few short passages (see [the table below](#what-each-page-keeps)).
 
 The sets a node knows are `SETS` in [pages.rs](../crates/plumb-node/src/pages.rs). The node indexes the pages it keeps from every set together in one Tantivy index, `DIR/pages/index-<key>/` ([`plumb_index::pages`](../crates/plumb-index/src/pages.rs)). The key names the sets, their files or item sets, how many pages of each and the denylist, so a changed setting or a newer file builds a new index while the old one goes on answering searches. Pages the denylist denies are left out of the index. The index keeps each page as its item of the [data format](../crates/plumb-format/README.md), with the set it came from, and searches read the page back from the item.
 
@@ -74,7 +74,7 @@ Two more sets are not files. `wanted` holds the pages a node found for its own s
 | `papers` | Title, short names ("BERT") | "Paper by AUTHOR et al., YEAR, VENUE" | Citations | DOI or OpenAlex id, address of a free copy |
 | `packages` | Name | Package description | Downloads, as a share of its registry's top package | Latest version and date, license, docs, code and homepage addresses |
 | `docs` | Page title without the site's name | Page description, or the start of its text | Site weight over page depth | Address, section headings, up to 64 exact API names and 8 passages of 512 characters |
-| `reference`, `reference2`, `subpages2` | Page title without the site's name | Page description, or the start of its text | Site weight over page depth | Address; reference pages may carry passages as docs pages do |
+| `reference`, `reference2`, `subpages2` | Page title without the site's name | Page description, or the start of its text | Site weight over page depth | Address; subpages may also carry section headings and passages as docs pages do, while reference pages, listed only for words of their title, carry neither |
 | `wikidata` | English name, English aliases | Description | Sitelinks | Official website, profiles |
 | `wiktionary` | The word | First sense of up to 3 parts of speech, at most 300 characters | How much Wiktionary says of it | |
 

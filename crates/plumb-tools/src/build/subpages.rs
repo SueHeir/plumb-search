@@ -12,11 +12,11 @@
 use plumb_core::article::Article;
 
 use crate::build::docs::FetchedDoc;
-use crate::build::reference::{reference_articles, shared_by, unlocalized};
+use crate::build::reference::{shared_by, site_articles, unlocalized};
 use crate::subpage_sites::SubpageSite;
 
 /// The articles of `site`'s pages `docs`, in the order given (see
-/// [`reference_articles`]).
+/// [`site_articles`]), with their headings and passages.
 pub fn subpage_articles(site: &SubpageSite, docs: &[FetchedDoc]) -> Vec<Article> {
     let pages: Vec<String> = docs.iter().map(|doc| unlocalized(&doc.url)).collect();
     let endings = shared_by(
@@ -42,7 +42,7 @@ pub fn subpage_articles(site: &SubpageSite, docs: &[FetchedDoc]) -> Vec<Article>
             }
         })
         .collect();
-    reference_articles(&site.site, &docs)
+    site_articles(&site.site, &docs)
 }
 
 /// `title` before a bracketed ending, and what is in the brackets:
