@@ -21,7 +21,7 @@ use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
     options_allow, place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
 };
-use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
+use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, Spelling};
 use plumb_node::cli::MeaningArgs;
 use plumb_node::country::HomeCountry;
 use plumb_node::mcp::Mcp;
@@ -132,10 +132,10 @@ impl FrozenBackend {
         if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
             results.spelling = pages.check_spelling(query, spelling)?;
         }
-        if results.spelling.is_none() && !spelled_right {
+        if results.spelling.is_none() && !spelled_right && !options.exact {
             let sites = self.sites.searcher();
             results.spelling = pages.suggest_spelling(query, sites.spelling_model(), &|word| {
-                sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES
+                sites.word_sites(word)
             })?;
         }
         results.pages = place_pages(query, &results.hits, found);
@@ -164,6 +164,39 @@ impl FrozenBackend {
         pages.list_typed_page(query, options, &mut results.pages)?;
         Ok(())
     }
+
+    /// `results` for `query` with pages, or the results of a sure spelling
+    /// searched as spelled, as a node shows them.
+    fn search_with_pages(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        let mut results = self.sites.search_ranked(query, limit, options, rank)?;
+        let typed = results.hits.clone();
+        self.add_pages(query, options, rank, &mut results)?;
+        let Some(spelling) = results.spelling.clone() else {
+            return Ok(results);
+        };
+        let pages = self.pages.in_language(options.language.as_deref());
+        let sites = self.sites.searcher();
+        let site_words = |word: &str| sites.word_sites(word);
+        if !pages.sure_spelling(query, &spelling, options, &typed, &site_words)? {
+            return Ok(results);
+        }
+        let as_spelled = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        let mut fixed = self.search_with_pages(&spelling.query, limit, &as_spelled, rank)?;
+        fixed.spelling = Some(Spelling {
+            applied: true,
+            ..spelling
+        });
+        Ok(fixed)
+    }
 }
 
 impl SearchBackend for FrozenBackend {
@@ -177,9 +210,7 @@ impl SearchBackend for FrozenBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let mut results = self.sites.search_full(query, limit, options)?;
-        self.add_pages(query, options, &self.rank, &mut results)?;
-        Ok(results)
+        self.search_with_pages(query, limit, options, &self.rank)
     }
 
     fn search_ranked(
@@ -189,9 +220,7 @@ impl SearchBackend for FrozenBackend {
         options: &SearchOptions,
         rank: &RankConfig,
     ) -> Result<SearchResults> {
-        let mut results = self.sites.search_ranked(query, limit, options, rank)?;
-        self.add_pages(query, options, rank, &mut results)?;
-        Ok(results)
+        self.search_with_pages(query, limit, options, rank)
     }
 
     fn num_docs(&self) -> u64 {

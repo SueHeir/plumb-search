@@ -1047,6 +1047,32 @@ pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Sp
     }
 }
 
+/// `spelling`, suggested for `query`, when it is sure and its results are
+/// shown instead of `sites`, the sites found as typed
+/// ([`PageSearcher::sure_spelling`]): "ballrat" is Ballarat.
+pub(super) fn sure_spelling(
+    inner: &Inner,
+    query: &str,
+    options: &SearchOptions,
+    spelling: Option<&plumb_index::Spelling>,
+    sites: &[plumb_index::Hit],
+) -> Option<plumb_index::Spelling> {
+    let spelling = spelling?;
+    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
+    let options = &for_query(inner, options, query);
+    let searcher = searcher.in_language(options.language.as_deref());
+    let index = inner.current()?;
+    let words = index.backend().searcher();
+    let site_words = |word: &str| words.word_sites(word);
+    match searcher.sure_spelling(query, spelling, options, sites, &site_words) {
+        Ok(sure) => sure.then(|| spelling.clone()),
+        Err(err) => {
+            warn!("checking whether a spelling is sure: {err:#}");
+            None
+        }
+    }
+}
+
 /// `options` with the language filter the sites' index gives `query`
 /// ([`plumb_index::Searcher::language_for`]), so pages keep or drop a
 /// language for a search as sites do.
@@ -1324,13 +1350,12 @@ pub(super) fn add_pages(
                 };
             }
             // Words of things, not sites ("anubas", "budafest"): the
-            // pages' names know them.
-            if results.spelling.is_none() && !spelled_right {
+            // pages' names know them. Not for a search as typed.
+            if results.spelling.is_none() && !spelled_right && !options.exact {
                 if let Some(index) = inner.current() {
                     let sites = index.backend().searcher();
-                    let site_known =
-                        |word: &str| sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
-                    match searcher.suggest_spelling(query, sites.spelling_model(), &site_known) {
+                    let site_words = |word: &str| sites.word_sites(word);
+                    match searcher.suggest_spelling(query, sites.spelling_model(), &site_words) {
                         Ok(suggested) => results.spelling = suggested,
                         Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
                     }

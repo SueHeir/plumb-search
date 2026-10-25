@@ -794,7 +794,7 @@ fn evaluate(
             language: args.lang.clone(),
             ..SearchOptions::default()
         };
-        let search = |query: &str| {
+        let search = |query: &str, options: &SearchOptions| {
             // "food near me" searches sites for "food", as a node does.
             let query =
                 &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
@@ -804,7 +804,7 @@ fn evaluate(
                     query,
                     fetched + grades_margin(args, setup),
                     &search_cfg,
-                    &options,
+                    options,
                     query_meaning
                         .as_ref()
                         .map(|m| m as &dyn plumb_index::Meaning),
@@ -812,12 +812,13 @@ fn evaluate(
                 .with_context(|| format!("searching for {query:?}"));
             results.map(|results| (graded(args, setup, query, results, fetched), query_meaning))
         };
-        let (mut results, mut query_meaning) = search(&q.query)?;
+        let (mut results, mut query_meaning) = search(&q.query, &options)?;
         // As a node with pages does (`add_pages`): a query that names a
         // page is spelled right, the words the pages know are put back in a
         // suggestion ("pkce" is not "pace"), and words of things, not
         // sites, are corrected from the pages' names ("anubas").
         let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
+        let site_words = |word: &str| searcher.word_sites(word);
         if !args.exact && !applied {
             if let Some(pages) = pages.as_ref() {
                 let found = pages.search(&q.query, 10)?;
@@ -828,24 +829,41 @@ fn evaluate(
                     _ => None,
                 };
                 if results.spelling.is_none() && !spelled_right {
-                    let site_known =
-                        |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
                     results.spelling =
-                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_known)?;
+                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_words)?;
                 }
+            }
+        }
+        let mut searched = q.query.clone();
+        // As a node does, a sure spelling's results are shown, searched as
+        // spelled ("ballrat").
+        let mut sure = false;
+        if let (Some(pages), Some(spelling)) = (pages.as_ref(), results.spelling.clone()) {
+            if pages.sure_spelling(&q.query, &spelling, &options, &results.hits, &site_words)? {
+                sure = true;
+                searched.clone_from(&spelling.query);
+                let as_spelled = SearchOptions {
+                    exact: true,
+                    ..options.clone()
+                };
+                (results, query_meaning) = search(&searched, &as_spelled)?;
+                results.spelling = Some(plumb_index::Spelling {
+                    applied: true,
+                    ..spelling
+                });
             }
         }
         if verbose && args.show_suggestions {
             if let Some(spelling) = &results.spelling {
-                println!("suggests: {:?} -> {:?}", q.query, spelling.query);
+                let shown = if spelling.applied { " (shown)" } else { "" };
+                println!("suggests: {:?} -> {:?}{shown}", q.query, spelling.query);
             }
         }
         // What one click on "Did you mean" finds.
-        let mut searched = q.query.clone();
-        if args.follow_suggestions {
+        if args.follow_suggestions && !sure {
             if let Some(spelling) = results.spelling.take() {
                 searched = spelling.query;
-                (results, query_meaning) = search(&searched)?;
+                (results, query_meaning) = search(&searched, &options)?;
             }
         }
         let mut hits = results.hits;

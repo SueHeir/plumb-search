@@ -94,7 +94,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use plumb_core::now_unix;
 use plumb_core::SafeSearch;
-use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
+use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, Spelling};
 use plumb_ingest::download;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
@@ -2435,8 +2435,24 @@ impl Inner {
         }
         self.drop_denied(&mut results);
         results.hits.truncate(limit);
+        let typed = results.hits.clone();
         pages::add_pages(self, query, options, &mut results);
         self.drop_denied(&mut results);
+        // A sure slip of what a page is named shows the spelling's results,
+        // searched as spelled: "ballrat" is Ballarat.
+        let spelling = results.spelling.as_ref();
+        if let Some(spelling) = pages::sure_spelling(self, query, options, spelling, &typed) {
+            let as_spelled = SearchOptions {
+                exact: true,
+                ..options.clone()
+            };
+            let mut fixed = self.search_with_rank(&spelling.query, limit, &as_spelled, rank)?;
+            fixed.spelling = Some(Spelling {
+                applied: true,
+                ..spelling
+            });
+            return Ok(fixed);
+        }
         Ok(results)
     }
 }
