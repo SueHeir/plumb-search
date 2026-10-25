@@ -64,17 +64,17 @@ Each day every node is given a random share of all sites to crawl. It signs what
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/search-quality/mean-grade-dark.svg">
-  <img alt="Mean grade of 1,000 real searches by run: 1.86, 1.87, 1.97, 2.00 and 2.06" src="docs/search-quality/mean-grade.svg">
+  <img alt="Mean grade of 1,000 real searches by run: 1.86, 1.87, 1.97, 2.00, 2.06 and 2.08" src="docs/search-quality/mean-grade.svg">
 </picture>
 
-Measured on 1,000 real searches graded 0 to 3, in run 5 on 2026-10-14 (build [`11bab11`](https://github.com/SueHeir/plumb-search/commit/11bab11)):
+Measured on 1,000 real searches graded 0 to 3, in run 7 on 2026-10-25 (build [`1584e58`](https://github.com/SueHeir/plumb-search/commit/1584e58)):
 
 | | |
 | --- | ---: |
-| Mean grade | **2.06** of 3 |
+| Mean grade | **2.08** of 3 |
 | Known right answer at #1 | **75%** of 464 |
 | Known right answer in the top 3 | **84%** |
-| Median time per search | **0.50 s** |
+| Median time per search | **0.72 s** |
 
 Plumb is good at finding a thing by its name and weaker when a search describes it in other words. [How search is doing](docs/search-quality.md) has every run, each kind of search and where it falls short.
 

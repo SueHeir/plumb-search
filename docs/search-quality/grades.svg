@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="266" viewBox="0 0 720 266" role="img" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif">
-<title>How each search was graded</title><desc>Stacked bars per run: run 1: 338 great, 334 fine, 176 poor, 152 useless; run 2: 344 great, 326 fine, 190 poor, 140 useless; run 3: 407 great, 282 fine, 180 poor, 131 useless; run 4: 406 great, 306 fine, 169 poor, 119 useless; run 5: 415 great, 327 fine, 156 poor, 102 useless</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif">
+<title>How each search was graded</title><desc>Stacked bars per run: run 1: 338 great, 334 fine, 176 poor, 152 useless; run 2: 344 great, 326 fine, 190 poor, 140 useless; run 3: 407 great, 282 fine, 180 poor, 131 useless; run 4: 406 great, 306 fine, 169 poor, 119 useless; run 5: 415 great, 327 fine, 156 poor, 102 useless; run 7: 425 great, 326 fine, 149 poor, 100 useless</desc>
 <text x="0.0" y="18.0" font-size="15" fill="#1f2328" text-anchor="start" font-weight="600">How each search was graded</text>
 <text x="0.0" y="38.0" font-size="12" fill="#59636e" text-anchor="start" font-weight="400">Share of the 1,000 searches by grade, run by run</text>
 <rect x="0.0" y="53.0" width="10" height="10" rx="2" fill="#104281"/>
@@ -60,4 +60,14 @@
 <text x="601.6" y="231.0" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600">16%</text>
 <path d="M650.0,216.0 h58.0 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-58.0 z" fill="#86b6ef"/>
 <text x="680.0" y="231.0" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">10%</text>
+<text x="0.0" y="265.0" font-size="12" fill="#59636e" text-anchor="start" font-weight="400">Run 7</text>
+<text x="46.0" y="265.0" font-size="11" fill="#818b98" text-anchor="start" font-weight="400">Oct 25</text>
+<rect x="104.0" y="250.0" width="256.4" height="22" fill="#104281"/>
+<text x="232.2" y="265.0" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600">42%</text>
+<rect x="362.4" y="250.0" width="196.2" height="22" fill="#256abf"/>
+<text x="460.5" y="265.0" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600">33%</text>
+<rect x="560.6" y="250.0" width="88.6" height="22" fill="#5598e7"/>
+<text x="604.9" y="265.0" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600">15%</text>
+<path d="M651.2,250.0 h56.8 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-56.8 z" fill="#86b6ef"/>
+<text x="680.6" y="265.0" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">10%</text>
 </svg>
