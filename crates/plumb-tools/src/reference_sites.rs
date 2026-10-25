@@ -20,6 +20,9 @@ pub struct ReferenceSite {
     pub sitemaps: &'static [&'static str],
     /// Explicit task/section discovery pages; also considered page candidates.
     pub index_pages: &'static [&'static str],
+    /// Paths under its roots whose pages are left out: news and archives
+    /// that share common words with searches about something else.
+    pub skipped: &'static [&'static str],
     /// How much its pages weigh against other sites', 1 to 10: the most
     /// used weigh most.
     pub weight: u64,
@@ -58,8 +61,22 @@ const fn whole(host: &'static str, weight: u64) -> ReferenceSite {
         roots: &[],
         sitemaps: &[],
         index_pages: &[],
+        skipped: &[],
         weight,
         max_pages: None,
+    }
+}
+
+/// A site of `weight` whose pages are anywhere on `host` but under
+/// `skipped`.
+const fn whole_but(
+    host: &'static str,
+    skipped: &'static [&'static str],
+    weight: u64,
+) -> ReferenceSite {
+    ReferenceSite {
+        skipped,
+        ..whole(host, weight)
     }
 }
 
@@ -70,6 +87,7 @@ const fn under(host: &'static str, roots: &'static [&'static str], weight: u64) 
         roots,
         sitemaps: &[],
         index_pages: &[],
+        skipped: &[],
         weight,
         max_pages: None,
     }
@@ -82,6 +100,7 @@ const fn big(host: &'static str, weight: u64, max_pages: usize) -> ReferenceSite
         roots: &[],
         sitemaps: &[],
         index_pages: &[],
+        skipped: &[],
         weight,
         max_pages: Some(max_pages),
     }
@@ -101,6 +120,7 @@ const fn tasks(
         roots,
         sitemaps: &[],
         index_pages: indexes,
+        skipped: &[],
         weight,
         max_pages: Some(cap),
     }
@@ -116,6 +136,7 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         roots: &["https://www.dnielectronico.es/PortalDNIe/"],
         sitemaps: &[],
         index_pages: &[],
+        skipped: &[],
         weight: 6,
         max_pages: Some(500),
     },
@@ -124,6 +145,7 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         roots: &["https://gesund.bund.de/"],
         sitemaps: &[],
         index_pages: &[],
+        skipped: &[],
         weight: 6,
         max_pages: Some(500),
     },
@@ -330,7 +352,15 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         5_000,
     ),
     whole("www.usa.gov", 7),
-    whole("www.uscis.gov", 6),
+    // Not uscis.gov's archive, news, outreach events or website reports:
+    // they led searches that only share words with their titles ("prevent
+    // identity fraud" listed a newsroom alert on a photo policy that
+    // "helps prevent immigration fraud").
+    whole_but(
+        "www.uscis.gov",
+        &["/archive", "/newsroom", "/outreach", "/website-policies"],
+        6,
+    ),
     whole("travel.state.gov", 6),
     whole("www.va.gov", 6),
     whole("www.medicare.gov", 6),
