@@ -686,6 +686,15 @@ pub(crate) fn within_edits(word: &str, fixed: &str) -> bool {
     }
 }
 
+/// How many edits make `word` into `other`, a swap of neighbouring letters
+/// counting as one; 3 for more than two.
+pub(crate) fn edits_between(word: &str, other: &str) -> u8 {
+    match builder(2).build_dfa(word).eval(other) {
+        Distance::Exact(edits) => edits,
+        Distance::AtLeast(_) => 3,
+    }
+}
+
 /// Levenshtein automata builders, which are costly to make, for 1 and 2
 /// edits, with a swap of neighbouring letters as one edit.
 pub(crate) fn builder(edits: u8) -> &'static LevenshteinAutomatonBuilder {

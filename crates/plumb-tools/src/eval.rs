@@ -816,7 +816,8 @@ fn evaluate(
         // As a node with pages does (`add_pages`): a query that names a
         // page is spelled right, the words the pages know are put back in a
         // suggestion ("pkce" is not "pace"), and words of things, not
-        // sites, are corrected from the pages' names ("anubas").
+        // sites, are corrected from the pages' names ("anubas"), which may
+        // stand in for the sites' spelling ("rooling in the deep").
         let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
         let site_words = |word: &str| searcher.word_sites(word);
         if !args.exact && !applied {
@@ -828,9 +829,12 @@ fn evaluate(
                     Some(spelling) if !spelled_right => pages.check_spelling(&q.query, spelling)?,
                     _ => None,
                 };
-                if results.spelling.is_none() && !spelled_right {
-                    results.spelling =
+                if !spelled_right {
+                    let by_pages =
                         pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_words)?;
+                    let by_sites = results.spelling.take();
+                    results.spelling =
+                        pages.pick_spelling(&q.query, by_sites, by_pages, &options)?;
                 }
             }
         }

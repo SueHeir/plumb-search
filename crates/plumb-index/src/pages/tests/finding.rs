@@ -1154,6 +1154,78 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
 }
 
 #[test]
+fn the_pages_spelling_stands_in_when_it_names_a_page() {
+    let (_dir, searcher) = searcher(&[
+        page("Interrupt", 10_000, &[]),
+        page("Internet", 90_000, &[]),
+        page("Rolling in the Deep", 50_000, &[]),
+        page("Parent", 30_000, &[]),
+        page("Apparent", 5_000, &[]),
+    ]);
+    let spelling = |query: &str, site: Option<&str>| {
+        Some(crate::Spelling {
+            query: query.into(),
+            site: site.map(str::to_string),
+            applied: false,
+        })
+    };
+    let options = crate::SearchOptions::default();
+    let pick = |typed: &str, by_sites, by_pages| {
+        searcher
+            .pick_spelling(typed, by_sites, by_pages, &options)
+            .unwrap()
+            .map(|picked| picked.query)
+    };
+    let picked = |query: &str| Some(query.to_string());
+    // Fewer edits, or the sites' names no page.
+    let interrupt = spelling("interrupt", None);
+    assert_eq!(
+        pick("interupt", spelling("internet", None), interrupt.clone()),
+        picked("interrupt")
+    );
+    assert_eq!(
+        pick(
+            "rooling in the deep",
+            spelling("rowling in the deep", None),
+            spelling("rolling in the deep", None)
+        ),
+        picked("rolling in the deep")
+    );
+    // As many edits, and both name a page.
+    assert_eq!(
+        pick(
+            "aparent",
+            spelling("parent", None),
+            spelling("apparent", None)
+        ),
+        picked("parent")
+    );
+    // A site's name, or a pages' spelling that names nothing.
+    assert_eq!(
+        pick(
+            "interupt",
+            spelling("internet", Some("internet.org")),
+            interrupt.clone()
+        ),
+        picked("internet")
+    );
+    assert_eq!(
+        pick(
+            "interupt handler",
+            spelling("internet handler", None),
+            spelling("interrupt handler", None)
+        ),
+        picked("internet handler")
+    );
+    // Only one of them.
+    assert_eq!(pick("interupt", None, interrupt), picked("interrupt"));
+    assert_eq!(
+        pick("interupt", spelling("internet", None), None),
+        picked("internet")
+    );
+}
+
+#[test]
 fn spellings_keep_the_words_pages_know() {
     let mut pages = Vec::new();
     for i in 0..3 {

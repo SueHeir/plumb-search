@@ -132,11 +132,13 @@ impl FrozenBackend {
         if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
             results.spelling = pages.check_spelling(query, spelling)?;
         }
-        if results.spelling.is_none() && !spelled_right && !options.exact {
+        if applied.is_none() && !spelled_right && !options.exact {
             let sites = self.sites.searcher();
-            results.spelling = pages.suggest_spelling(query, sites.spelling_model(), &|word| {
+            let by_pages = pages.suggest_spelling(query, sites.spelling_model(), &|word| {
                 sites.word_sites(word)
             })?;
+            results.spelling =
+                pages.pick_spelling(query, results.spelling.take(), by_pages, options)?;
         }
         results.pages = place_pages(query, &results.hits, found);
         plumb_index::learned::reorder_results(
