@@ -1314,8 +1314,9 @@ impl PageSearcher {
     /// among `sites`, the results as typed, none of which the query names
     /// either; and the spelling names a page `options` keep. The site the
     /// spelling names does not count. A web address, an exact search, words
-    /// split or joined and one word shorter than [`SURE_WORD_CHARS`] stay
-    /// as typed.
+    /// split or joined, one word shorter than [`SURE_WORD_CHARS`] and a word
+    /// typed with letters outside a-z stay as typed: "Edlén equation" was
+    /// written with care, though the speller reads it as "edlen".
     pub fn sure_spelling(
         &self,
         query: &str,
@@ -1340,9 +1341,16 @@ impl PageSearcher {
         if typed.len() != fixed.len() || short {
             return Ok(false);
         }
+        let accented = |word: &str| {
+            query.split_whitespace().any(|raw| {
+                raw.chars().any(|c| c.is_alphabetic() && !c.is_ascii())
+                    && analysis::tokens(&self.words, raw).iter().any(|t| t == word)
+            })
+        };
         for (word, fix) in typed.iter().zip(fixed) {
             if word != fix
-                && (site_words(word) >= crate::KNOWN_WORD_SITES
+                && (accented(word)
+                    || site_words(word) >= crate::KNOWN_WORD_SITES
                     || others
                         .iter()
                         .any(|hit| plumb_core::domain_label(&hit.domain) == *word)

@@ -1119,6 +1119,8 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
         "ballarat",
         &[site("goldfields.org", false)]
     ));
+    // A word typed with letters outside a-z was written with care ("Edlén").
+    assert!(!sure("ballràt", "ballarat", &[]));
     // The query names a site as typed, or a site is named by the word.
     assert!(!sure("ballrat", "ballarat", &[site("ballrat.info", true)]));
     assert!(!sure("ballrat", "ballarat", &[site("ballrat.org", false)]));
