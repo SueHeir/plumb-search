@@ -287,11 +287,10 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
         &["https://support.microsoft.com/en-us/"],
         9,
     ),
-    under(
-        "support.apple.com",
-        &["https://support.apple.com/en-us/"],
-        9,
-    ),
+    // Not support.apple.com: its pages name a fault in one of its apps or
+    // services, and led searches about something else ("how to learn to
+    // play the guitar" listed "GarageBand: E chords and low E notes not
+    // detected by Learn To Play with acoustic guitar").
     under("support.google.com", &["https://support.google.com/"], 8),
     under("helpx.adobe.com", &["https://helpx.adobe.com/"], 5),
     whole("www.w3schools.com", 6),
