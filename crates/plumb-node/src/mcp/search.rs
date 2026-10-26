@@ -221,13 +221,7 @@ impl Mcp {
             .map(|p| p.hit.clone())
             .partition(|hit| !promote_package && hit.page.package.is_some());
         let operators = plumb_core::Operators::parse(query);
-        let place = |pages| {
-            if operators.any() {
-                place_operator_pages(&operators, &results.hits, pages)
-            } else {
-                place_pages(query, &results.hits, pages)
-            }
-        };
+        let place = |pages| place_shown(query, &results.hits, pages);
         let mut placed = place(found_pages);
         for page in place(supplementary) {
             let at = placed.iter().position(|p| p.at >= page.at);

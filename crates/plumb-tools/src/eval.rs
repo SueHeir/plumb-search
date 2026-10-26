@@ -21,7 +21,7 @@ use std::path::Path;
 
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
-    Page, PageSearcher, PlacedPage,
+    place_shown, Page, PageSearcher, PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -956,6 +956,14 @@ fn evaluate(
                         &mut placed,
                         &|word| searcher.is_common_word(word),
                     ),
+                }
+                // A node's answers place the pages again from their hits,
+                // for what it was asked: the query as typed when it showed
+                // a sure spelling's results.
+                if features.is_none() {
+                    let asked = if sure { &q.query } else { &searched };
+                    let hits = placed.into_iter().map(|page| page.hit).collect();
+                    placed = place_shown(asked, &lifted, hits);
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {

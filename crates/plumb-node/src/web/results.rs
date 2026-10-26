@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use plumb_core::{now_unix, truncate_chars, RecentNews};
-use plumb_index::pages::{place_operator_pages, place_pages};
+use plumb_index::pages::place_shown;
 use plumb_index::{Hit, SearchOptions, SearchResults, SiteSearch, Spelling};
 
 use super::api::{NetworkResult, NetworkResults};
@@ -429,11 +429,7 @@ pub(crate) fn render_results_with(
         .map(|placed| placed.hit.clone())
         .collect();
     let ops = plumb_core::Operators::parse(query);
-    let mut pages = if ops.any() {
-        place_operator_pages(&ops, &shown_hits, found_pages)
-    } else {
-        place_pages(query, &shown_hits, found_pages)
-    };
+    let mut pages = place_shown(query, &shown_hits, found_pages);
     pages.retain(|placed| !hidden(http_url(&placed.hit.page.url)));
     // How much of each kind of page the searcher wants.
     if let Some(about) = settings.about() {

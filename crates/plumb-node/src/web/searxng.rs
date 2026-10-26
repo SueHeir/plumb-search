@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use plumb_answer::Answer;
 use plumb_core::SafeSearch;
-use plumb_index::pages::{place_operator_pages, place_pages, PlacedPage};
+use plumb_index::pages::{place_shown, PlacedPage};
 use plumb_index::Hit;
 use serde_json::{json, Value};
 use tracing::error;
@@ -235,11 +235,7 @@ async fn collect(
         .await;
     let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
     let operators = plumb_core::Operators::parse(query);
-    let placed = if operators.any() {
-        place_operator_pages(&operators, &results.hits, found_pages)
-    } else {
-        place_pages(query, &results.hits, found_pages)
-    };
+    let placed = place_shown(query, &results.hits, found_pages);
     let info = match &extras.profile {
         Some(profile) => answers::info_from_page(&profile.page, &results.hits),
         None if operators.any_but_phrases() || answers::is_sum(extras.answer.as_ref()) => None,
