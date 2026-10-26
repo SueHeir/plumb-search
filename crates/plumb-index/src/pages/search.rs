@@ -1168,11 +1168,16 @@ impl PageSearcher {
         // Names, abbreviations and addresses: "ETIAS" is not "elias", "OLED"
         // not "old", nor "ratp.info" "rate info". Nor is a word typed with
         // letters English does not use a slip of one without them: "Edlén"
-        // is not "ellen", nor the mojibake "mÃ©xico" "ma xiao".
+        // is not "ellen", nor the mojibake "mÃ©xico" "ma xiao". Read whole
+        // too, as the words typed are: the single letters of a mojibake
+        // are read as one word.
         let mut kept: HashSet<String> = HashSet::new();
         for part in query.split_whitespace() {
             let whole = part.contains('.') && registrable_domain(part).is_some()
                 || part.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
+            if whole {
+                kept.extend(analysis::tokens(&self.words, part));
+            }
             for piece in part.split(|c: char| !c.is_alphanumeric()) {
                 let capitals = piece.chars().filter(|c| c.is_alphabetic()).count() > 1
                     && !piece.chars().any(char::is_lowercase);
@@ -1357,7 +1362,10 @@ impl PageSearcher {
     /// spelling names does not count. A web address, an exact search, words
     /// split or joined, one word shorter than [`SURE_WORD_CHARS`] and a word
     /// typed with letters outside a-z stay as typed: "Edlén equation" was
-    /// written with care, though the speller reads it as "edlen".
+    /// written with care, though the speller reads it as "edlen". A site
+    /// named by the word's plural or singular counts as named by it: the
+    /// speller leaves those be, so it reads "goodread" as "goodyear", but
+    /// goodreads.com is among the results as typed.
     pub fn sure_spelling(
         &self,
         query: &str,
@@ -1392,9 +1400,10 @@ impl PageSearcher {
             if word != fix
                 && (accented(word)
                     || site_words(word) >= crate::KNOWN_WORD_SITES
-                    || others
-                        .iter()
-                        .any(|hit| plumb_core::domain_label(&hit.domain) == *word)
+                    || others.iter().any(|hit| {
+                        let label = plumb_core::domain_label(&hit.domain);
+                        label == *word || crate::spell_model::plural_pair(&label, word)
+                    })
                     || self.knows_word(word)?
                     || self.names_something(word, &typed)?)
             {
