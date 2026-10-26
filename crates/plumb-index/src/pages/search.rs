@@ -1305,6 +1305,47 @@ impl PageSearcher {
         }))
     }
 
+    /// The spelling to suggest for `query`: the sites' (`sites`) or the
+    /// pages' own (`pages`, [`PageSearcher::suggest_spelling`]). The pages'
+    /// stands in for a spelling of the sites' words when it names a page
+    /// and is fewer edits from the words typed, or the sites' names no page:
+    /// the sites hardly say "interrupt" or know "Rolling in the Deep", so
+    /// they read "interupt" as "internet" and "rooling in the deep" as
+    /// "rowling in the deep". A spelling of a site's name stays.
+    pub fn pick_spelling(
+        &self,
+        query: &str,
+        sites: Option<crate::Spelling>,
+        pages: Option<crate::Spelling>,
+        options: &crate::SearchOptions,
+    ) -> Result<Option<crate::Spelling>> {
+        let (Some(by_sites), Some(by_pages)) = (&sites, &pages) else {
+            return Ok(sites.or(pages));
+        };
+        if by_sites.site.is_some()
+            || by_sites.query == by_pages.query
+            || self.page_named_by(by_pages, options)?.is_none()
+        {
+            return Ok(sites);
+        }
+        let typed = analysis::tokens(&self.words, query);
+        let edits = |spelling: &crate::Spelling| -> u32 {
+            let fixed: Vec<&str> = spelling.query.split_whitespace().collect();
+            if fixed.len() != typed.len() {
+                return u32::MAX;
+            }
+            typed
+                .iter()
+                .zip(fixed)
+                .map(|(word, fix)| u32::from(crate::spell::edits_between(word, fix)))
+                .sum()
+        };
+        if edits(by_pages) < edits(by_sites) || self.page_named_by(by_sites, options)?.is_none() {
+            return Ok(pages);
+        }
+        Ok(sites)
+    }
+
     /// Whether `spelling`, suggested for `query`, is sure enough that its
     /// results are shown instead ("Showing results for"): "ballrat" is
     /// Ballarat, "delta debtal" Delta Dental. Each word it changes is one

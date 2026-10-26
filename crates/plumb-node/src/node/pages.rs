@@ -1226,6 +1226,56 @@ pub(super) fn paper_coverage(inner: &Inner) -> Option<plumb_index::pages::PaperC
         .map(|(_, s)| s.paper_coverage().clone())
 }
 
+/// Checks `results`' spelling of `query` against the pages: the words they
+/// know are put back ([`PageSearcher::check_spelling`]), and words of
+/// things, not sites ("anubas", "budafest"), are spelled from the pages'
+/// names, which may stand in for the sites' spelling
+/// ([`PageSearcher::pick_spelling`]: "rooling in the deep"). Not when the
+/// results are for a spelling already, and only the check for a search as
+/// typed or one `spelled_right`.
+fn spell_with_pages(
+    inner: &Inner,
+    searcher: &PageSearcher,
+    query: &str,
+    options: &SearchOptions,
+    spelled_right: bool,
+    results: &mut SearchResults,
+) {
+    if results
+        .spelling
+        .as_ref()
+        .is_some_and(|spelling| spelling.applied)
+    {
+        return;
+    }
+    if let Some(spelling) = results.spelling.take() {
+        results.spelling = match searcher.check_spelling(query, spelling.clone()) {
+            Ok(checked) => checked,
+            Err(err) => {
+                warn!("checking a spelling against pages: {err:#}");
+                Some(spelling)
+            }
+        };
+    }
+    if spelled_right || options.exact {
+        return;
+    }
+    let Some(index) = inner.current() else {
+        return;
+    };
+    let sites = index.backend().searcher();
+    let site_words = |word: &str| sites.word_sites(word);
+    let picked = searcher
+        .suggest_spelling(query, sites.spelling_model(), &site_words)
+        .and_then(|by_pages| {
+            searcher.pick_spelling(query, results.spelling.clone(), by_pages, options)
+        });
+    match picked {
+        Ok(picked) => results.spelling = picked,
+        Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
+    }
+}
+
 /// Adds the pages found for `query` to `results`. When the results are for
 /// a spelling of it ([`plumb_index::Spelling::applied`]), the pages are
 /// for that spelling too.
@@ -1340,27 +1390,7 @@ pub(super) fn add_pages(
                     results.site_search = None;
                 }
             }
-            if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
-                results.spelling = match searcher.check_spelling(query, spelling.clone()) {
-                    Ok(checked) => checked,
-                    Err(err) => {
-                        warn!("checking a spelling against pages: {err:#}");
-                        Some(spelling)
-                    }
-                };
-            }
-            // Words of things, not sites ("anubas", "budafest"): the
-            // pages' names know them. Not for a search as typed.
-            if results.spelling.is_none() && !spelled_right && !options.exact {
-                if let Some(index) = inner.current() {
-                    let sites = index.backend().searcher();
-                    let site_words = |word: &str| sites.word_sites(word);
-                    match searcher.suggest_spelling(query, sites.spelling_model(), &site_words) {
-                        Ok(suggested) => results.spelling = suggested,
-                        Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
-                    }
-                }
-            }
+            spell_with_pages(inner, &searcher, query, options, spelled_right, results);
             results.pages = place_pages(query, &results.hits, found);
             plumb_index::learned::reorder_results(
                 &inner.rank,
