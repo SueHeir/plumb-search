@@ -242,6 +242,14 @@ fn misspelled_names_find_the_site() {
         search_spelled(&searcher, "weather forecast").hits[0].domain,
         "weather.com"
     );
+    // A word typed with letters English does not use stays as typed
+    // ("Edlén" is not "ellen"); the others are still corrected.
+    assert_eq!(spelled_with(&searcher, "weather forcást", &by_edits), None);
+    assert_eq!(
+        spelled_with(&searcher, "wéather forcast", &by_edits).as_deref(),
+        Some("weather forecast")
+    );
+    assert_eq!(suggestion(&search_spelled(&searcher, "amazóm")), None);
 }
 
 #[test]

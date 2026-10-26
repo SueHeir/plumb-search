@@ -21,6 +21,9 @@
 //!   word is only taken for a slip of a common one: "kiwipete" is not
 //!   "kimipet", which a few sites say.
 //!
+//! A word typed with letters English does not use is neither: "Edlén" is
+//! not "ellen", though the index reads it without its accents.
+//!
 //! With the spelling model the index learned from its own words
 //! ([`crate::spell_model`]), candidates are ranked by the noisy channel
 //! instead: what the edits cost by the slips the index's words show
@@ -122,11 +125,27 @@ pub(crate) fn correct(
     if tokens.is_empty() {
         return Ok(None);
     }
+    // A word typed with letters English does not use is no slip of one
+    // without them, though the index reads it without its accents: "Edlén"
+    // is not "ellen".
+    let kept: HashSet<String> = query
+        .split_whitespace()
+        .filter(|part| part.chars().any(|c| c.is_alphabetic() && !c.is_ascii()))
+        .flat_map(|part| analysis::tokens(analyzer, part))
+        .collect();
     let mut fixed: Vec<String> = Vec::with_capacity(tokens.len());
     let mut changed = false;
     let mut name_link_score = None;
     let mut name_covers = 0;
-    let rest = match speller.fix_name(&tokens, named_words + 1, link_score)? {
+    let name = speller
+        .fix_name(&tokens, named_words + 1, link_score)?
+        .filter(|name| {
+            !tokens
+                .iter()
+                .take(name.covers)
+                .any(|word| kept.contains(word))
+        });
+    let rest = match name {
         Some(name) => {
             fixed.extend(name.words);
             name_link_score = Some(name.link_score);
@@ -140,7 +159,12 @@ pub(crate) fn correct(
         }
     };
     for word in &tokens[rest..] {
-        match speller.fix_word(word, link_score)? {
+        let better = if kept.contains(word) {
+            None
+        } else {
+            speller.fix_word(word, link_score)?
+        };
+        match better {
             Some(better) => {
                 fixed.push(better);
                 changed = true;
@@ -151,7 +175,10 @@ pub(crate) fn correct(
     // A word spelled right but meant as another, which only the words
     // around it show: "capitol one".
     let after_name = name_covers.max(named_words.min(tokens.len()));
-    if let Some((at, better)) = speller.fix_in_context(&fixed, &tokens, after_name)? {
+    if let Some((at, better)) = speller
+        .fix_in_context(&fixed, &tokens, after_name)?
+        .filter(|(at, _)| !kept.contains(&fixed[*at]))
+    {
         fixed[at] = better;
         changed = true;
     }
