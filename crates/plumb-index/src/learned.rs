@@ -593,10 +593,8 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
 /// stays where placing put it, after [`crate::pages::PARTIAL_AFTER`]
 /// sites: the model reads each row's place in the list, so with one
 /// listed it moved the sites below it too ("calories in a shot" put
-/// davidprotein.com second). Once the rows are in order, model or not, a
-/// page only meant comes before the sites just above it that barely match
-/// the query (`meant_at`); moved before the model read it, it would move
-/// the sites as well.
+/// davidprotein.com second). Once the rows are in order, it comes before
+/// the sites just above it that barely match the query (`meant_at`).
 pub fn reorder_results(
     cfg: &crate::RankConfig,
     query: &str,
@@ -612,19 +610,6 @@ pub fn reorder_results(
             Moves::Rows
         };
         reorder_moving(Model::builtin(), query, hits, placed, moves, meant);
-    }
-    lift_meant(hits, placed);
-}
-
-/// Puts each page listed on its own only for what the query means
-/// ([`crate::pages::only_meant`]) before the sites just above it that
-/// barely match the query (`meant_at`).
-fn lift_meant(hits: &[Hit], placed: &mut [PlacedPage]) {
-    for page in placed
-        .iter_mut()
-        .filter(|page| page.under.is_none() && crate::pages::only_meant(&page.hit))
-    {
-        page.at = crate::pages::meant_at(hits, page.at);
     }
 }
 
@@ -662,6 +647,7 @@ fn reorder_moving(
     // the pages under sites.
     for mut page in nearest {
         page.hit.learned = Some(learned_place(hits, page.at));
+        page.at = crate::pages::meant_at(hits, &page);
         let at = placed
             .iter()
             .position(|p| p.under.is_some() || p.at > page.at)
@@ -1543,7 +1529,6 @@ mod tests {
             });
         }
         let mut placed = place_pages(query, &hits, vec![shot.clone()]);
-        lift_meant(&hits, &mut placed);
         assert_eq!(placed[0].at, PARTIAL_AFTER);
         reorder_moving(
             &later_first,
@@ -1553,9 +1538,10 @@ mod tests {
             Moves::Rows,
             Some(&url),
         );
-        assert_eq!(placed[0].at, PARTIAL_AFTER);
-        lift_meant(&hits, &mut placed);
         assert_eq!((hits[0].domain.as_str(), placed[0].at), ("e.com", 1));
+        // And it stays there when the results are placed again to be shown.
+        let again = place_pages(query, &hits, vec![placed[0].hit.clone()]);
+        assert_eq!(again[0].at, 1);
         // It keeps its place among the pages: before one listed later.
         let mut hits = five();
         let later = PlacedPage {

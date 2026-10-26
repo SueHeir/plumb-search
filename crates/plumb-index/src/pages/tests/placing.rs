@@ -297,18 +297,17 @@ fn a_page_only_meant_comes_before_the_sites_that_barely_match() {
         meant: true,
         ..found("The Ant and the Grasshopper", None, false, 0.6)
     };
-    // Lifted once the rows are in order, here with no model.
-    let off = crate::RankConfig {
-        learned: false,
-        ..crate::RankConfig::default()
-    };
+    // Before the learned ranking it stays after three sites, and the
+    // ranking leaves it there; placed again to be shown, it moves up.
     let at = |sites: &[crate::Hit], page: &PageHit| {
         let query = "the cricket and the ant";
-        let mut sites = sites.to_vec();
-        let mut placed = place_pages(query, &sites, vec![page.clone()]);
+        let placed = place_pages(query, sites, vec![page.clone()]);
         assert_eq!(placed[0].at, PARTIAL_AFTER);
-        crate::learned::reorder_results(&off, query, false, None, &mut sites, &mut placed);
-        placed[0].at
+        let ranked = PageHit {
+            learned: Some(LearnedPlace::Before(sites[PARTIAL_AFTER].domain.clone())),
+            ..page.clone()
+        };
+        place_pages(query, sites, vec![ranked])[0].at
     };
     // "the cricket and the ant" lists the fable before the cricket sites
     // just above it, not before the site above them.
