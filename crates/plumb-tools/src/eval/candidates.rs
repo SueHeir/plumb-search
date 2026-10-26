@@ -30,8 +30,9 @@ pub(super) fn write(
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut out = std::io::BufWriter::new(file);
     let options = SearchOptions {
-        country: args.country.clone(),
+        country: args.country(),
         exact: args.exact,
+        language: args.language(),
         ..SearchOptions::default()
     };
     for suite in suites {

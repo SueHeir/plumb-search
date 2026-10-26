@@ -466,12 +466,8 @@ fn observe(
 ) -> Result<Value> {
     let start = Instant::now();
     let options = SearchOptions {
-        country: case
-            .options
-            .country
-            .clone()
-            .or_else(|| args.country.clone()),
-        language: case.options.language.clone().or_else(|| args.lang.clone()),
+        country: case.options.country.clone().or_else(|| args.country()),
+        language: case.options.language.clone().or_else(|| args.language()),
         exact: case.options.exact || args.exact,
         only_country: case.options.only_country,
         ..SearchOptions::default()

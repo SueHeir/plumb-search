@@ -444,8 +444,9 @@ fn recall(
     ranks: &[Option<usize>],
 ) -> Result<Vec<Stage>> {
     let options = SearchOptions {
-        country: args.country.clone(),
+        country: args.country(),
         exact: args.exact,
+        language: args.language(),
         ..SearchOptions::default()
     };
     let mut stages = Vec::with_capacity(queries.len());
@@ -788,10 +789,10 @@ fn evaluate(
             continue;
         }
         let options = SearchOptions {
-            country: args.country.clone(),
+            country: args.country(),
             only_country: false,
             exact: args.exact,
-            language: args.lang.clone(),
+            language: args.language(),
             ..SearchOptions::default()
         };
         let search = |query: &str, options: &SearchOptions| {
@@ -873,8 +874,11 @@ fn evaluate(
         let mut hits = results.hits;
         // The sites that serve a tool or a quick fact come first, as a
         // node lists them.
-        let route =
-            plumb_node::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
+        let route = plumb_node::sources::route(
+            &searched,
+            answer_kind(&searched),
+            options.country.as_deref(),
+        );
         if pages.is_none() {
             match &route {
                 Some(route) => {
@@ -1236,8 +1240,8 @@ fn profile_shown(
     pages: &PageSearcher,
 ) -> Result<Option<String>> {
     let options = SearchOptions {
-        country: args.country.clone(),
-        language: args.lang.clone(),
+        country: args.country(),
+        language: args.language(),
         ..SearchOptions::default()
     };
     use plumb_node::web::answers::{self, EntityResolution};
@@ -1280,9 +1284,9 @@ fn fact_rank(
     let answer = match (&asked, pages) {
         (Some(asked), Some(pages)) => {
             let options = SearchOptions {
-                country: args.country.clone(),
+                country: args.country(),
                 exact: true,
-                language: args.lang.clone(),
+                language: args.language(),
                 ..SearchOptions::default()
             };
             let mut sites = lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;
