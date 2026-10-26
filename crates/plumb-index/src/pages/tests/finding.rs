@@ -1148,15 +1148,19 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
     assert!(!searcher
         .sure_spelling("ballrat", &fixed, &options, &[], &many)
         .unwrap());
-    let plural = |word: &str| {
-        if word == "ballrats" {
-            crate::KNOWN_WORD_SITES
-        } else {
-            0
+    let plural = |more: u64| {
+        move |word: &str| match word {
+            "ballrats" => crate::KNOWN_WORD_SITES + more,
+            "ballarat" => crate::KNOWN_WORD_SITES,
+            _ => 0,
         }
     };
     assert!(!searcher
-        .sure_spelling("ballrat", &fixed, &options, &[], &plural)
+        .sure_spelling("ballrat", &fixed, &options, &[], &plural(1))
+        .unwrap());
+    // Not when the spelling is as common: sites repeat slips ("tommorows").
+    assert!(searcher
+        .sure_spelling("ballrat", &fixed, &options, &[], &plural(0))
         .unwrap());
     // Searched as typed, or a web address.
     let exact = crate::SearchOptions {
