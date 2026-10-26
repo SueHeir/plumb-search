@@ -207,7 +207,7 @@ Before placing pages, `add_pages` lets them correct the site list: the official 
 
 - A page about a listed site goes under that site: "python" lists python.org with the article under it.
 - A page the query names comes first ("marie curie" lists the article before mariecurie.org), unless the best site is probably the website of what the page is about, an official website, or better known than the page is read.
-- At most 2 other pages are listed (`MAX_PAGES_LISTED`), and partial matches only after the third site (`PARTIAL_AFTER`).
+- At most 2 other pages are listed (`MAX_PAGES_LISTED`), and partial matches only after the third site (`PARTIAL_AFTER`). Once the learned ranking has ordered the rows, a page listed only for what the search means comes before the sites just above it that barely match the search (`meant_at`): sites that lack some of its main words, that no word of it names, and whose text matches less than 0.4 (`MEANT_PAST_MATCH`). "the cricket and the ant" lists The Ant and the Grasshopper before acscricket.com.
 
 Then the learned ranking reorders the first rows, and `after_learned_order` puts back what it does not know about: a county search ending in its state lists that state's county first (`asked_state_first`), a town search lists sites of namesake towns last (`namesakes_last`, using the places index to tell which town is meant), the site and page a spelling suggests stay second, untitled sites take their article's title, and a pasted address lists the page at it.
 
@@ -222,7 +222,7 @@ A second model, built in from [learned_sites_model.json](../crates/plumb-index/s
 The model only reorders. Guards in `reorder` keep the hand-made ranking's say where the model is known to go wrong:
 
 - A record the query names by its identifier ("rfc 3339") stays first; the model never saw one.
-- The page nearest the search in meaning, which a node given page vectors lists ([pages.md](pages.md)), is not read and stays where placing put it, after the third site. The model reads each row's place, so listing one moved the sites below it too: "calories in a shot" put davidprotein.com second.
+- The page nearest the search in meaning, which a node given page vectors lists ([pages.md](pages.md)), is not read and stays where placing put it, after the third site, until it passes the sites that barely match the search once the rows are in order. The model reads each row's place, so listing one moved the sites below it too: "calories in a shot" put davidprotein.com second.
 - A site with nothing but popularity behind it cannot jump over a site placed above it.
 - A site lacking some of the query's words cannot pass a site the whole query names.
 - A site's inner page cannot pass a page above it on popularity alone, and a docs page stays below the best site.

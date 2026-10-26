@@ -38,6 +38,11 @@ pub const DEMAND_MARGIN: f32 = 0.05;
 /// query does not name in full comes after an article the query names.
 pub const WEAK_SITE_MATCH: f32 = 0.5;
 
+/// The text match ([`crate::Hit::placing_text_score`]) below which a site
+/// that lacks some of the query's main words comes after a page only meant
+/// ([`meant_at`]).
+const MEANT_PAST_MATCH: f32 = 0.4;
+
 /// Most site results looked through by [`lift_named_sites`].
 const LIFTED_FROM: usize = 5;
 
@@ -313,9 +318,36 @@ pub(crate) fn is_record(hit: &PageHit) -> bool {
 }
 
 /// Whether `hit` was listed only for what the query means
-/// ([`PageHit::meant`]), and so goes after [`PARTIAL_AFTER`] sites.
+/// ([`PageHit::meant`]), and so goes after [`PARTIAL_AFTER`] sites, or
+/// where [`meant_at`] says.
 pub(crate) fn only_meant(hit: &PageHit) -> bool {
     hit.meant && !hit.named && !hit.whole
+}
+
+/// Where a page listed only for what the query means ([`only_meant`]) at
+/// `from` goes among `sites` in their final order: before the sites just
+/// above it that match the query only a little. Such a site lacks some of the
+/// query's main words ([`crate::Hit::missing_words`]), no word of the
+/// query names it, and its text matches less than [`MEANT_PAST_MATCH`]:
+/// "the cricket and the ant" lists The Ant and the Grasshopper before
+/// acscricket.com, and "hamstring insertion point" Hamstring before
+/// triggerpoints.net. A site with nothing known of how it matches, such
+/// as a health authority listed for a medical search, keeps its place.
+pub(crate) fn meant_at(sites: &[crate::Hit], from: usize) -> usize {
+    let matches_little = |site: &crate::Hit| {
+        !site.named
+            && site.missing_words
+            && site
+                .query_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.partial_name_words == 0)
+            && site.placing_text_score.unwrap_or(site.text_score) < MEANT_PAST_MATCH
+    };
+    let mut at = from.min(sites.len());
+    while at > 0 && matches_little(&sites[at - 1]) {
+        at -= 1;
+    }
+    at
 }
 
 /// Best sites of a query looked at for the site of a subpage found by its
@@ -670,7 +702,9 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
 /// put it ("taylor swift" wants the singer's article under
 /// taylorswift.com, then sites, then the album "Taylor Swift"), and so
-/// does a page only meant by part of the query ([`PageHit::meant`]); and,
+/// does a page only meant by part of the query ([`PageHit::meant`]),
+/// until [`crate::learned::reorder_results`] passes it over the sites
+/// that barely match the query ([`meant_at`]); and,
 /// unless the query asks for them, podcasts come after the best site and
 /// the other pages listed on their own ("better call saul" wants amc.com
 /// and the article first).

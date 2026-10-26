@@ -560,7 +560,8 @@ impl PageSearcher {
                 weight *= REPO_WEIGHT;
             }
             // Listed only for what a part of the query means, not names:
-            // after three sites, whatever the learned ranking says. A page
+            // after three sites, or before those that barely match the
+            // query, whatever the learned ranking says. A page
             // listed without the link keeps its place: "tylenol formula"
             // still leads with Tylenol.
             let meant = link.is_some()

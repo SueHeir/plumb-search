@@ -261,33 +261,95 @@ fn sites_with_some_words_of_a_named_article_are_left_out() {
     assert_eq!(order, ["toystory.disney.com", "toys.com"]);
 }
 
+/// A site that lacks some of the query's main words, `partial_name_words`
+/// of which name it from the first, `closeness` from it in meaning.
+fn lacking_words(domain: &str, partial_name_words: usize, closeness: Option<f32>) -> crate::Hit {
+    let mut hit = known_site(domain, false, 0.7);
+    hit.missing_words = true;
+    hit.query_evidence = Some(crate::CandidateEvidence {
+        domain: domain.into(),
+        lexical_score: 30.0,
+        semantic_closeness: closeness,
+        query_coverage: 0.5,
+        substantive_coverage: 0.5,
+        remaining_coverage: 0.5,
+        named_subject_words: 0,
+        named_subject_domain: None,
+        named_subject_reason: None,
+        subject_coverage: None,
+        subject_remaining_coverage: None,
+        full_name: false,
+        typed_domain: false,
+        partial_name_words,
+        relevance_tier: 0,
+        source_quality: None,
+    });
+    hit
+}
+
+#[test]
+fn a_page_only_meant_comes_before_the_sites_that_barely_match() {
+    let barely = |domain: &str| crate::Hit {
+        text_score: 0.3,
+        ..lacking_words(domain, 0, Some(0.2))
+    };
+    let fable = PageHit {
+        meant: true,
+        ..found("The Ant and the Grasshopper", None, false, 0.6)
+    };
+    // Lifted once the rows are in order, here with no model.
+    let off = crate::RankConfig {
+        learned: false,
+        ..crate::RankConfig::default()
+    };
+    let at = |sites: &[crate::Hit], page: &PageHit| {
+        let query = "the cricket and the ant";
+        let mut sites = sites.to_vec();
+        let mut placed = place_pages(query, &sites, vec![page.clone()]);
+        assert_eq!(placed[0].at, PARTIAL_AFTER);
+        crate::learned::reorder_results(&off, query, false, None, &mut sites, &mut placed);
+        placed[0].at
+    };
+    // "the cricket and the ant" lists the fable before the cricket sites
+    // just above it, not before the site above them.
+    let sites = [
+        site("a.com", false),
+        barely("acscricket.com"),
+        barely("cricketweb.net"),
+        site("d.com", false),
+    ];
+    assert_eq!(at(&sites, &fable), 1);
+    // Found by its words, it comes after three sites.
+    let found_by_words = PageHit {
+        meant: false,
+        ..fable.clone()
+    };
+    assert_eq!(at(&sites, &found_by_words), PARTIAL_AFTER);
+    // A site that matches more, that a word of the query names, or with
+    // nothing known of how it matches keeps its place.
+    let matching = crate::Hit {
+        text_score: 0.5,
+        ..barely("cricket.example")
+    };
+    let ant = crate::Hit {
+        text_score: 0.3,
+        ..lacking_words("ant.example", 1, Some(0.2))
+    };
+    let unknown = crate::Hit {
+        query_evidence: None,
+        ..barely("authority.example")
+    };
+    for third in [matching, ant, unknown] {
+        let sites = [barely("b.com"), barely("c.com"), third, barely("e.com")];
+        assert_eq!(at(&sites, &fable), PARTIAL_AFTER);
+    }
+}
+
 #[test]
 fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
     // Each lacks a word of "airpods pro": (domain, words of it its name
     // covers from the first, closeness in meaning).
-    let evidence = |domain: &str, partial_name_words: usize, closeness: Option<f32>| {
-        let mut hit = known_site(domain, false, 0.7);
-        hit.missing_words = true;
-        hit.query_evidence = Some(crate::CandidateEvidence {
-            domain: domain.into(),
-            lexical_score: 30.0,
-            semantic_closeness: closeness,
-            query_coverage: 0.5,
-            substantive_coverage: 0.5,
-            remaining_coverage: 0.5,
-            named_subject_words: 0,
-            named_subject_domain: None,
-            named_subject_reason: None,
-            subject_coverage: None,
-            subject_remaining_coverage: None,
-            full_name: false,
-            typed_domain: false,
-            partial_name_words,
-            relevance_tier: 0,
-            source_quality: None,
-        });
-        hit
-    };
+    let evidence = lacking_words;
     let mut sites = vec![
         site("airpodspro.ru", true),
         // Named by "pro", an alias of the Public Record Office.

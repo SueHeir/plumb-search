@@ -593,7 +593,10 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
 /// stays where placing put it, after [`crate::pages::PARTIAL_AFTER`]
 /// sites: the model reads each row's place in the list, so with one
 /// listed it moved the sites below it too ("calories in a shot" put
-/// davidprotein.com second).
+/// davidprotein.com second). Once the rows are in order, model or not, a
+/// page only meant comes before the sites just above it that barely match
+/// the query (`meant_at`); moved before the model read it, it would move
+/// the sites as well.
 pub fn reorder_results(
     cfg: &crate::RankConfig,
     query: &str,
@@ -609,6 +612,19 @@ pub fn reorder_results(
             Moves::Rows
         };
         reorder_moving(Model::builtin(), query, hits, placed, moves, meant);
+    }
+    lift_meant(hits, placed);
+}
+
+/// Puts each page listed on its own only for what the query means
+/// ([`crate::pages::only_meant`]) before the sites just above it that
+/// barely match the query (`meant_at`).
+fn lift_meant(hits: &[Hit], placed: &mut [PlacedPage]) {
+    for page in placed
+        .iter_mut()
+        .filter(|page| page.under.is_none() && crate::pages::only_meant(&page.hit))
+    {
+        page.at = crate::pages::meant_at(hits, page.at);
     }
 }
 
@@ -1515,6 +1531,31 @@ mod tests {
         );
         // One meant by part of the query is read as before.
         assert_ne!(order_of(None, vec![shot.clone()]).0, sites);
+        // Once the model has ordered the sites, it goes before those that
+        // barely match the query: a.com and b.com, after e.com there.
+        let mut hits = five();
+        for hit in &mut hits[..2] {
+            hit.missing_words = true;
+            hit.text_score = 0.2;
+            hit.query_evidence = Some(crate::CandidateEvidence {
+                partial_name_words: 0,
+                ..evidence(&hit.domain, 1)
+            });
+        }
+        let mut placed = place_pages(query, &hits, vec![shot.clone()]);
+        lift_meant(&hits, &mut placed);
+        assert_eq!(placed[0].at, PARTIAL_AFTER);
+        reorder_moving(
+            &later_first,
+            query,
+            &mut hits,
+            &mut placed,
+            Moves::Rows,
+            Some(&url),
+        );
+        assert_eq!(placed[0].at, PARTIAL_AFTER);
+        lift_meant(&hits, &mut placed);
+        assert_eq!((hits[0].domain.as_str(), placed[0].at), ("e.com", 1));
         // It keeps its place among the pages: before one listed later.
         let mut hits = five();
         let later = PlacedPage {

@@ -362,7 +362,7 @@ impl PageSearcher {
                         return Ok(None);
                     }
                     // An article words list stays theirs: marked as meant it
-                    // would come after three sites and leave the learned
+                    // would come after up to three sites and leave the learned
                     // order, and on hpc Folate fell from first to fourth
                     // for "source of folic acid". It only moves before the
                     // pages found in part, as Tariff for "what is a tariff
