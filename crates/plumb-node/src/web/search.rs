@@ -722,7 +722,7 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(
+    crate::sources::route_sources(
         query,
         answer,
         country,
@@ -826,14 +826,8 @@ async fn run_search_ranked(
     })
     .await
     .context("the search task failed")??;
-    // "handyman near me" asks for someone to call: a bare handyman.nl,
-    // named by the word but saying nothing, goes after sites that say
-    // what they are.
     if local {
-        let (said, bare): (Vec<Hit>, Vec<Hit>) = std::mem::take(&mut results.hits)
-            .into_iter()
-            .partition(|hit| hit.title.is_some() || hit.official);
-        results.hits = said.into_iter().chain(bare).collect();
+        plumb_index::places::said_first(&mut results.hits);
     }
     debug!("local search completed: {} hits", results.hits.len());
     Ok(results)

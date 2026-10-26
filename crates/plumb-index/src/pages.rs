@@ -33,6 +33,7 @@ mod building;
 mod docs;
 mod dump;
 mod linking;
+mod listing;
 mod named_site;
 mod page;
 mod papers;
@@ -46,6 +47,7 @@ mod stored;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
+pub use self::listing::{Listing, PAGES_PER_SEARCH};
 pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,

@@ -198,7 +198,7 @@ impl Mcp {
             let place = self.backend.locate(&town, options.country.as_deref())?;
             crate::web::answers::time_in_place(&place)
         });
-        crate::assembly::route_sources(
+        crate::sources::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
             options.country.as_deref(),

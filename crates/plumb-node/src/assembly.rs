@@ -250,29 +250,6 @@ pub(crate) fn ordered_rows<'a>(
     rows
 }
 
-pub(crate) fn route_sources(
-    query: &str,
-    answer: Option<plumb_answer::Kind>,
-    country: Option<&str>,
-    results: &mut plumb_index::SearchResults,
-    limit: usize,
-    site: impl Fn(&str) -> Option<Hit>,
-    common: impl Fn(&str) -> bool,
-) {
-    if plumb_core::Operators::parse(query).any() {
-        return;
-    }
-    let Some(route) = crate::sources::route(query, answer, country) else {
-        // The source a health search names, first whatever the learned
-        // order did.
-        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages, &common);
-        return;
-    };
-    let keep = results.hits.len().max(limit);
-    crate::sources::lead_with(&mut results.hits, &mut results.pages, &route, site);
-    results.hits.truncate(keep);
-}
-
 /// Guessed cards only lead explicit package, version or install requests.
 pub(crate) fn promote_package(query: &str) -> bool {
     plumb_core::packages::install_command(query).is_some()

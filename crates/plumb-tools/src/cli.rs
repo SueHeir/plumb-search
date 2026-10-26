@@ -632,6 +632,11 @@ pub struct EvalArgs {
     #[arg(long, value_name = "PERCENT", default_value_t = 100,
         value_parser = clap::value_parser!(u8).range(0..=100))]
     pub site_grades_percent: u8,
+    /// The adult blocklist a node's safe search leaves out (its
+    /// `DATA/safe/adult-domains.txt`): its sites are left out after
+    /// ranking, as on a node.
+    #[arg(long, value_name = "FILE")]
+    pub adult_sites: Option<PathBuf>,
     /// For each miss, also show how the first site and the expected one
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]

@@ -52,7 +52,7 @@ const REFRESH_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Wait after a failed download before trying again.
 const RETRY_WAIT: Duration = Duration::from_secs(3600);
 /// How many more sites a search ranks when the list may leave some out.
-pub(super) const MARGIN: usize = 10;
+pub const MARGIN: usize = 10;
 /// How often the job looks at the list's age.
 const LOOK_EVERY: Duration = Duration::from_secs(3600);
 /// How long a node in the network waits for a trusted node to connect
@@ -76,7 +76,7 @@ const MAX_SHARED_BYTES: u64 = 64 << 20;
 
 /// Adult sites, as sorted hashes of their registrable domains.
 #[derive(Debug, Default)]
-pub(super) struct AdultList(Vec<u64>);
+pub struct AdultList(Vec<u64>);
 
 impl AdultList {
     fn new(domains: &[String]) -> Self {
@@ -88,7 +88,7 @@ impl AdultList {
 
     /// Whether the site of `host` (a domain or an address's host) is on the
     /// list.
-    pub(super) fn contains(&self, host: &str) -> bool {
+    pub fn contains(&self, host: &str) -> bool {
         let domain = registrable_domain(host).unwrap_or_else(|| host.to_ascii_lowercase());
         self.0.binary_search(&hash(&domain)).is_ok()
     }
@@ -110,9 +110,15 @@ fn list_path(data: &Path) -> PathBuf {
 
 /// Reads the list the node keeps, if it has one.
 fn load(data: &Path) -> Option<AdultList> {
-    let text = std::fs::read_to_string(list_path(data)).ok()?;
+    read(&list_path(data)).ok()
+}
+
+/// Reads a list of whole adult sites, one registrable domain per line, as
+/// a node keeps it in `DATA/safe/adult-domains.txt`.
+pub fn read(file: &Path) -> std::io::Result<AdultList> {
+    let text = std::fs::read_to_string(file)?;
     let domains: Vec<String> = text.lines().map(str::to_string).collect();
-    Some(AdultList::new(&domains))
+    Ok(AdultList::new(&domains))
 }
 
 /// Keeps the list loaded and fresh until the node stops.
