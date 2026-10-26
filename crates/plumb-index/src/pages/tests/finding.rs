@@ -911,6 +911,10 @@ fn words_of_things_are_corrected_from_page_names() {
     assert_eq!(suggest("budafest2"), None);
     // A web address is a name, not words.
     assert_eq!(suggest("budafest.com"), None);
+    // Nor is a word typed with letters English does not use, though its
+    // letters only make one when read together, as the mojibake of other
+    // scripts does.
+    assert_eq!(suggest("å¤n¤u¤b¤a¤s"), None);
     // A rare word is no slip of another rare one: few pages say "perfi".
     // Nor of a common one with another first letter: "erft".
     assert_eq!(suggest("perft"), None);
@@ -1138,11 +1142,21 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
     // One short word is a slip of too many; with another it is not.
     assert!(!sure("abrahm", "abraham", &[]));
     assert!(sure("abrahm lincoln", "abraham lincoln", &[]));
-    // Many sites say the word.
+    // Many sites say the word, or its plural: "goodread" is Goodreads.
     let many = |_: &str| crate::KNOWN_WORD_SITES;
     let fixed = spelling("ballarat", None);
     assert!(!searcher
         .sure_spelling("ballrat", &fixed, &options, &[], &many)
+        .unwrap());
+    let plural = |word: &str| {
+        if word == "ballrats" {
+            crate::KNOWN_WORD_SITES
+        } else {
+            0
+        }
+    };
+    assert!(!searcher
+        .sure_spelling("ballrat", &fixed, &options, &[], &plural)
         .unwrap());
     // Searched as typed, or a web address.
     let exact = crate::SearchOptions {
