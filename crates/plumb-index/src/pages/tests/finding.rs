@@ -1142,25 +1142,13 @@ fn sure_spellings_name_a_page_and_change_words_nothing_has() {
     // One short word is a slip of too many; with another it is not.
     assert!(!sure("abrahm", "abraham", &[]));
     assert!(sure("abrahm lincoln", "abraham lincoln", &[]));
-    // Many sites say the word, or its plural: "goodread" is Goodreads.
+    // Or by its plural: "goodread" is goodreads.com.
+    assert!(!sure("ballrat", "ballarat", &[site("ballrats.org", false)]));
+    // Many sites say the word.
     let many = |_: &str| crate::KNOWN_WORD_SITES;
     let fixed = spelling("ballarat", None);
     assert!(!searcher
         .sure_spelling("ballrat", &fixed, &options, &[], &many)
-        .unwrap());
-    let plural = |more: u64| {
-        move |word: &str| match word {
-            "ballrats" => crate::KNOWN_WORD_SITES + more,
-            "ballarat" => crate::KNOWN_WORD_SITES,
-            _ => 0,
-        }
-    };
-    assert!(!searcher
-        .sure_spelling("ballrat", &fixed, &options, &[], &plural(1))
-        .unwrap());
-    // Not when the spelling is as common: sites repeat slips ("tommorows").
-    assert!(searcher
-        .sure_spelling("ballrat", &fixed, &options, &[], &plural(0))
         .unwrap());
     // Searched as typed, or a web address.
     let exact = crate::SearchOptions {

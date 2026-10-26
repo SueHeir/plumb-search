@@ -1362,10 +1362,10 @@ impl PageSearcher {
     /// spelling names does not count. A web address, an exact search, words
     /// split or joined, one word shorter than [`SURE_WORD_CHARS`] and a word
     /// typed with letters outside a-z stay as typed: "Edlén equation" was
-    /// written with care, though the speller reads it as "edlen". A word
-    /// is known by its plural or singular too, when the pages know that or
-    /// more sites say it than the spelling: the speller leaves those be, so
-    /// it reads "goodread" as "goodyear", but it is Goodreads.
+    /// written with care, though the speller reads it as "edlen". A site
+    /// named by the word's plural or singular counts as named by it: the
+    /// speller leaves those be, so it reads "goodread" as "goodyear", but
+    /// goodreads.com is among the results as typed.
     pub fn sure_spelling(
         &self,
         query: &str,
@@ -1396,34 +1396,15 @@ impl PageSearcher {
                     && analysis::tokens(&self.words, raw).iter().any(|t| t == word)
             })
         };
-        let known = |word: &str, fix: &str| -> Result<bool> {
-            if site_words(word) >= crate::KNOWN_WORD_SITES || self.knows_word(word)? {
-                return Ok(true);
-            }
-            // Many sites repeat a slip ("tommorows") or say a word of
-            // another language ("stapel"), so a plural or singular counts
-            // when the pages know it or more sites say it than the spelling.
-            let plural = format!("{word}s");
-            for form in [Some(plural.as_str()), word.strip_suffix('s')]
-                .into_iter()
-                .flatten()
-            {
-                let sites = site_words(form);
-                if self.knows_word(form)?
-                    || sites >= crate::KNOWN_WORD_SITES && sites > site_words(fix)
-                {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        };
         for (word, fix) in typed.iter().zip(fixed) {
             if word != fix
                 && (accented(word)
-                    || others
-                        .iter()
-                        .any(|hit| plumb_core::domain_label(&hit.domain) == *word)
-                    || known(word, fix)?
+                    || site_words(word) >= crate::KNOWN_WORD_SITES
+                    || others.iter().any(|hit| {
+                        let label = plumb_core::domain_label(&hit.domain);
+                        label == *word || crate::spell_model::plural_pair(&label, word)
+                    })
+                    || self.knows_word(word)?
                     || self.names_something(word, &typed)?)
             {
                 return Ok(false);
