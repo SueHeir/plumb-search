@@ -940,7 +940,13 @@ fn evaluate(
                         &mut placed,
                     );
                 }
+                // As a node does after the learned order, but for moving the
+                // sites of towns' namesakes last, which needs its places.
+                plumb_index::asked_state_first(&searched, &mut lifted);
                 if let Some(spelling) = &results.spelling {
+                    if let Some(site) = &spelling.site {
+                        plumb_index::suggested_site_second(&mut lifted, site);
+                    }
                     pages.list_suggested_page(spelling, &options, &mut placed)?;
                 }
                 pages.list_typed_page(&searched, &options, &mut placed)?;
