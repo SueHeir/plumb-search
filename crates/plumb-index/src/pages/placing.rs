@@ -338,12 +338,15 @@ pub(crate) fn only_meant(hit: &PageHit) -> bool {
 /// listed for a medical search, keeps its place. On a test node, nearly
 /// half the pages lifted to the first row were wrong (Khun Sa for "khob khun
 /// meaning Thai", Earplug for "earphone plug"), and queenonline.com and
-/// dailymail.co.uk were the answers they passed. Before the learned
-/// ranking it stays put: the model reads each row's place, so a page
-/// listed higher would move the sites below it too.
+/// dailymail.co.uk were the answers they passed. Lifted only to the
+/// second row, those found by meaning alone that stand out little from
+/// the pages near the query were still wrong twice as often as right, so
+/// these stay put ([`PageHit::unsure`]). Before the learned ranking it
+/// stays put too: the model reads each row's place, so a page listed
+/// higher would move the sites below it as well.
 pub(crate) fn meant_at(sites: &[crate::Hit], page: &PlacedPage) -> usize {
     let mut at = page.at.max(PARTIAL_AFTER).min(sites.len());
-    if page.hit.learned.is_none() {
+    if page.hit.learned.is_none() || page.hit.unsure {
         return at;
     }
     let matches_little = |site: &crate::Hit| {

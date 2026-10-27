@@ -441,7 +441,7 @@ impl PageSearcher {
         let inside = self.named_inside(&searcher, &words, &sharped, scope, &mut addresses)?;
         let linked = self.linked(
             &searcher,
-            &words,
+            &words[super::linking::address_start(query, &words)..],
             &sharped,
             &described,
             scope,
@@ -480,6 +480,7 @@ impl PageSearcher {
                         whole,
                         learned: None,
                         meant: false,
+                        unsure: false,
                     });
                 }
                 continue;
@@ -577,6 +578,7 @@ impl PageSearcher {
                 whole,
                 learned: None,
                 meant,
+                unsure: false,
             });
         }
         described_repos.name(&mut hits);

@@ -441,6 +441,12 @@ pub struct PageHit {
     /// by another reading of the query ("tylenol formula") is not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub meant: bool,
+    /// Found by meaning alone ([`PageSearcher::add_meant`]), though it
+    /// stands out little from the other pages near the query
+    /// ([`linking::MEANT_LIFT_GAP`]): it stays after [`PARTIAL_AFTER`] sites, where
+    /// [`meant_at`] would list it before those that barely match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsure: bool,
 }
 
 /// Where the learned ranking listed a page on its own.

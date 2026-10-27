@@ -649,6 +649,7 @@ fn sites_called_like_organizations_stay_first() {
             whole: false,
             learned: None,
             meant: false,
+            unsure: false,
         }],
     );
     assert_eq!(placed[0].at, 0);

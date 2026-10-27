@@ -497,6 +497,7 @@ mod tests {
             whole: false,
             learned: None,
             meant: false,
+            unsure: false,
         }
     }
 

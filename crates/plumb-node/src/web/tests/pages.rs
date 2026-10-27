@@ -305,6 +305,7 @@ fn papers_link_their_free_copy() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let mut out = String::new();
     render_page(
@@ -343,6 +344,7 @@ fn paper_dates_and_count_meanings_render_separately() {
         whole: true,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let mut out = String::new();
     render_page(&mut out, &hit, None);
@@ -486,6 +488,7 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let results = SearchResults {
         pages: vec![PlacedPage {
@@ -592,6 +595,7 @@ fn the_part_of_a_site_the_query_names_comes_first() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let youtube = hit(
         "youtube.com",

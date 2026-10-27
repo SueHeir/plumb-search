@@ -304,6 +304,7 @@ impl PageSearcher {
                 whole: true,
                 learned: None,
                 meant: false,
+                unsure: false,
             };
             best = Some((at.len(), hit));
         }
@@ -418,6 +419,7 @@ impl PageSearcher {
                     whole: false,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 };
                 // One placing would leave out is no use: one in another
                 // language, or a drug offered without a prescription.

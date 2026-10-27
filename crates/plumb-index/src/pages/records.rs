@@ -281,6 +281,7 @@ pub(crate) fn records_named(query: &str) -> Vec<PageHit> {
                     whole: false,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
             ));
         }

@@ -920,6 +920,7 @@ mod tests {
             whole: false,
             learned: None,
             meant: false,
+            unsure: false,
         }
     }
 
@@ -1343,6 +1344,7 @@ mod tests {
             whole,
             learned: None,
             meant: false,
+            unsure: false,
         };
         let order_of = |pages: Vec<PageHit>| {
             let mut hits = vec![
@@ -1586,6 +1588,7 @@ mod tests {
             whole: true,
             learned: None,
             meant: false,
+            unsure: false,
         };
         let mut placed = vec![PlacedPage {
             at: 0,
@@ -1621,6 +1624,7 @@ mod tests {
             whole: false,
             learned: None,
             meant: false,
+            unsure: false,
         };
         let led = |page: PageHit, official: bool| {
             let mut best = site("minecraft.net", 1.3, true);
@@ -1687,6 +1691,7 @@ mod tests {
             whole: true,
             learned: None,
             meant: false,
+            unsure: false,
         };
         let mut game = article("Red Dead Redemption 2", true);
         game.page.item = Some("Q20981587".into());
