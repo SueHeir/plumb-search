@@ -593,7 +593,8 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
 /// stays where placing put it, after [`crate::pages::PARTIAL_AFTER`]
 /// sites: the model reads each row's place in the list, so with one
 /// listed it moved the sites below it too ("calories in a shot" put
-/// davidprotein.com second).
+/// davidprotein.com second). Once the rows are in order, it comes before
+/// the sites just above it that barely match the query (`meant_at`).
 pub fn reorder_results(
     cfg: &crate::RankConfig,
     query: &str,
@@ -646,6 +647,7 @@ fn reorder_moving(
     // the pages under sites.
     for mut page in nearest {
         page.hit.learned = Some(learned_place(hits, page.at));
+        page.at = crate::pages::meant_at(hits, &page);
         let at = placed
             .iter()
             .position(|p| p.under.is_some() || p.at > page.at)
@@ -1515,6 +1517,31 @@ mod tests {
         );
         // One meant by part of the query is read as before.
         assert_ne!(order_of(None, vec![shot.clone()]).0, sites);
+        // Once the model has ordered the sites, it goes before those that
+        // barely match the query: a.com and b.com, after e.com there.
+        let mut hits = five();
+        for hit in &mut hits[..2] {
+            hit.missing_words = true;
+            hit.text_score = 0.2;
+            hit.query_evidence = Some(crate::CandidateEvidence {
+                partial_name_words: 0,
+                ..evidence(&hit.domain, 1)
+            });
+        }
+        let mut placed = place_pages(query, &hits, vec![shot.clone()]);
+        assert_eq!(placed[0].at, PARTIAL_AFTER);
+        reorder_moving(
+            &later_first,
+            query,
+            &mut hits,
+            &mut placed,
+            Moves::Rows,
+            Some(&url),
+        );
+        assert_eq!((hits[0].domain.as_str(), placed[0].at), ("e.com", 1));
+        // And it stays there when the results are placed again to be shown.
+        let again = place_pages(query, &hits, vec![placed[0].hit.clone()]);
+        assert_eq!(again[0].at, 1);
         // It keeps its place among the pages: before one listed later.
         let mut hits = five();
         let later = PlacedPage {

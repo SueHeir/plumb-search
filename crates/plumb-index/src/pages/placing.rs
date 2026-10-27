@@ -38,6 +38,11 @@ pub const DEMAND_MARGIN: f32 = 0.05;
 /// query does not name in full comes after an article the query names.
 pub const WEAK_SITE_MATCH: f32 = 0.5;
 
+/// The text match ([`crate::Hit::placing_text_score`]) below which a site
+/// that lacks some of the query's main words comes after a page only meant
+/// ([`meant_at`]).
+const MEANT_PAST_MATCH: f32 = 0.4;
+
 /// Most site results looked through by [`lift_named_sites`].
 const LIFTED_FROM: usize = 5;
 
@@ -313,9 +318,48 @@ pub(crate) fn is_record(hit: &PageHit) -> bool {
 }
 
 /// Whether `hit` was listed only for what the query means
-/// ([`PageHit::meant`]), and so goes after [`PARTIAL_AFTER`] sites.
+/// ([`PageHit::meant`]), and so goes after [`PARTIAL_AFTER`] sites, or
+/// where [`meant_at`] says.
 pub(crate) fn only_meant(hit: &PageHit) -> bool {
     hit.meant && !hit.named && !hit.whole
+}
+
+/// Where `page`, listed only for what the query means ([`only_meant`]),
+/// goes among `sites`: after [`PARTIAL_AFTER`] of them, or later where it
+/// is, but once the learned ranking has placed it
+/// ([`PageHit::learned`]), before the sites just above it that match the
+/// query only a little, though never before the first site. Such a site
+/// lacks some of the query's main words ([`crate::Hit::missing_words`]),
+/// no word or address of the query names it, it is no official site, and
+/// its text matches less than [`MEANT_PAST_MATCH`]: "the cricket and the
+/// ant" lists The Ant and the Grasshopper before acscricket.com, and
+/// "hamstring insertion point" Hamstring before triggerpoints.net. A site
+/// with nothing known of how it matches, such as a health authority
+/// listed for a medical search, keeps its place. On a test node, nearly
+/// half the pages lifted to the first row were wrong (Khun Sa for "khob khun
+/// meaning Thai", Earplug for "earphone plug"), and queenonline.com and
+/// dailymail.co.uk were the answers they passed. Before the learned
+/// ranking it stays put: the model reads each row's place, so a page
+/// listed higher would move the sites below it too.
+pub(crate) fn meant_at(sites: &[crate::Hit], page: &PlacedPage) -> usize {
+    let mut at = page.at.max(PARTIAL_AFTER).min(sites.len());
+    if page.hit.learned.is_none() {
+        return at;
+    }
+    let matches_little = |site: &crate::Hit| {
+        !site.named
+            && !site.official
+            && site.missing_words
+            && site
+                .query_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.partial_name_words == 0 && !evidence.typed_domain)
+            && site.placing_text_score.unwrap_or(site.text_score) < MEANT_PAST_MATCH
+    };
+    while at > 1 && matches_little(&sites[at - 1]) {
+        at -= 1;
+    }
+    at
 }
 
 /// Best sites of a query looked at for the site of a subpage found by its
@@ -670,7 +714,9 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
 /// put it ("taylor swift" wants the singer's article under
 /// taylorswift.com, then sites, then the album "Taylor Swift"), and so
-/// does a page only meant by part of the query ([`PageHit::meant`]); and,
+/// does a page only meant by part of the query ([`PageHit::meant`]),
+/// unless sites that barely match the query are just above it
+/// ([`meant_at`]); and,
 /// unless the query asks for them, podcasts come after the best site and
 /// the other pages listed on their own ("better call saul" wants amc.com
 /// and the article first).
@@ -686,8 +732,10 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         }
         if is_record(&page.hit) || code(page) {
             page.at = 0;
-        } else if namesake || only_meant(&page.hit) {
+        } else if namesake {
             page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
+        } else if only_meant(&page.hit) {
+            page.at = meant_at(sites, page);
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }

@@ -61,8 +61,8 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
         first("hamstring insertion point").as_deref(),
         Some("Hamstring")
     );
-    // Meant, not named, so listed after three sites whatever the learned
-    // ranking says.
+    // Meant, not named, so listed after up to three sites whatever the
+    // learned ranking says.
     assert!(s.search("hamstring insertion point", 5).unwrap()[0].meant);
     assert!(!s.search("hamstring", 5).unwrap()[0].meant);
     // Listed without the link, so it keeps its place.

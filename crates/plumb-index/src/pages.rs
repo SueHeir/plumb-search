@@ -54,8 +54,8 @@ pub use self::placing::{
     WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{
-    asked_as_question, is_record, is_year, kept_below, named_page_site, names_best_site_page,
-    only_meant,
+    asked_as_question, is_record, is_year, kept_below, meant_at, named_page_site,
+    names_best_site_page, only_meant,
 };
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
@@ -434,8 +434,9 @@ pub struct PageHit {
     /// Listed only for what a part of the query means
     /// ([`PageSearcher::linked`]), not found any other way: listed after
     /// [`PARTIAL_AFTER`] sites, wherever the learned ranking puts it, as
-    /// "cons of drinking coffee" is not about Cons. A page also named by
-    /// another reading of the query ("tylenol formula") is not.
+    /// "cons of drinking coffee" is not about Cons, but before those of
+    /// them that barely match the query ([`meant_at`]). A page also named
+    /// by another reading of the query ("tylenol formula") is not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub meant: bool,
 }
