@@ -39,12 +39,20 @@ pub fn load_tranco(path: &Path, limit: Option<usize>) -> Result<Vec<TrancoEntry>
         let mut archive = zip::ZipArchive::new(BufReader::new(file))
             .with_context(|| format!("reading zip archive {}", path.display()))?;
         let index = (0..archive.len())
-            .find(|&i| archive.name_for_index(i).is_some_and(is_csv_entry))
+            .find(|&i| {
+                archive
+                    .name_for_index(i)
+                    .is_some_and(|name| name.is_ok_and(|name| is_csv_entry(&name)))
+            })
             .with_context(|| format!("no .csv file inside {}", path.display()))?;
         let entry = archive
             .by_index(index)
             .with_context(|| format!("opening entry {index} of {}", path.display()))?;
-        debug!("reading {} from {}", entry.name(), path.display());
+        debug!(
+            "reading {} from {}",
+            entry.name().unwrap_or_default(),
+            path.display()
+        );
         read_tranco(BufReader::new(entry), limit)
     } else {
         read_tranco(open_maybe_gz(path)?, limit)
