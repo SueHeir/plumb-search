@@ -328,13 +328,17 @@ pub(crate) fn only_meant(hit: &PageHit) -> bool {
 /// goes among `sites`: after [`PARTIAL_AFTER`] of them, or later where it
 /// is, but once the learned ranking has placed it
 /// ([`PageHit::learned`]), before the sites just above it that match the
-/// query only a little. Such a site lacks some of the query's main words
-/// ([`crate::Hit::missing_words`]), no word of the query names it, and
+/// query only a little, though never before the first site. Such a site
+/// lacks some of the query's main words ([`crate::Hit::missing_words`]),
+/// no word or address of the query names it, it is no official site, and
 /// its text matches less than [`MEANT_PAST_MATCH`]: "the cricket and the
 /// ant" lists The Ant and the Grasshopper before acscricket.com, and
 /// "hamstring insertion point" Hamstring before triggerpoints.net. A site
 /// with nothing known of how it matches, such as a health authority
-/// listed for a medical search, keeps its place. Before the learned
+/// listed for a medical search, keeps its place. On a test node, nearly
+/// half the pages lifted to the first row were wrong (Khun Sa for "khob khun
+/// meaning Thai", Earplug for "earphone plug"), and queenonline.com and
+/// dailymail.co.uk were the answers they passed. Before the learned
 /// ranking it stays put: the model reads each row's place, so a page
 /// listed higher would move the sites below it too.
 pub(crate) fn meant_at(sites: &[crate::Hit], page: &PlacedPage) -> usize {
@@ -344,14 +348,15 @@ pub(crate) fn meant_at(sites: &[crate::Hit], page: &PlacedPage) -> usize {
     }
     let matches_little = |site: &crate::Hit| {
         !site.named
+            && !site.official
             && site.missing_words
             && site
                 .query_evidence
                 .as_ref()
-                .is_some_and(|evidence| evidence.partial_name_words == 0)
+                .is_some_and(|evidence| evidence.partial_name_words == 0 && !evidence.typed_domain)
             && site.placing_text_score.unwrap_or(site.text_score) < MEANT_PAST_MATCH
     };
-    while at > 0 && matches_little(&sites[at - 1]) {
+    while at > 1 && matches_little(&sites[at - 1]) {
         at -= 1;
     }
     at

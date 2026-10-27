@@ -324,8 +324,17 @@ fn a_page_only_meant_comes_before_the_sites_that_barely_match() {
         ..fable.clone()
     };
     assert_eq!(at(&sites, &found_by_words), PARTIAL_AFTER);
-    // A site that matches more, that a word of the query names, or with
-    // nothing known of how it matches keeps its place.
+    // Never before the first site, however little it matches.
+    let sites = [
+        barely("b.com"),
+        barely("c.com"),
+        barely("d.com"),
+        barely("e.com"),
+    ];
+    assert_eq!(at(&sites, &fable), 1);
+    // A site that matches more, that a word or the address of the query
+    // names, an official site, or one with nothing known of how it
+    // matches keeps its place.
     let matching = crate::Hit {
         text_score: 0.5,
         ..barely("cricket.example")
@@ -334,11 +343,19 @@ fn a_page_only_meant_comes_before_the_sites_that_barely_match() {
         text_score: 0.3,
         ..lacking_words("ant.example", 1, Some(0.2))
     };
+    let mut typed = barely("typed.example");
+    if let Some(evidence) = &mut typed.query_evidence {
+        evidence.typed_domain = true;
+    }
+    let official = crate::Hit {
+        official: true,
+        ..barely("official.example")
+    };
     let unknown = crate::Hit {
         query_evidence: None,
         ..barely("authority.example")
     };
-    for third in [matching, ant, unknown] {
+    for third in [matching, ant, typed, official, unknown] {
         let sites = [barely("b.com"), barely("c.com"), third, barely("e.com")];
         assert_eq!(at(&sites, &fable), PARTIAL_AFTER);
     }
