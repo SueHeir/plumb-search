@@ -179,6 +179,7 @@ impl PageSearcher {
                 whole: false,
                 learned: None,
                 meant: false,
+                unsure: false,
             },
         );
         Ok(())

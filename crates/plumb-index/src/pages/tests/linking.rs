@@ -96,6 +96,12 @@ fn a_part_of_the_query_is_not_linked_by_a_word_of_a_longer_name_or_a_last_word()
         ),
         article("Floor", "Bottom surface of a room", 30_000, &[]),
         article(
+            "World Wide Web",
+            "Documents one can access over the Internet",
+            90_000,
+            &["WWW"],
+        ),
+        article(
             "Maven (wrestler)",
             "American professional wrestler",
             50_000,
@@ -118,6 +124,16 @@ fn a_part_of_the_query_is_not_linked_by_a_word_of_a_longer_name_or_a_last_word()
     // of the query.
     assert!(!listed("how to fix a squeaky floor", "Squeaky Fromme"));
     assert!(!listed("maven central", "Maven (wrestler)"));
+    // The "www" a typed address starts with names no article, though the
+    // query says more of it ("access"); typed apart, it does.
+    let linked = |query: &str| {
+        s.search(query, 5)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.page.title == "World Wide Web" && hit.meant)
+    };
+    assert!(linked("www pearsonmylabs access code"));
+    assert!(!linked("www.pearsonmylabs.com access code"));
 }
 
 #[test]
@@ -170,6 +186,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let mut found = vec![found_by_words(0.5)];
     assert_eq!(s.add_meant("", &meant, &mut found).unwrap(), None);
@@ -269,6 +286,16 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     s.add_meant("", &[meant_page(&spooner.url, 0.7)], &mut found)
         .unwrap();
     assert_eq!(titles(&found), ["Ryan Spooner"]);
+    assert!(!found[0].unsure);
+    // Standing out little from the pages near the query, it is listed but
+    // marked, so it stays after three sites ("walkin tubs" to The Tubs).
+    let little = crate::MeantPage {
+        gap: 0.06,
+        ..meant_page(&spooner.url, 0.8)
+    };
+    let mut found = Vec::new();
+    s.add_meant("", &[little], &mut found).unwrap();
+    assert!(titles(&found) == ["Ryan Spooner"] && found[0].unsure);
     // Far from every site listed, it needs more: "www.supershuttle.com"
     // lists supershuttle.com, and was not super.com.
     let near_sites = |sites| crate::MeantPage {
@@ -295,6 +322,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let mut found = vec![flask()];
     s.add_meant("", &nearest, &mut found).unwrap();

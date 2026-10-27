@@ -156,6 +156,7 @@ fn found(title: &str, site: Option<&str>, named: bool, score: f32) -> PageHit {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     }
 }
 

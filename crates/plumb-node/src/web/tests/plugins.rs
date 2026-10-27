@@ -317,6 +317,7 @@ async fn a_songs_title_alone_runs_a_plugin_for_songs() {
             whole: false,
             learned: None,
             meant: false,
+            unsure: false,
         },
         under: None,
         at: 0,

@@ -324,6 +324,13 @@ fn a_page_only_meant_comes_before_the_sites_that_barely_match() {
         ..fable.clone()
     };
     assert_eq!(at(&sites, &found_by_words), PARTIAL_AFTER);
+    // Found by meaning but standing out little from the pages near the
+    // query, it stays after three sites too.
+    let unsure = PageHit {
+        unsure: true,
+        ..fable.clone()
+    };
+    assert_eq!(at(&sites, &unsure), PARTIAL_AFTER);
     // Never before the first site, however little it matches.
     let sites = [
         barely("b.com"),

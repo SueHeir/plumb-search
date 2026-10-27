@@ -136,6 +136,7 @@ fn answer_entity(title: &str, item: &str, description: &str) -> PageHit {
         popularity: 0.9,
         learned: None,
         meant: false,
+        unsure: false,
     }
 }
 
@@ -340,6 +341,7 @@ impl SearchBackend for BeastBackend {
                     whole: false,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
                 under: None,
                 at: 0,
@@ -411,6 +413,7 @@ fn an_article_the_query_names_gets_an_info_box() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let results = SearchResults {
         pages: vec![PlacedPage {

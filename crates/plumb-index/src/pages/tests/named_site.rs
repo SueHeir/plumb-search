@@ -100,6 +100,7 @@ fn the_page_a_search_names_with_its_site_goes_under_it() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     let census = [
         titled_site("census.gov", "Census.gov | U.S. Census Bureau Homepage"),
@@ -157,6 +158,7 @@ fn the_page_a_search_names_with_its_site_goes_under_it() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     assert_eq!(
         placed(&searcher, "who malaria vaccine", &who, &[vaccines]),
@@ -333,6 +335,7 @@ fn the_model_reads_a_site_as_it_did_without_its_own_page() {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     };
     clock.page.site = Some("census.gov".into());
     let census = titled_site("census.gov", "Census.gov | U.S. Census Bureau Homepage");
@@ -485,6 +488,7 @@ fn another_sites_page_comes_after_the_site_and_its_page_named() {
         whole: false,
         learned: Some(LearnedPlace::Before("who.int".into())),
         meant: false,
+        unsure: false,
     };
     let who = [titled_site("who.int", "World Health Organization (WHO)")];
     let place = |query: &str| {

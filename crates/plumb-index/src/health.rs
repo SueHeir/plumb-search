@@ -1413,6 +1413,7 @@ mod tests {
             whole: true,
             learned: None,
             meant: false,
+            unsure: false,
         };
         let offer = page(
             "https://quick-meds.info/viagra/",
@@ -1723,6 +1724,7 @@ mod tests {
                 whole: false,
                 learned: Some(LearnedPlace::Before("clevelandclinic.org".to_string())),
                 meant: false,
+                unsure: false,
             },
             at: 0,
             under: None,

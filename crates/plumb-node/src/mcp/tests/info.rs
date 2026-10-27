@@ -58,6 +58,7 @@ impl SearchBackend for Australia {
                     whole: true,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
                 under: None,
                 at: 0,

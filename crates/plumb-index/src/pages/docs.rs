@@ -271,6 +271,7 @@ impl PageSearcher {
                 whole,
                 learned: None,
                 meant: false,
+                unsure: false,
             });
         }
         self.unname_covered_parts(&mut hits, &parts, query);

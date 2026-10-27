@@ -1617,6 +1617,7 @@ impl PageSearcher {
                     popularity,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 });
             }
         }
@@ -2079,6 +2080,7 @@ impl PageSearcher {
                     popularity,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 }));
             }
         }

@@ -256,6 +256,7 @@ Each page row, in `pages` and in `assembled.rows`, gives the page as its item of
 | `whole` | Only when true: the search asks for this page alone, so it may come before the sites |
 | `learned` | Where the learned ranking listed it on its own: `{"before": "<domain>"}` or `"last"` |
 | `meant` | Only when true: listed only for what a part of the search means |
+| `unsure` | Only when true: found by meaning alone, though it stands out little from the pages near the search, so it stays after up to 3 sites |
 | `under` | The domain of the site result it is listed under |
 | `at` | Otherwise, the position of the site result it is listed before (after all of them when past the end) |
 

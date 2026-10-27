@@ -149,6 +149,8 @@ pub(crate) struct PageItem<'a> {
     learned: Option<&'a LearnedPlace>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     meant: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unsure: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     under: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +172,7 @@ impl<'a> PageItem<'a> {
             whole,
             learned,
             meant,
+            unsure,
         } = hit;
         let SetItem { item, set, .. } = SetItem::of_page(page);
         PageItem {
@@ -181,6 +184,7 @@ impl<'a> PageItem<'a> {
             whole: *whole,
             learned: learned.as_ref(),
             meant: *meant,
+            unsure: *unsure,
             under: None,
             at: None,
         }

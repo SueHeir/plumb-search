@@ -179,6 +179,7 @@ impl PageSearcher {
                     popularity,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
             ));
         }

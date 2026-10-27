@@ -238,6 +238,7 @@ impl Mcp {
                     whole: false,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
                 under: None,
                 at: if promote_package {

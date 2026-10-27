@@ -112,6 +112,7 @@ impl SearchBackend for Packages {
                     whole: false,
                     learned: None,
                     meant: false,
+                    unsure: false,
                 },
                 under: None,
                 at: 0,
@@ -141,6 +142,7 @@ fn shelved(page: Page) -> plumb_index::pages::PageHit {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     }
 }
 
@@ -201,6 +203,7 @@ fn article(title: &str, site: Option<&str>, website: Option<&str>) -> PlacedPage
             whole: true,
             learned: None,
             meant: false,
+            unsure: false,
         },
         under: None,
         at: 0,

@@ -85,6 +85,17 @@ const MEANT_SITES_TYPICAL: f32 = 0.72;
 /// [`MEANT_SITES_TYPICAL`] it must make up.
 const MEANT_SITES_SHARE: f32 = 0.5;
 
+/// How far above the tenth nearest of its file ([`MeantPage::gap`]) a page
+/// meaning lists must stand to come before the sites that barely match
+/// the query ([`super::meant_at`]); one standing out less stays after
+/// [`super::PARTIAL_AFTER`] sites ([`PageHit::unsure`]). Of the articles
+/// meaning listed second on a test node, read by hand, those standing out
+/// less were right 12 times and wrong 24 ("walkin tubs" to The Tubs,
+/// "khob khun meaning Thai" to Khun Sa), and the others right 15 times and
+/// wrong 4 ("pityrias rosea" to Pityriasis rosea). Articles a part of the
+/// query links to were right 32 times and wrong 13 there.
+pub(crate) const MEANT_LIFT_GAP: f32 = 0.08;
+
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
     /// each with its part, added to `addresses` when not found otherwise.
@@ -407,6 +418,7 @@ impl PageSearcher {
             let hit = PageHit {
                 score: hit.score.max(ENTITY_MATCH * weight(&hit)),
                 meant: true,
+                unsure: *gap < MEANT_LIFT_GAP,
                 ..hit
             };
             // An article goes before the pages words found only in part,
@@ -439,4 +451,20 @@ impl PageSearcher {
         let document: TantivyDocument = searcher.doc(address)?;
         self.read_page(&document)
     }
+}
+
+/// How many of the query's `words` to pass over before linking its parts:
+/// the scheme and "www" a typed address starts with name no article, so
+/// "www.pearsonmylabs.com access code" is not about the World Wide Web, nor
+/// "http://mymemphis.edu/" about HTTP. Without an address ("http caching"),
+/// they still link.
+pub(super) fn address_start(query: &str, words: &[String]) -> usize {
+    let query = query.trim_start().to_lowercase();
+    if !query.starts_with("www.") && !query.contains("://") {
+        return 0;
+    }
+    words
+        .iter()
+        .take_while(|word| matches!(word.as_str(), "http" | "https" | "www"))
+        .count()
 }

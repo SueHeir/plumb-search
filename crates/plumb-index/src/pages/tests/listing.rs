@@ -22,6 +22,7 @@ fn reference(url: &str, title: &str, score: f32) -> PageHit {
         whole: false,
         learned: None,
         meant: false,
+        unsure: false,
     }
 }
 
