@@ -17,11 +17,10 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
+use plumb_core::place::Place;
 use plumb_core::{adult_level, now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
-    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
-    options_allow, place_operator_pages, place_pages, site_pages_after_named_article, PageHit,
-    PageSearcher, OPERATOR_PAGES, WANTED_SET,
+    operators_allow, options_allow, Listing, PageHit, PageSearcher, WANTED_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -50,8 +49,6 @@ const LIST_CHANGES_EVERY: Duration = Duration::from_secs(0);
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a wait looks for shutdown.
 const TICK: Duration = Duration::from_millis(250);
-/// Pages looked at per search, before [`place_pages`] picks.
-const PAGES_PER_SEARCH: usize = 10;
 /// Eligible pages scored for typed search. Docs kind and host constraints
 /// narrow retrieval before its internal candidate windows.
 const KIND_PAGES: usize = 200;
@@ -1033,44 +1030,15 @@ impl Inner {
 }
 
 /// Whether the pages know the words of `query` that `spelling` changes
-/// ([`PageSearcher::check_spelling`]): then it was spelled as meant.
+/// ([`PageSearcher::knows_typed`]): then it was spelled as meant.
 pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Spelling) -> bool {
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return false;
     };
-    match searcher.check_spelling(query, spelling.clone()) {
-        Ok(checked) => checked.is_none_or(|checked| checked.query != spelling.query),
-        Err(err) => {
-            warn!("checking a spelling against pages: {err:#}");
-            false
-        }
-    }
-}
-
-/// `spelling`, suggested for `query`, when it is sure and its results are
-/// shown instead of `sites`, the sites found as typed
-/// ([`PageSearcher::sure_spelling`]): "ballrat" is Ballarat.
-pub(super) fn sure_spelling(
-    inner: &Inner,
-    query: &str,
-    options: &SearchOptions,
-    spelling: Option<&plumb_index::Spelling>,
-    sites: &[plumb_index::Hit],
-) -> Option<plumb_index::Spelling> {
-    let spelling = spelling?;
-    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
-    let options = &for_query(inner, options, query);
-    let searcher = searcher.in_language(options.language.as_deref());
-    let index = inner.current()?;
-    let words = index.backend().searcher();
-    let site_words = |word: &str| words.word_sites(word);
-    match searcher.sure_spelling(query, spelling, options, sites, &site_words) {
-        Ok(sure) => sure.then(|| spelling.clone()),
-        Err(err) => {
-            warn!("checking whether a spelling is sure: {err:#}");
-            None
-        }
-    }
+    searcher.knows_typed(query, spelling).unwrap_or_else(|err| {
+        warn!("checking a spelling against pages: {err:#}");
+        false
+    })
 }
 
 /// `options` with the language filter the sites' index gives `query`
@@ -1226,68 +1194,17 @@ pub(super) fn paper_coverage(inner: &Inner) -> Option<plumb_index::pages::PaperC
         .map(|(_, s)| s.paper_coverage().clone())
 }
 
-/// Checks `results`' spelling of `query` against the pages: the words they
-/// know are put back ([`PageSearcher::check_spelling`]), and words of
-/// things, not sites ("anubas", "budafest"), are spelled from the pages'
-/// names, which may stand in for the sites' spelling
-/// ([`PageSearcher::pick_spelling`]: "rooling in the deep"). Not when the
-/// results are for a spelling already, and only the check for a search as
-/// typed or one `spelled_right`.
-fn spell_with_pages(
-    inner: &Inner,
-    searcher: &PageSearcher,
-    query: &str,
-    options: &SearchOptions,
-    spelled_right: bool,
-    results: &mut SearchResults,
-) {
-    if results
-        .spelling
-        .as_ref()
-        .is_some_and(|spelling| spelling.applied)
-    {
-        return;
-    }
-    if let Some(spelling) = results.spelling.take() {
-        results.spelling = match searcher.check_spelling(query, spelling.clone()) {
-            Ok(checked) => checked,
-            Err(err) => {
-                warn!("checking a spelling against pages: {err:#}");
-                Some(spelling)
-            }
-        };
-    }
-    if spelled_right || options.exact {
-        return;
-    }
-    let Some(index) = inner.current() else {
-        return;
-    };
-    let sites = index.backend().searcher();
-    let site_words = |word: &str| sites.word_sites(word);
-    let picked = searcher
-        .suggest_spelling(query, sites.spelling_model(), &site_words)
-        .and_then(|by_pages| {
-            searcher.pick_spelling(query, results.spelling.clone(), by_pages, options)
-        });
-    match picked {
-        Ok(picked) => results.spelling = picked,
-        Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
-    }
-}
-
-/// Adds the pages found for `query` to `results`. When the results are for
-/// a spelling of it ([`plumb_index::Spelling::applied`]), the pages are
-/// for that spelling too.
+/// Adds the pages found for `query` to `results` ([`Listing::add_pages`]),
+/// and returns the spelling whose results to show instead when the pages
+/// are sure of it.
 pub(super) fn add_pages(
     inner: &Inner,
     query: &str,
     options: &SearchOptions,
     results: &mut SearchResults,
-) {
-    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
-        return;
-    };
+) -> Option<plumb_index::Spelling> {
+    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
+    let index = inner.current()?;
     // The pages found for this node's searches, when it looks for them,
     // and those its owner's AI apps asked for.
     let wanted = [
@@ -1296,202 +1213,40 @@ pub(super) fn add_pages(
             .flatten(),
         inner.asked_pages.searcher(),
     ];
-    let options = &for_query(inner, options, query);
-    let searcher = searcher.in_language(options.language.as_deref());
-    let wanted: Vec<PageSearcher> = wanted
-        .iter()
-        .flatten()
-        .map(|wanted| wanted.in_language(options.language.as_deref()))
-        .collect();
-    let ops = Operators::parse(query);
-    if ops.any() {
-        if ops.words.is_empty() {
-            return;
+    let more: Vec<&PageSearcher> = wanted.iter().flatten().map(|wanted| &**wanted).collect();
+    // Pages found for this node's searches come from anywhere on the web,
+    // not from sites picked by hand: they are checked as sites are, and
+    // against the adult blocklist as it is now.
+    let list = inner
+        .adult_list()
+        .filter(|_| options.safe != SafeSearch::Off);
+    let keep = |hit: &PageHit| {
+        if hit.page.set != WANTED_SET {
+            return true;
         }
-        // "asyncio site:docs.python.org" finds what "python asyncio" does
-        // there.
-        match searcher.search_naming_docs(&ops.words, &ops, false, OPERATOR_PAGES) {
-            Ok(mut found) => {
-                found.retain(|hit| options_allow(options, &hit.page));
-                results.pages = place_operator_pages(&ops, &results.hits, found);
-            }
-            Err(err) => warn!("searching pages: {err:#}"),
-        }
-        return;
-    }
-    let applied = results
-        .spelling
-        .as_ref()
-        .filter(|spelling| spelling.applied)
-        .map(|spelling| spelling.query.clone());
-    let query = applied.as_deref().unwrap_or(query);
-    match searcher.search(query, PAGES_PER_SEARCH) {
-        Ok(mut found) => {
-            if let Err(err) =
-                searcher.add_other_number(query, &results.hits, &mut found, PAGES_PER_SEARCH)
-            {
-                warn!("searching pages in the other number: {err:#}");
-            }
-            let meant = searcher
-                .add_meant(query, &results.meant, &mut found)
-                .unwrap_or_else(|err| {
-                    warn!("adding the page nearest in meaning: {err:#}");
-                    None
-                });
-            for wanted in &wanted {
-                add_wanted(wanted, query, &mut found);
-            }
-            found.retain(|hit| options_allow(options, &hit.page));
-            if let Some(index) = inner.current().filter(|_| inner.rank.add_named_site) {
-                add_named_site(&mut results.hits, &found, |domain| {
-                    index.backend().site(domain)
-                });
-            }
-            drop_far_namesakes(&mut results.hits, &found, inner.rank.meaning_only_relevance);
-            if inner.rank.drop_namesakes {
-                drop_namesakes_of_words(&mut results.hits, &found);
-            }
-            lift_named_sites(&mut results.hits, &found);
-            add_named_site_page(&searcher, &wanted, query, &results.hits, &mut found);
-            // Pages found for this node's searches come from anywhere on
-            // the web, not from sites picked by hand: they are checked as
-            // sites are, and against the adult blocklist as it is now.
-            let list = inner
-                .adult_list()
-                .filter(|_| options.safe != SafeSearch::Off);
-            let adult = |hit: &PageHit| {
-                if hit.page.set != WANTED_SET {
-                    return false;
-                }
-                let domain = registrable_domain(&hit.page.url).unwrap_or_default();
-                let texts = [hit.page.title.as_str()]
-                    .into_iter()
-                    .chain(hit.page.description.as_deref());
-                options.safe.hides(adult_level(&domain, texts))
-                    || list.as_ref().is_some_and(|list| list.contains(&domain))
-            };
-            found.retain(|hit| options_allow(options, &hit.page) && !adult(hit));
-            if let Err(err) = searcher.note_demand(&mut results.hits) {
-                warn!("reading what sites' articles are read: {err:#}");
-            }
-            let spelled_right = searcher.spelled_right(query, &found, results.spelling.as_ref());
-            if spelled_right && applied.is_none() {
-                results.spelling = None;
-            }
-            // A query that is a page's whole name is about what the page
-            // is, not a search inside a site its first word names:
-            // "virginia woolf" is not virginia.gov's search for "woolf",
-            // nor "the last of us" last.fm's.
-            if let Some(link) = &results.site_search {
-                if found
-                    .iter()
-                    .any(|hit| hit.named && hit.page.site.as_deref() != Some(link.domain.as_str()))
-                {
-                    results.site_search = None;
-                }
-            }
-            spell_with_pages(inner, &searcher, query, options, spelled_right, results);
-            results.pages = place_pages(query, &results.hits, found);
-            plumb_index::learned::reorder_results(
-                &inner.rank,
-                query,
-                results.sites_ordered,
-                meant.as_deref(),
-                &mut results.hits,
-                &mut results.pages,
-            );
-            after_learned_order(inner, &searcher, query, options, results);
-        }
-        Err(err) => warn!("searching pages: {err:#}"),
-    }
-}
-
-/// What [`add_pages`] does to `results` after the learned order, which
-/// knows nothing of states, towns, spelling or typed addresses.
-fn after_learned_order(
-    inner: &Inner,
-    searcher: &PageSearcher,
-    query: &str,
-    options: &SearchOptions,
-    results: &mut SearchResults,
-) {
-    // A county search that ends in its state lists that state's county
-    // before its namesakes elsewhere.
-    plumb_index::asked_state_first(query, &mut results.hits);
-    // And a search about a town lists the sites of its namesakes
-    // elsewhere last: "berlin wall memorial" is not Berlin, NH.
-    let town = |name: &str| {
-        super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
+        let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+        let texts = [hit.page.title.as_str()]
+            .into_iter()
+            .chain(hit.page.description.as_deref());
+        !options.safe.hides(adult_level(&domain, texts))
+            && !list.as_ref().is_some_and(|list| list.contains(&domain))
     };
-    plumb_index::namesakes_last(query, &mut results.hits, &town);
-    // The learned order knows nothing of spelling: the site a suggestion
-    // names stays second, and so does the page.
-    if let Some(spelling) = &results.spelling {
-        if let Some(site) = &spelling.site {
-            plumb_index::suggested_site_second(&mut results.hits, site);
-        }
-        if let Err(err) = searcher.list_suggested_page(spelling, options, &mut results.pages) {
-            warn!("listing the page a spelling names: {err:#}");
-        }
-    }
-    // Only shown, after the ranking, which weighs a site's own title.
-    if let Err(err) = searcher.title_untitled(&mut results.hits) {
-        warn!("titling sites from their articles: {err:#}");
-    }
-    // A pasted address is the page at it, whatever the ranking says.
-    if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
-        warn!("listing the page at a typed address: {err:#}");
-    }
-}
-
-/// Puts first in `found` the page of a site `query` names
-/// ([`PageSearcher::add_named_site_page`]): the page sets' when they have
-/// one, else the first of `wanted` that has one.
-fn add_named_site_page(
-    searcher: &PageSearcher,
-    wanted: &[PageSearcher],
-    query: &str,
-    sites: &[plumb_index::Hit],
-    found: &mut Vec<PageHit>,
-) {
-    let first = found.first().map(|hit| hit.page.url.clone());
-    if let Err(err) = searcher.add_named_site_page(query, sites, found) {
-        warn!("searching the pages of a site the query names: {err:#}");
-    }
-    for wanted in wanted {
-        if found.first().map(|hit| &hit.page.url) != first.as_ref() {
-            return;
-        }
-        if let Err(err) = wanted.add_named_site_page(query, sites, found) {
-            warn!("searching the wanted pages of a site the query names: {err:#}");
-        }
-    }
-}
-
-/// Most pages found for this node's searches ([`crate::wanted_pages`])
-/// that one search takes in.
-const WANTED_PER_SEARCH: usize = 3;
-
-/// Adds to `found` the pages found for this node's searches that `query`
-/// finds, best first among the page sets' by score: both are scored the
-/// same way, each set's popularity against its own most viewed page, and
-/// none goes above the article the query names.
-fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
-    match wanted.search(query, WANTED_PER_SEARCH) {
-        Ok(more) => {
-            let before = found.len();
-            for hit in more {
-                if !found.iter().any(|known| known.page.url == hit.page.url) {
-                    found.push(hit);
-                }
-            }
-            if found.len() > before {
-                site_pages_after_named_article(found);
-                found.sort_by(|a, b| b.score.total_cmp(&a.score));
-            }
-        }
-        Err(err) => warn!("searching the wanted pages: {err:#}"),
-    }
+    let town = |name: &str| super::places::locate(inner, name, None).filter(Place::is_town);
+    let listing = Listing {
+        sites: index.backend().searcher(),
+        pages: &searcher,
+        more: &more,
+        rank: &inner.rank,
+        learned_order: true,
+        keep: &keep,
+        town: &town,
+    };
+    listing
+        .add_pages(query, options, results)
+        .unwrap_or_else(|err| {
+            warn!("listing pages: {err:#}");
+            None
+        })
 }
 
 #[cfg(test)]

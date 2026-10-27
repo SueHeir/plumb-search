@@ -7,7 +7,7 @@ use axum::http::{header, Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use plumb_core::sites::SiteLine;
-use plumb_index::pages::{place_operator_pages, place_pages};
+use plumb_index::pages::{place_pages, place_shown};
 use plumb_index::{Hit, SearchResults, SiteSearch, Spelling};
 use serde::Serialize;
 use tracing::error;
@@ -149,19 +149,11 @@ pub(crate) async fn api_search(
                         .is_some_and(|node| node.blocks_adult(domain))
                 },
             );
-            let placed = if plumb_core::Operators::parse(&query).any() {
-                place_operator_pages(
-                    &plumb_core::Operators::parse(&query),
-                    &results.hits,
-                    results.pages.iter().map(|p| p.hit.clone()).collect(),
-                )
-            } else {
-                place_pages(
-                    &query,
-                    &results.hits,
-                    results.pages.iter().map(|p| p.hit.clone()).collect(),
-                )
-            };
+            let placed = place_shown(
+                &query,
+                &results.hits,
+                results.pages.iter().map(|p| p.hit.clone()).collect(),
+            );
             let assembled = crate::assembly::Assembled {
                 rows: crate::assembly::ordered_rows(&results.hits, &placed, params.limit()),
                 places: places.clone(),

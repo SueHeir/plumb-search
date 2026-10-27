@@ -595,14 +595,18 @@ pub struct EvalArgs {
     /// below this fraction, e.g. 0.9.
     #[arg(long, value_name = "F", value_parser = parse_fraction)]
     pub min_top1: Option<f64>,
-    /// Home country of the searches, a two-letter code such as US
-    /// [default: none].
-    #[arg(long, value_name = "CODE", value_parser = parse_country)]
-    pub country: Option<String>,
-    /// Only sites in this language, a code such as en, as the search
-    /// page's language setting does [default: any].
-    #[arg(long, value_name = "CODE", value_parser = parse_language)]
-    pub lang: Option<String>,
+    /// Home country of the searches, a two-letter code such as DE, or
+    /// `any` for none. US is what a node picks for a search that names
+    /// none, on a computer that names no region.
+    #[arg(long, value_name = "CODE", default_value = plumb_node::country::DEFAULT_COUNTRY,
+        value_parser = |text: &str| any_or(text, parse_country))]
+    pub country: String,
+    /// Only sites in this language, a code such as de, or `any` for all,
+    /// as the search page's language setting does. en is what a node
+    /// picks for a browser that names no language.
+    #[arg(long, value_name = "CODE", default_value = plumb_node::web::DEFAULT_LANGUAGE,
+        value_parser = |text: &str| any_or(text, parse_language))]
+    pub lang: String,
     /// Search for each query without suggesting a spelling.
     #[arg(long, conflicts_with = "follow_suggestions")]
     pub exact: bool,
@@ -628,6 +632,11 @@ pub struct EvalArgs {
     #[arg(long, value_name = "PERCENT", default_value_t = 100,
         value_parser = clap::value_parser!(u8).range(0..=100))]
     pub site_grades_percent: u8,
+    /// The adult blocklist a node's safe search leaves out (its
+    /// `DATA/safe/adult-domains.txt`): its sites are left out after
+    /// ranking, as on a node.
+    #[arg(long, value_name = "FILE")]
+    pub adult_sites: Option<PathBuf>,
     /// For each miss, also show how the first site and the expected one
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
@@ -677,6 +686,30 @@ pub struct EvalArgs {
     pub half: Option<Half>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+}
+
+/// What `--country any` and `--lang any` read as.
+const ANY: &str = "any";
+
+impl EvalArgs {
+    /// The searches' home country ([`EvalArgs::country`]): none for `any`.
+    pub fn country(&self) -> Option<String> {
+        (self.country != ANY).then(|| self.country.clone())
+    }
+
+    /// The searches' language filter ([`EvalArgs::lang`]): none for `any`.
+    pub fn language(&self) -> Option<String> {
+        (self.lang != ANY).then(|| self.lang.clone())
+    }
+}
+
+/// `any`, or what `parse` reads from `text`.
+fn any_or(text: &str, parse: fn(&str) -> Result<String, String>) -> Result<String, String> {
+    if text.trim().eq_ignore_ascii_case(ANY) {
+        Ok(ANY.to_string())
+    } else {
+        parse(text)
+    }
 }
 
 /// A half of a queries file, for `plumb-tools eval --half`.

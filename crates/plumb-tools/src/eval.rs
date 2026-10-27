@@ -21,7 +21,7 @@ use std::path::Path;
 
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
-    Page, PageSearcher, PlacedPage,
+    place_shown, Listing, Page, PageSearcher, PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -231,6 +231,8 @@ struct Setup {
     pages: Option<PageSearcher>,
     /// With --site-grades, the grades that push sites down.
     grades: Option<plumb_index::grades::SiteGrades>,
+    /// With --adult-sites, the sites a node's safe search leaves out.
+    adult: Option<plumb_node::node::adult::AdultList>,
     /// With --recall, the address of every page in the page sets.
     page_urls: HashSet<String>,
     /// Holds the page index while it is searched, when it is not kept in
@@ -357,11 +359,19 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
         ),
         None => None,
     };
+    let adult = match &args.adult_sites {
+        Some(file) => Some(
+            plumb_node::node::adult::read(file)
+                .with_context(|| format!("reading the adult sites in {}", file.display()))?,
+        ),
+        None => None,
+    };
     Ok(Setup {
         searcher,
         meaning,
         pages,
         grades,
+        adult,
         page_urls,
         _pages_dir: pages_dir,
     })
@@ -444,8 +454,9 @@ fn recall(
     ranks: &[Option<usize>],
 ) -> Result<Vec<Stage>> {
     let options = SearchOptions {
-        country: args.country.clone(),
+        country: args.country(),
         exact: args.exact,
+        language: args.language(),
         ..SearchOptions::default()
     };
     let mut stages = Vec::with_capacity(queries.len());
@@ -705,36 +716,48 @@ mod pages_cache {
     }
 }
 
-/// How many more sites a search ranks for the site grades to push out,
-/// as a node does.
-fn grades_margin(args: &EvalArgs, setup: &Setup) -> usize {
-    match &setup.grades {
+/// How many more sites a search ranks for the site grades to push out and
+/// the adult blocklist to leave out, as a node does.
+fn margin(args: &EvalArgs, setup: &Setup) -> usize {
+    let grades = match &setup.grades {
         Some(grades) if args.site_grades_percent > 0 && !grades.is_empty() => {
             plumb_index::grades::MARGIN
         }
         _ => 0,
-    }
+    };
+    let adult = match setup.adult {
+        Some(_) => plumb_node::node::adult::MARGIN,
+        None => 0,
+    };
+    grades + adult
 }
 
-/// `results` with the site grades applied, as a node applies them, cut to
-/// the first `limit`. Without grades they are as they came.
-fn graded(
+/// `results` as a node keeps them: with the site grades applied and the
+/// adult blocklist's sites left out, cut to the first `limit`. Without
+/// either they are as they came.
+fn kept(
     args: &EvalArgs,
     setup: &Setup,
     query: &str,
     mut results: plumb_index::SearchResults,
     limit: usize,
 ) -> plumb_index::SearchResults {
+    if setup.grades.is_none() && setup.adult.is_none() {
+        return results;
+    }
     if let Some(grades) = &setup.grades {
         let percent = args.site_grades_percent;
         plumb_index::grades::demote(grades, percent, query, &mut results.hits);
-        results.hits.truncate(limit);
     }
+    if let Some(adult) = &setup.adult {
+        results.hits.retain(|hit| !adult.contains(&hit.domain));
+    }
+    results.hits.truncate(limit);
     results
 }
 
-/// The first `limit` sites for `query`, graded as a node grades the
-/// searches behind its answers.
+/// The first `limit` sites for `query`, kept as a node keeps the searches
+/// behind its answers.
 fn lookup_sites(
     args: &EvalArgs,
     setup: &Setup,
@@ -743,11 +766,11 @@ fn lookup_sites(
     cfg: &plumb_index::RankConfig,
     options: &SearchOptions,
 ) -> Result<plumb_index::SearchResults> {
-    let wanted = limit + grades_margin(args, setup);
+    let wanted = limit + margin(args, setup);
     let found = setup
         .searcher
         .search_meaning(query, wanted, cfg, options, None)?;
-    Ok(graded(args, setup, query, found, limit))
+    Ok(kept(args, setup, query, found, limit))
 }
 
 /// The rank each query's expected answer was found at, within
@@ -776,8 +799,9 @@ fn evaluate(
     };
     // --features-out writes the hand-made order of sites the site model
     // is trained to improve, as it does the rows (below).
+    let learned_order = features.is_none();
     let search_cfg = plumb_index::RankConfig {
-        learned_sites: cfg.learned_sites && features.is_none(),
+        learned_sites: cfg.learned_sites && learned_order,
         ..*cfg
     };
 
@@ -788,21 +812,18 @@ fn evaluate(
             continue;
         }
         let options = SearchOptions {
-            country: args.country.clone(),
+            country: args.country(),
             only_country: false,
             exact: args.exact,
-            language: args.lang.clone(),
+            language: args.language(),
             ..SearchOptions::default()
         };
         let search = |query: &str, options: &SearchOptions| {
-            // "food near me" searches sites for "food", as a node does.
-            let query =
-                &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
             let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
             let results = searcher
                 .search_meaning(
                     query,
-                    fetched + grades_margin(args, setup),
+                    fetched + margin(args, setup),
                     &search_cfg,
                     options,
                     query_meaning
@@ -810,163 +831,139 @@ fn evaluate(
                         .map(|m| m as &dyn plumb_index::Meaning),
                 )
                 .with_context(|| format!("searching for {query:?}"));
-            results.map(|results| (graded(args, setup, query, results, fetched), query_meaning))
+            results.map(|results| (kept(args, setup, query, results, fetched), query_meaning))
         };
-        let (mut results, mut query_meaning) = search(&q.query, &options)?;
-        // As a node with pages does (`add_pages`): a query that names a
-        // page is spelled right, the words the pages know are put back in a
-        // suggestion ("pkce" is not "pace"), and words of things, not
-        // sites, are corrected from the pages' names ("anubas"), which may
-        // stand in for the sites' spelling ("rooling in the deep").
-        let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
-        let site_words = |word: &str| searcher.word_sites(word);
-        if !args.exact && !applied {
-            if let Some(pages) = pages.as_ref() {
-                let found = pages.search(&q.query, 10)?;
-                let spelled_right =
-                    pages.spelled_right(&q.query, &found, results.spelling.as_ref());
-                results.spelling = match results.spelling.take() {
-                    Some(spelling) if !spelled_right => pages.check_spelling(&q.query, spelling)?,
-                    _ => None,
-                };
-                if !spelled_right {
-                    let by_pages =
-                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_words)?;
-                    let by_sites = results.spelling.take();
-                    results.spelling =
-                        pages.pick_spelling(&q.query, by_sites, by_pages, &options)?;
+        // The sites found for `query` and, as a node lists them, the pages,
+        // with the spelling whose results to show instead when the pages
+        // are sure of it.
+        let list = |query: &str, options: &SearchOptions| {
+            // "food near me" searches for "food", as a node does.
+            let query =
+                &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
+            let (mut results, mut query_meaning) = search(query, options)?;
+            let Some(pages) = pages.as_ref() else {
+                return anyhow::Ok((results, query_meaning, None));
+            };
+            // Results shown for a spelling are for what was typed after
+            // all when the pages know the words typed.
+            if let Some(spelling) = results.spelling.as_ref().filter(|s| s.applied) {
+                if pages.knows_typed(query, spelling)? {
+                    let exact = SearchOptions {
+                        exact: true,
+                        ..options.clone()
+                    };
+                    (results, query_meaning) = search(query, &exact)?;
                 }
             }
-        }
-        let mut searched = q.query.clone();
+            let listing = Listing {
+                sites: searcher,
+                pages,
+                more: &[],
+                rank: cfg,
+                learned_order,
+                keep: &|_| true,
+                town: &|_| None,
+            };
+            let sure = listing.add_pages(query, options, &mut results)?;
+            Ok((results, query_meaning, sure))
+        };
         // As a node does, a sure spelling's results are shown, searched as
         // spelled ("ballrat").
-        let mut sure = false;
-        if let (Some(pages), Some(spelling)) = (pages.as_ref(), results.spelling.clone()) {
-            if pages.sure_spelling(&q.query, &spelling, &options, &results.hits, &site_words)? {
-                sure = true;
-                searched.clone_from(&spelling.query);
-                let as_spelled = SearchOptions {
-                    exact: true,
-                    ..options.clone()
-                };
-                (results, query_meaning) = search(&searched, &as_spelled)?;
-                results.spelling = Some(plumb_index::Spelling {
-                    applied: true,
-                    ..spelling
-                });
-            }
-        }
+        let shown = |query: &str| {
+            let (results, query_meaning, sure) = list(query, &options)?;
+            let Some(spelling) = sure else {
+                return anyhow::Ok((results, query_meaning, false));
+            };
+            let as_spelled = SearchOptions {
+                exact: true,
+                ..options.clone()
+            };
+            let (mut results, query_meaning, _) = list(&spelling.query, &as_spelled)?;
+            results.spelling = Some(plumb_index::Spelling {
+                applied: true,
+                ..spelling
+            });
+            Ok((results, query_meaning, true))
+        };
+        // What a node is asked: the query, or what one click on "Did you
+        // mean" asks with --follow-suggestions.
+        let mut asked = q.query.clone();
+        let (mut results, mut query_meaning, sure) = shown(&asked)?;
         if verbose && args.show_suggestions {
             if let Some(spelling) = &results.spelling {
                 let shown = if spelling.applied { " (shown)" } else { "" };
                 println!("suggests: {:?} -> {:?}{shown}", q.query, spelling.query);
             }
         }
-        // What one click on "Did you mean" finds.
         if args.follow_suggestions && !sure {
             if let Some(spelling) = results.spelling.take() {
-                searched = spelling.query;
-                (results, query_meaning) = search(&searched, &options)?;
+                asked = spelling.query;
+                (results, query_meaning, _) = shown(&asked)?;
             }
         }
-        let mut hits = results.hits;
+        let near_me = plumb_index::places::without_near_me(&asked);
+        // What the rows were ranked for, as the learned order reads it: the
+        // spelling shown, or what was asked without "near me".
+        let ranked = match results.spelling.as_ref().filter(|s| s.applied) {
+            Some(spelling) => spelling.query.clone(),
+            None => near_me.clone().unwrap_or_else(|| asked.clone()),
+        };
+        if near_me.is_some() {
+            plumb_index::places::said_first(&mut results.hits);
+        }
         // The sites that serve a tool or a quick fact come first, as a
-        // node lists them.
-        let route =
-            plumb_node::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
-        if pages.is_none() {
-            match &route {
-                Some(route) => {
-                    plumb_node::sources::lead_with(&mut hits, &mut [], route, |domain| {
-                        searcher.site(domain).ok().flatten()
-                    })
-                }
-                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut [], &|word| {
-                    searcher.is_common_word(word)
-                }),
-            }
-        }
+        // node's answers list them: for an answer to what was asked, or else
+        // to its spelling ("weather in sacremento").
+        let spelling = results.spelling.as_ref();
+        let answer = answer_kind(&asked).or_else(|| spelling.and_then(|s| answer_kind(&s.query)));
+        plumb_node::sources::route_sources(
+            &asked,
+            answer,
+            options.country.as_deref(),
+            &mut results,
+            args.limit,
+            |domain| searcher.site(domain).ok().flatten(),
+            |word| searcher.is_common_word(word),
+        );
+        let hits = &results.hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
         // With pages, what each listed position holds (pages count as rows).
         let mut listed = None;
+        let closeness = |domain: &str| {
+            query_meaning
+                .as_ref()
+                .and_then(|meaning| meaning.closeness(domain))
+        };
         let deep_rank = match &pages {
             None => {
                 if let Some(features) = features.as_deref_mut() {
-                    let closeness = |domain: &str| {
-                        query_meaning
-                            .as_ref()
-                            .and_then(|meaning| meaning.closeness(domain))
-                    };
-                    features.push(feature_rows(q, &searched, &hits, &[], &closeness));
+                    features.push(feature_rows(q, &ranked, hits, &[], &closeness));
                 }
                 rank_of(&domains, &q.expected)
             }
             Some(pages) => {
-                let mut found = pages
-                    .search(&searched, 10)
-                    .with_context(|| format!("searching pages for {searched:?}"))?;
-                pages.add_other_number(&searched, &hits, &mut found, 10)?;
-                let meant = pages.add_meant(&searched, &results.meant, &mut found)?;
-                let mut lifted = hits.clone();
-                if cfg.add_named_site {
-                    add_named_site(&mut lifted, &found, |domain| {
-                        searcher.site(domain).ok().flatten()
-                    });
-                }
-                drop_far_namesakes(&mut lifted, &found, cfg.meaning_only_relevance);
-                if cfg.drop_namesakes {
-                    drop_namesakes_of_words(&mut lifted, &found);
-                }
-                lift_named_sites(&mut lifted, &found);
-                pages.add_named_site_page(&searched, &lifted, &mut found)?;
-                pages.note_demand(&mut lifted)?;
-                let mut placed = place_pages(&searched, &lifted, found);
-                // --features-out writes the hand-made order the learned
-                // ranking is trained to improve.
-                if features.is_none() {
-                    plumb_index::learned::reorder_results(
-                        cfg,
-                        &searched,
-                        results.sites_ordered,
-                        meant.as_deref(),
-                        &mut lifted,
-                        &mut placed,
-                    );
-                }
-                if let Some(spelling) = &results.spelling {
-                    pages.list_suggested_page(spelling, &options, &mut placed)?;
-                }
-                pages.list_typed_page(&searched, &options, &mut placed)?;
-                match &route {
-                    Some(route) => {
-                        plumb_node::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
-                            searcher.site(domain).ok().flatten()
-                        })
+                let mut placed = std::mem::take(&mut results.pages);
+                match features.as_deref_mut() {
+                    // --features-out writes the hand-made order the learned
+                    // ranking is trained to improve.
+                    Some(features) => {
+                        features.push(feature_rows(q, &ranked, hits, &placed, &closeness))
                     }
-                    None => plumb_index::health::sources_lead(
-                        &searched,
-                        &mut lifted,
-                        &mut placed,
-                        &|word| searcher.is_common_word(word),
-                    ),
-                }
-                if let Some(features) = features.as_deref_mut() {
-                    let closeness = |domain: &str| {
-                        query_meaning
-                            .as_ref()
-                            .and_then(|meaning| meaning.closeness(domain))
-                    };
-                    features.push(feature_rows(q, &searched, &lifted, &placed, &closeness));
+                    // A node's answers place the pages again from their
+                    // hits, for what it was asked.
+                    None => {
+                        let found = placed.into_iter().map(|page| page.hit).collect();
+                        placed = place_shown(&asked, hits, found);
+                    }
                 }
                 let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
                     None
                 } else {
-                    profile_shown(args, &searched, setup, cfg, pages)?
+                    profile_shown(args, &asked, setup, cfg, pages)?
                 };
-                let mut rows = listed_with_pages(&lifted, placed);
+                let mut rows = listed_with_pages(hits, placed);
                 // The profile asked for ("bohemian rhapsody lyrics") is
                 // shown above the results.
                 if let Some(url) = profile {
@@ -998,11 +995,6 @@ fn evaluate(
         if verbose && rank != Some(1) {
             println!("{}", format_miss(q, rank, first.as_deref(), args.limit));
             if args.explain {
-                let closeness = |domain: &str| {
-                    query_meaning
-                        .as_ref()
-                        .and_then(|meaning| meaning.closeness(domain))
-                };
                 let shown = [Some(1), deep_rank];
                 for rank in shown.into_iter().flatten() {
                     // A listed position is a site's domain or a page's address.
@@ -1236,8 +1228,8 @@ fn profile_shown(
     pages: &PageSearcher,
 ) -> Result<Option<String>> {
     let options = SearchOptions {
-        country: args.country.clone(),
-        language: args.lang.clone(),
+        country: args.country(),
+        language: args.language(),
         ..SearchOptions::default()
     };
     use plumb_node::web::answers::{self, EntityResolution};
@@ -1280,9 +1272,9 @@ fn fact_rank(
     let answer = match (&asked, pages) {
         (Some(asked), Some(pages)) => {
             let options = SearchOptions {
-                country: args.country.clone(),
+                country: args.country(),
                 exact: true,
-                language: args.lang.clone(),
+                language: args.language(),
                 ..SearchOptions::default()
             };
             let mut sites = lookup_sites(args, setup, &asked.subject, 5, cfg, &options)?;

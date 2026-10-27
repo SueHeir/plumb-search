@@ -1096,6 +1096,19 @@ pub fn place_operator_pages(
         .collect()
 }
 
+/// Where `pages` go among `sites` when results are shown: placed again
+/// from their hits as the learned ranking left them ([`PageHit::learned`]),
+/// by [`place_operator_pages`] when `query` has search operators, else
+/// [`place_pages`]. A node's answers and the evals both place them so.
+pub fn place_shown(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let ops = Operators::parse(query);
+    if ops.any() {
+        place_operator_pages(&ops, sites, pages)
+    } else {
+        place_pages(query, sites, pages)
+    }
+}
+
 /// Normalized form of `text` as page keys compare it, for tests and tools.
 pub fn page_key(text: &str) -> String {
     normalize_text(text).replace(' ', "")

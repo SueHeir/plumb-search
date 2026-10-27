@@ -198,7 +198,7 @@ impl Mcp {
             let place = self.backend.locate(&town, options.country.as_deref())?;
             crate::web::answers::time_in_place(&place)
         });
-        crate::assembly::route_sources(
+        crate::sources::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
             options.country.as_deref(),
@@ -221,13 +221,7 @@ impl Mcp {
             .map(|p| p.hit.clone())
             .partition(|hit| !promote_package && hit.page.package.is_some());
         let operators = plumb_core::Operators::parse(query);
-        let place = |pages| {
-            if operators.any() {
-                place_operator_pages(&operators, &results.hits, pages)
-            } else {
-                place_pages(query, &results.hits, pages)
-            }
-        };
+        let place = |pages| place_shown(query, &results.hits, pages);
         let mut placed = place(found_pages);
         for page in place(supplementary) {
             let at = placed.iter().position(|p| p.at >= page.at);

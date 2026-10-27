@@ -106,7 +106,7 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
-mod adult;
+pub mod adult;
 pub mod backup;
 pub mod control;
 mod denylist;
@@ -2435,13 +2435,11 @@ impl Inner {
         }
         self.drop_denied(&mut results);
         results.hits.truncate(limit);
-        let typed = results.hits.clone();
-        pages::add_pages(self, query, options, &mut results);
+        let sure = pages::add_pages(self, query, options, &mut results);
         self.drop_denied(&mut results);
         // A sure slip of what a page is named shows the spelling's results,
         // searched as spelled: "ballrat" is Ballarat.
-        let spelling = results.spelling.as_ref();
-        if let Some(spelling) = pages::sure_spelling(self, query, options, spelling, &typed) {
+        if let Some(spelling) = sure {
             let as_spelled = SearchOptions {
                 exact: true,
                 ..options.clone()

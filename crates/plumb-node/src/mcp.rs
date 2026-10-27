@@ -50,8 +50,7 @@ use plumb_answer::Rates;
 use plumb_core::{domain_label, host_of, registrable_domain, search_template_for, truncate_chars};
 use plumb_crawl::{PageReader, ReadConfig};
 use plumb_index::pages::{
-    docs_query_topic, docs_symbol_matches, place_operator_pages, place_pages, Page, PlacedPage,
-    WIKIDATA_SET,
+    docs_query_topic, docs_symbol_matches, place_pages, place_shown, Page, PlacedPage, WIKIDATA_SET,
 };
 use plumb_index::{
     without_intent_words, Hit, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,

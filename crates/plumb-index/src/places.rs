@@ -438,6 +438,17 @@ pub fn without_near_me(query: &str) -> Option<String> {
     Some(words.join(" "))
 }
 
+/// Puts the sites that say what they are (a title) or are official first,
+/// for a search "near me": "handyman near me" asks for someone to call, and
+/// a bare handyman.nl, named by the word but saying nothing, goes after
+/// them.
+pub fn said_first(hits: &mut Vec<crate::Hit>) {
+    let (said, bare): (Vec<crate::Hit>, Vec<crate::Hit>) = std::mem::take(hits)
+        .into_iter()
+        .partition(|hit| hit.title.is_some() || hit.official);
+    *hits = said.into_iter().chain(bare).collect();
+}
+
 /// A place found, and how far it is from where the search looked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaceHit {

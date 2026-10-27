@@ -123,7 +123,7 @@ pub(crate) fn error_settings(
 
 /// The language filter of a search that names none, when the browser's
 /// first language is not one the settings gear offers.
-const DEFAULT_LANGUAGE: &str = "en";
+pub const DEFAULT_LANGUAGE: &str = "en";
 
 /// The language filter of a search that names none: the first language of
 /// the browser's `Accept-Language` when the settings gear offers it

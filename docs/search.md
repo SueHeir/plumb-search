@@ -193,7 +193,7 @@ The node backend, `search_with_rank` in [node.rs](../crates/plumb-node/src/node.
 
 1. **Network popularity.** In the network, the node ranks at least 20 sites (`POPULARITY_CANDIDATES`) and adds `PopularityTable::bonus`: up to 0.15 (`MAX_POPULARITY_BONUS`) for the site picked most for the query, in proportion for others. The table comes from anonymous reports nodes share; see [Network](network.md).
 2. **Blocklists.** With safe search on, sites on the adult blocklist are dropped; sites on the node's denylist are dropped for everyone. The node ranks 10 more sites for each list in use (`adult::MARGIN`, `denylist::MARGIN`) so the page stays full.
-3. **Pages.** `add_pages` in [node/pages.rs](../crates/plumb-node/src/node/pages.rs) searches the page sets (Wikipedia articles, Stack Overflow questions, packages, papers and more; see [Page sets](pages.md)) and places pages among the sites. It runs only on a node with a page index.
+3. **Pages.** `add_pages` in [node/pages.rs](../crates/plumb-node/src/node/pages.rs) searches the page sets (Wikipedia articles, Stack Overflow questions, packages, papers and more; see [Page sets](pages.md)) and places pages among the sites, through `Listing` in [pages/listing.rs](../crates/plumb-index/src/pages/listing.rs), which `plumb-tools eval` lists them with too. It runs only on a node with a page index.
 
 Pages are found by name: their title, aliases and the other titles that lead to them. Questions, papers, docs, reference and subpages pages are also found by most of the words of their title, tags and description (`QUESTION_SHARE`), and Wikipedia articles by the words of their description and lead (`LEAD_MATCH`). Pages are scored by how well the query names them and how much they are read ([pages.rs](../crates/plumb-index/src/pages.rs)):
 
@@ -249,7 +249,7 @@ Once the backend returns sites and placed pages, the web layer adds what a searc
 | Profile | [web/answers.rs](../crates/plumb-node/src/web/answers.rs) | an official profile asked for ("mrbeast youtube"), or a song's lyrics page |
 | Plugins | [plugins.rs](../crates/plumb-node/src/plugins.rs) | the node's plugins run with the query and what it is about, and may note or hide results; see [Plugins](plugins.md) |
 | Network results | [web/network.rs](../crates/plumb-node/src/web/network.rs) | with `net=1`: the query's buckets from other nodes, ranked in a temporary index with this node's ranking |
-| Tool sources | `route_sources` in [assembly.rs](../crates/plumb-node/src/assembly.rs), [sources.rs](../crates/plumb-node/src/sources.rs) | for "weather", "20 usd to eur", "define ephemeral": sites that do the job go first; otherwise a health source the query names leads |
+| Tool sources | `route_sources` in [sources.rs](../crates/plumb-node/src/sources.rs) | for "weather", "20 usd to eur", "define ephemeral": sites that do the job go first; otherwise a health source the query names leads |
 | Places | `places` and `local_first` in [assembly.rs](../crates/plumb-node/src/assembly.rs) | for queries that say where: up to 8 places (`MAX_PLACES`), and their own sites first among the results; see [Places](places.md) |
 | Info box | `info_box` in [web/answers.rs](../crates/plumb-node/src/web/answers.rs) | the article the query is clearly about, or the article of the official site it names |
 | Recent | `recent` in [assembly.rs](../crates/plumb-node/src/assembly.rs) | headlines from the news feeds, at most 5; see [News](news.md) |
@@ -308,7 +308,7 @@ plumb-tools eval --index DIR --queries eval/brand_queries.tsv \
 | `--report FILE --eval-time UNIX` | a reproducible JSONL report of every query, to compare runs |
 | `--features-out FILE` | rows for `train-rank` |
 
-The eval runs the node's pipeline in [eval.rs](../crates/plumb-tools/src/eval.rs): the site search, then the page steps and the learned order. It has no places, network popularity, blocklists or personal signals, and skips the town and county steps. When you change a step both run, change both, or the eval measures something the node does not serve.
+The eval runs the node's pipeline in [eval.rs](../crates/plumb-tools/src/eval.rs): the site search, then the pages, the learned order and what follows it through the node's own `Listing`, then the tool sources and the pages placed again as a node's answers place them. It searches as from the US in English unless told otherwise, and leaves out a node's adult blocklist with `--adult-sites`. It has no places, network popularity, denylist or personal signals, and so skips the town step. A step a node runs outside `Listing` and the answers' own steps need the same change in the eval, or the eval measures something the node does not serve.
 
 The private search in the browser ranks a few hundred sites with its own copy of the formula and constants in [plumb-private's rank.rs](../crates/plumb-private/src/rank.rs), checked against plumb-index by tests. A change to the formula or its defaults needs the same change there; see [Private search](private-search.md).
 

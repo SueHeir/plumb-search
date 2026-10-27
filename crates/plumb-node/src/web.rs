@@ -115,6 +115,7 @@ use self::network::network_page;
 #[cfg(test)]
 pub(crate) use self::network::{rank_found, take_found};
 pub use self::panel::ADD_TO_FIREFOX_PATH;
+pub use self::params::DEFAULT_LANGUAGE;
 use self::params::{flag, SearchParams};
 use self::search::{
     extras, place_sites, route_sources, run_places, run_search, search_about, search_page,

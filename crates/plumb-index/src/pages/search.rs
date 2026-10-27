@@ -1017,6 +1017,14 @@ impl PageSearcher {
         }))
     }
 
+    /// Whether the pages know the words of `query` that `spelling` changes
+    /// ([`PageSearcher::check_spelling`]): then it was spelled as meant, and
+    /// results shown for the spelling are for what was typed after all.
+    pub fn knows_typed(&self, query: &str, spelling: &crate::Spelling) -> Result<bool> {
+        let checked = self.check_spelling(query, spelling.clone())?;
+        Ok(checked.is_none_or(|checked| checked.query != spelling.query))
+    }
+
     /// The key `query` names pages by. A sharp after a letter is read out
     /// ([`analysis::page_joined_analyzer`]) when a page is named so: "c#"
     /// is C Sharp. Otherwise it is left out, as before: with no page on J

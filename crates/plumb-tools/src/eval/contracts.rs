@@ -466,12 +466,8 @@ fn observe(
 ) -> Result<Value> {
     let start = Instant::now();
     let options = SearchOptions {
-        country: case
-            .options
-            .country
-            .clone()
-            .or_else(|| args.country.clone()),
-        language: case.options.language.clone().or_else(|| args.lang.clone()),
+        country: case.options.country.clone().or_else(|| args.country()),
+        language: case.options.language.clone().or_else(|| args.language()),
         exact: case.options.exact || args.exact,
         only_country: case.options.only_country,
         ..SearchOptions::default()
@@ -491,12 +487,12 @@ fn observe(
     let semantic = meaning.as_ref().map(|m| m as &dyn Meaning);
     let found = setup.searcher.search_meaning(
         &query,
-        args.limit + super::grades_margin(args, setup),
+        args.limit + super::margin(args, setup),
         cfg,
         &options,
         semantic,
     )?;
-    let mut found = super::graded(args, setup, &query, found, args.limit);
+    let mut found = super::kept(args, setup, &query, found, args.limit);
     let paper = plumb_core::paper_query::PaperQuery::parse(&query)?;
     let typed = case
         .options

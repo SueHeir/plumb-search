@@ -695,6 +695,31 @@ fn government(text: &str, country: Option<&str>) -> Option<Route> {
     })
 }
 
+/// Lists first in `results` the sources a search for `query` is routed
+/// to ([`route`]), as a node's answers list them, or else the source a
+/// health search names, whatever the learned order did. A search with
+/// operators keeps its order.
+pub fn route_sources(
+    query: &str,
+    answer: Option<Kind>,
+    country: Option<&str>,
+    results: &mut plumb_index::SearchResults,
+    limit: usize,
+    site: impl Fn(&str) -> Option<Hit>,
+    common: impl Fn(&str) -> bool,
+) {
+    if plumb_core::Operators::parse(query).any() {
+        return;
+    }
+    let Some(route) = route(query, answer, country) else {
+        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages, &common);
+        return;
+    };
+    let keep = results.hits.len().max(limit);
+    lead_with(&mut results.hits, &mut results.pages, &route, site);
+    results.hits.truncate(keep);
+}
+
 /// Lists `route`'s sources first among `hits`, below a first site the
 /// query names in full, each as the index has it (`site` looks one up) or
 /// moved up from further down. Sources the index lacks are left out. The
