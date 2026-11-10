@@ -99,7 +99,7 @@ After a compact baseline, prioritize the user-visible work as follows. The numbe
 | Lookalike detection lacks verified cross-domain affiliation | `check_lookalike` searches a registrable domain and names, then compares it to better-known domains without an affiliation graph | Legitimate alternate domains need evidence; an unknown same-brand domain must not be accepted by resemblance alone. |
 | Quality controls already exist | `health.rs` moves health authorities; `is_pill_shop` demotes some low-link-score drug domains | Extend and measure these controls; do not add a second disconnected health whitelist. |
 
-Source paths above are relative to `crates/`. Existing `plumb eval --recall` already distinguishes missing index content, retrieval losses, and placement losses. Extend it instead of building a competing evaluator.
+Source paths above are relative to `crates/`. Existing `plumb-tools eval --recall` already distinguishes missing index content, retrieval losses, and placement losses. Extend it instead of building a competing evaluator.
 
 ## Delivery order
 
@@ -129,7 +129,7 @@ Dependencies above apply to the full deliverables. Short typed-docs retrieval in
 
 ## Change 1 Establish a reproducible baseline
 
-Extend `plumb-node/src/eval.rs`, `eval_labels.rs`, `cli.rs`, and `eval/README.md`. Reuse current TSV suites and `--recall`. Add a richer JSONL acceptance format for query options, relevant URLs, explicitly irrelevant domains, expected result type, dates, and cases where abstaining is correct. Keep current TSV behavior compatible.
+Extend `plumb-tools/src/eval.rs`, `eval_labels.rs`, `cli.rs`, and `eval/README.md`. Reuse current TSV suites and `--recall`. Add a richer JSONL acceptance format for query options, relevant URLs, explicitly irrelevant domains, expected result type, dates, and cases where abstaining is correct. Keep current TSV behavior compatible.
 
 Create two sets: the known audit regressions for development, and an independently written acceptance set with at least 40 query families and 200 total queries across navigation, ambiguous words, troubleshooting, practical questions, facts, research, dates, languages, and places. Assign paraphrases of the same family to the same split. Existing query-hash splits remain valid for old suites; a new family split prevents nearby paraphrases from leaking across the new suites. Do not train on the acceptance set.
 
