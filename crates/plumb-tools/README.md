@@ -181,6 +181,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training |
 | [eval/contracts.rs](src/eval/contracts.rs) | `eval --report`: JSONL contracts and reproducible reports |
 | [eval/rerank.rs](src/eval/rerank.rs) | A cross-encoder second pass, for `eval --rerank-model` |
+| [eval/candidates.rs](src/eval/candidates.rs) | `eval --candidates-out`: each query's deep site candidates and their raw signals, for trying first stages offline |
 | [eval_labels.rs](src/eval_labels.rs) | `check-labels` |
 | [train_rank.rs](src/train_rank.rs), [train_rank/learn.rs](src/train_rank/learn.rs) | `train-rank`: LambdaMART trees, or a small neural ranker (`--learner net`) |
 | [storage.rs](src/storage.rs), [dead_sites.rs](src/dead_sites.rs), [top_sites.rs](src/top_sites.rs) | Read-only looks at a node's data and records |
@@ -192,6 +193,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [page_items.rs](src/page_items.rs) | Today's page sets written as items of the data format |
 | [site_rules.rs](src/site_rules.rs) | Site rules beyond the built-in lists, and the hosts a rules set would move |
 | [relations.rs](src/relations.rs), [relations/maps.rs](src/relations/maps.rs) | `relations`, `relate` |
+| [test_sites.rs](src/test_sites.rs) | Sites in every form a records file holds them, for the tests of the commands that read and write records |
 | [embed_pages.rs](src/embed_pages.rs) | `embed-pages`, `page-meaning`: page vectors keyed by URL, and how often the page a search wants is among the nearest |
 | [pir/](src/pir/mod.rs) | The table a private information retrieval server would answer from |
 
