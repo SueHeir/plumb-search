@@ -206,7 +206,7 @@ Everything the node keeps is under `--data DIR`, and only one node may use a fol
 
 [The plumb-node README](../crates/plumb-node/README.md#the-data-folder) lists every file and folder.
 
-**Backups.** The panel's Backup section saves what cannot be downloaded again (settings, features, remote control files, the network key and crawl credits) as one JSON file in `DIR/backups/`, keeps the last 10, and lets you download or restore one. A restore finishes when the node starts again. Sites, indexes and seed files are left out; a node rebuilds them.
+**Backups.** The panel's Backup section saves what cannot be downloaded again (settings, features, the site grades your AI apps gave, remote control files, the network key and crawl credits) as one JSON file in `DIR/backups/`, keeps the last 10, and lets you download or restore one. A restore finishes when the node starts again. Sites, indexes and seed files are left out; a node rebuilds them.
 
 To copy a whole node, stop it and copy the folder. A folder copied or moved to a new path starts with the network off, even when its `features.json` says on, unless you give `--network`. With it, the copy joins as the same node (the log warns); delete `net/node.key` in the copy to make a separate one.
 

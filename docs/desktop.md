@@ -147,7 +147,7 @@ The app has no proxy setting and fetches homepages directly, so on a network tha
 
 **Features.** Feature changes (the network, search by meaning) are saved in `features.json` and apply when the node starts: use **Restart to apply** in the banner, which restarts the node without quitting the app. Closing the window does not apply them.
 
-**Backups** hold what cannot be downloaded again: the settings, the node's network identity and crawl credits, and the remote control files. Sites and the index are left out, since the node rebuilds them. The newest 10 are kept in `backups/` in the data folder. Restoring first saves the current files as a backup marked `before-restore`, then restarts the node. Backups hold the node's keys, so keep them private.
+**Backups** hold what cannot be downloaded again: the settings, the site grades your AI apps gave, the node's network identity and crawl credits, and the remote control files. Sites and the index are left out, since the node rebuilds them. The newest 10 are kept in `backups/` in the data folder. Restoring first saves the current files as a backup marked `before-restore`, then restarts the node. Backups hold the node's keys, so keep them private.
 
 ## Control your other nodes
 

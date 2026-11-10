@@ -1,6 +1,6 @@
-//! Backups of what cannot be downloaded again: the settings, the node's
-//! identity in the network and its crawl credits, and the remote control
-//! files. Sites, the index and seed downloads are left out: a node rebuilds
+//! Backups of what cannot be downloaded again: the settings, the grades
+//! the owner's AI apps gave sites, the node's identity in the network and
+//! its crawl credits, and the remote control files. Sites, the index and seed downloads are left out: a node rebuilds
 //! them by itself.
 //!
 //! A backup is one JSON file, kept in `DIR/backups/` (readable by its owner
@@ -34,9 +34,10 @@ const FORMAT: &str = "plumb-backup/1";
 
 /// The files a backup holds, relative to the data directory, with what
 /// each is, for the panel.
-pub const FILES: [(&str, &str); 9] = [
+pub const FILES: [(&str, &str); 10] = [
     ("settings.json", "Crawling and limit settings"),
     ("features.json", "Feature settings"),
+    (super::grades::OWN_GRADES_FILE, "Your site grades"),
     ("remote-control.json", "Remote control token"),
     ("remote-nodes.json", "Nodes this app controls"),
     ("net/node.key", "Network identity (node key)"),
@@ -275,13 +276,18 @@ mod tests {
         std::fs::create_dir_all(from.path().join("net")).unwrap();
         std::fs::write(from.path().join("net/node.key"), [1u8, 2, 3, 255]).unwrap();
         std::fs::write(from.path().join("records.jsonl"), "{}").unwrap();
+        std::fs::write(from.path().join("site-grades.json"), "{}").unwrap();
         let saved = save(from.path(), None).unwrap();
         assert_eq!(list(from.path())[0], saved);
         let bytes = std::fs::read(path_of(from.path(), &saved.name).unwrap()).unwrap();
         let backup = Backup::parse(&bytes).unwrap();
         assert_eq!(
             backup.contents(),
-            ["Crawling and limit settings", "Network identity (node key)"]
+            [
+                "Crawling and limit settings",
+                "Your site grades",
+                "Network identity (node key)"
+            ]
         );
 
         let to = tempfile::tempdir().unwrap();
@@ -291,6 +297,7 @@ mod tests {
             [1u8, 2, 3, 255]
         );
         assert!(to.path().join("settings.json").is_file());
+        assert!(to.path().join("site-grades.json").is_file());
         assert!(!to.path().join("records.jsonl").exists());
         #[cfg(unix)]
         {

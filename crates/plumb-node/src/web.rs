@@ -91,6 +91,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -153,6 +154,11 @@ pub fn query_text(text: &str) -> String {
 const CONTENT_SECURITY_POLICY: &str =
     "default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
      form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+/// Largest backup the panel takes as an upload. axum's default of 2 MB
+/// would refuse one holding many site grades: a backup holds files
+/// hex-encoded, at twice their size.
+const MAX_BACKUP_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// How long a network search waits for other nodes to answer.
 const NETWORK_SEARCH_WAIT: Duration = Duration::from_secs(4);
@@ -415,7 +421,10 @@ fn app(state: AppState) -> Router {
             .route("/app/retry", post(panel::retry))
             .route("/app/backup", post(panel::backup))
             .route("/app/backups/restore", post(panel::restore_saved))
-            .route("/app/restore", post(panel::restore_upload))
+            .route(
+                "/app/restore",
+                post(panel::restore_upload).layer(DefaultBodyLimit::max(MAX_BACKUP_UPLOAD_BYTES)),
+            )
             .route("/app/backups/{name}", get(panel::download_backup))
             .route("/app/restart", post(panel::restart))
             .route("/app/remote-control", post(panel::save_remote_control))

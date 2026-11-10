@@ -1199,6 +1199,28 @@ async fn saved_restore_requires_confirmation_before_changing_anything() {
         assert_eq!(app.clone().oneshot(upload).await.unwrap().status(), StatusCode::BAD_REQUEST);
         assert_eq!(*node.restored.lock().unwrap(), 0);
     }
+    // A confirmed upload past axum's default 2 MB, as a backup holding many
+    // site grades comes out, is restored.
+    let mut big = backup::Backup::make(dir.path()).unwrap();
+    big.files
+        .insert("site-grades.json".into(), "20".repeat(1_500_000));
+    let mut data = b"--test\r\nContent-Disposition: form-data; name=\"confirm\"\r\n\r\nyes\r\n--test\r\nContent-Disposition: form-data; name=\"backup\"; filename=\"backup.json\"\r\n\r\n".to_vec();
+    data.extend(serde_json::to_vec(&big).unwrap());
+    data.extend(b"\r\n--test--\r\n");
+    assert!(data.len() > 2 * 1024 * 1024);
+    let mut upload = Request::post("/app/restore")
+        .header(header::HOST, "127.0.0.1:7586")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=test")
+        .body(Body::from(data))
+        .unwrap();
+    upload.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:50000".parse::<SocketAddr>().unwrap(),
+    ));
+    assert_eq!(
+        app.clone().oneshot(upload).await.unwrap().status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(*node.restored.lock().unwrap(), 1);
     let response = post(
         app,
         "/app/backups/restore",
@@ -1208,7 +1230,7 @@ async fn saved_restore_requires_confirmation_before_changing_anything() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(*node.restored.lock().unwrap(), 1);
+    assert_eq!(*node.restored.lock().unwrap(), 2);
 }
 #[test]
 fn remote_panels_never_offer_an_unrouted_restart() {

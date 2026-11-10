@@ -33,8 +33,8 @@ use tracing::{info, warn};
 
 use super::Inner;
 
-/// Where the owner's own grades are kept.
-const OWN_GRADES_FILE: &str = "site-grades.json";
+/// Where the owner's own grades are kept; panel backups hold the file.
+pub(super) const OWN_GRADES_FILE: &str = "site-grades.json";
 /// Most sites the owner's apps grade.
 const MAX_OWN_GRADES: usize = 10_000;
 /// Longest reason kept with a grade, in characters, as MCP tools take
