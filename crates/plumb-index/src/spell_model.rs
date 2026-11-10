@@ -14,7 +14,11 @@
 //!   `ll -> l`, `ie -> ei`. A rule's probability is how often its letters
 //!   were typed that way, among all the times they were meant. A typo then
 //!   costs what its edits cost: a doubled letter dropped is cheap, a first
-//!   letter changed is dear.
+//!   letter changed is dear. Two letters swapped are also read as one rule
+//!   for any swap ([`ANY_TURN`]): a swap is only ever counted under its own
+//!   two letters, so without it most swaps would cost as much as an edit
+//!   never seen, and "telsa" would read as a slip of "tulsa", whose `u` the
+//!   rules know as often typed `e`, rather than of "tesla".
 //! - **A word-pair model** over the sites' names, titles, link texts and
 //!   descriptions: in how many sites each word and each pair of
 //!   neighbouring words is found. Scored with Stupid Backoff, it says how
@@ -113,6 +117,11 @@ impl WordList {
         low
     }
 }
+
+/// The rule for two neighbouring letters typed the other way round,
+/// whatever they are, read alongside the rule for those two letters. Its
+/// characters are none a word is read with, so no word's rule is it.
+const ANY_TURN: (&str, &str) = ("<>", "><");
 
 /// Substring rules of the error model, (meant, typed), each with
 /// `P(typed | meant)`.
@@ -561,7 +570,10 @@ fn rules(marked: &[char], edit: &Edit) -> Vec<(String, String)> {
             (s(at - 1..at), format!("{}{typed}", m[at - 1])),
             (s(at..at + 1), format!("{typed}{}", m[at])),
         ],
-        Edit::Turn { at } => vec![(s(at..at + 2), format!("{}{}", m[at + 1], m[at]))],
+        Edit::Turn { at } => vec![
+            (s(at..at + 2), format!("{}{}", m[at + 1], m[at])),
+            (ANY_TURN.0.to_string(), ANY_TURN.1.to_string()),
+        ],
     }
 }
 
@@ -768,7 +780,10 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
                 *substrings.entry(pair).or_insert(0) += docs;
             }
         }
-        letters += docs * term.chars().count() as u64;
+        let chars = term.chars().count() as u64;
+        letters += docs * chars;
+        // Any two neighbouring letters can be swapped.
+        *substrings.entry(ANY_TURN.0.to_string()).or_insert(0) += docs * (chars - 1);
         meant.push((term.chars().collect(), docs));
     })?;
     let mut by_deletion: Vec<(u64, u32)> = Vec::new();
@@ -887,7 +902,10 @@ mod tests {
             rules_of("allstate", "alstate"),
             [vec![pair("al", "a"), pair("ll", "l")]]
         );
-        assert_eq!(rules_of("visa", "vias"), [vec![pair("sa", "as")]]);
+        assert_eq!(
+            rules_of("visa", "vias"),
+            [vec![pair("sa", "as"), pair("<>", "><")]]
+        );
         assert_eq!(
             rules_of("hertz", "herts"),
             [vec![pair("z", "s"), pair("tz", "ts"), pair("z$", "s$")]]

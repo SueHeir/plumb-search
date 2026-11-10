@@ -385,6 +385,63 @@ fn a_likelier_slip_beats_a_well_known_name() {
 }
 
 #[test]
+fn a_swap_of_letters_no_pair_shows_is_still_a_likely_slip() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "tesla.com",
+        Some("Tesla"),
+        None,
+        &["Tesla"],
+        &[],
+        popular(300, 30_000),
+    ));
+    // "tulsa" is the commoner word, and the sites teach that `u` is often
+    // typed `e`. They show swaps more often, but each of other letters.
+    let titles = [
+        ("Tulsa plumbing", 120),
+        ("Hunter gear", 25),
+        ("Henter gear", 2),
+        ("Lumber yard", 25),
+        ("Lember yard", 2),
+        ("Murphy pubs", 25),
+        ("Merphy pubs", 2),
+        ("Garden tools", 25),
+        ("Gadren tools", 2),
+        ("Market stalls", 25),
+        ("Makret stalls", 2),
+        ("Window cleaning", 25),
+        ("Widnow cleaning", 2),
+        ("Bridge club", 25),
+        ("Brigde club", 2),
+        ("Doctor visits", 25),
+        ("Doctro visits", 2),
+        ("Planet maps", 25),
+        ("Plaent maps", 2),
+    ];
+    let mut n = 0;
+    for (title, count) in titles {
+        for i in 0..count {
+            n += 1;
+            records.push(site(
+                &format!("swap{n}.com"),
+                Some(&format!("{title} {i}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + n, 5),
+            ));
+        }
+    }
+    let (_dir, searcher) = build(&records);
+    let model = searcher.spelling_model().expect("a spelling model");
+    let swapped = model.ln_channel("telsa", "tesla");
+    let changed = model.ln_channel("telsa", "tulsa");
+    assert!(swapped > changed, "{swapped} > {changed}");
+    let results = search_spelled(&searcher, "telsa");
+    assert_eq!(suggestion(&results), suggested("tesla"));
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
