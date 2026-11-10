@@ -148,6 +148,12 @@ const GAMBLING_WORDS: &[&str] = &[
     "pkv games",
     "sbobet",
     "slot88",
+    // "Won't lose" and "can't be blocked by Nawala", Indonesia's DNS
+    // filter: "CITAWIN : Lapak Login Anti Rungkad ... Link kebal nawala",
+    // a GitHub page that "github" listed.
+    "anti rungkad",
+    "anti nawala",
+    "kebal nawala",
     // Portuguese, Spanish and Turkish.
     "apostas",
     "cassino online",

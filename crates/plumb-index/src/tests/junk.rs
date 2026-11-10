@@ -213,6 +213,8 @@ fn gambling_sites_are_told_by_their_words() {
         "สล็อตเว็บตรง เว็บแท้ 2026 เช็กเปอร์เซ็นต์ RTP",
         "MAMBA196 | Pusat Game Slot Online Resmi Dan Terpercaya",
         "杜拜娯樂城",
+        "CITAWIN : Lapak Login Anti Rungkad Spesialis Cuan Paus Jepe Harian · GitHub",
+        "Login CITAWIN sekarang! Link kebal nawala, depo QRIS 10k paling sat-set",
     ] {
         assert!(is_gambling([Some(text)]), "{text:?}");
     }
