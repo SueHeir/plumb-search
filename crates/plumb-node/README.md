@@ -72,6 +72,7 @@ flowchart LR
 | [web/api.rs](src/web/api.rs), [searxng.rs](src/web/searxng.rs), [backend.rs](src/web/backend.rs) | JSON API, SearXNG-format results; the `SearchBackend` and `StatusSource` traits |
 | [web/panel.rs](src/web/panel.rs), [panel/](src/web/panel/view.rs), [setup.rs](src/web/setup.rs), [control.rs](src/web/control.rs), [nodes.rs](src/web/nodes.rs) | The panel at `/app`; the remote control API; controlling other nodes |
 | [web/private.rs](src/web/private.rs), [relay.rs](src/web/relay.rs) | Private search page and buckets; relaying sealed bucket requests |
+| [web/plugins.rs](src/web/plugins.rs), [plugin_results.rs](src/web/plugin_results.rs), [go.rs](src/web/go.rs) | Plugins' results, offers, buttons and notes on a results page and their lookups for a page; opening a result and blocking a site |
 | [web/history.rs](src/web/history.rs), [link.rs](src/web/link.rs), [tune.rs](src/web/tune.rs), [welcome.rs](src/web/welcome.rs) | History, link codes, tuning and About you pages |
 | [web/html.rs](src/web/html.rs), [home.rs](src/web/home.rs), [params.rs](src/web/params.rs) | Page frame, escaping, links; home and setup pages; search parameters |
 | [mcp.rs](src/mcp.rs), [mcp/](src/mcp/tools.rs), [web/mcp.rs](src/web/mcp.rs) | The MCP server and its tools, including those that improve search for the node's owner ([mcp/manage.rs](src/mcp/manage.rs)); `POST /mcp`; `plumb mcp` over stdio |
