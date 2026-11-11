@@ -2,12 +2,29 @@
 
 ## Unreleased
 
+### Search
+
+- A misspelled search shows the results of its spelling when the spelling is sure, with "Showing results for" in place of "Did you mean": each word it changes is one no page knows or is named by and fewer than 20 sites have, no site found as typed is named by the search or by that word (or by its plural or singular), and the spelling names a page. "abrahm" now lists Abraham's results, where it listed rulesforrebels.info first. A one-word search of fewer than seven letters, and a word typed with letters English does not use ("Edlén equation"), stay as typed, and their spelling is only suggested.
+- A word no page and no site has ("rhinoplasy", "thorocentesis") is read as a slip of the likeliest near word of the page titles, so it gets a suggestion.
+- The page titles' spelling is taken over the sites' when it names a page and is closer to what was typed, so "interupt" means interrupt rather than internet, and "rooling in the deep" Rolling in the Deep.
+- "goodread" no longer shows goodyear's results, and a garbled word ("aaae") gets no suggestion.
+- An article found only by meaning comes before the sites just above it that barely match (no word of the search names them, they lack some of its main words and match its text weakly): "fleur de leaf" lists Fleur-de-lis above the florists. It never passes the first site, an official site or the site whose address was typed, and it stays after three sites when it stands out little from the other pages meaning finds.
+- The "www", "http" or "https" a typed address starts with no longer links an article ("www.pearsonmylabs.com access code" is not about the World Wide Web).
+- In a medical search, public and clinical health sites' pages come before other sites' pages, and no other site's page is listed above a source the search names.
+
+### Page sets
+
+- The reference set's fetcher makes up for pages that fail with the next ones picked, leaves a site after 100 refusals in a row, follows links on a site whose sitemaps list nothing, and keeps a site's pages when no more than one request in 20 failed, where one failure set the whole site aside.
+- Reference pages are written without their headings or passages, as they are listed only for words of their title; the best sites' subpages keep both. A reference page on a best site needs a word of the search besides the site's name.
+- A reference site can name paths the set leaves out: uscis.gov's archive, news, outreach and website reports are out. WebMD, Healthline, eMedicineHealth, unitconverters.net and support.apple.com are no longer fetched, and the set takes only BabyCenter's sections and history.com's articles and topics.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
 - Such a node can go back to 0.4.0, which reads either form, but not to 0.3.1, which can't read the new lines.
 - An AI app on the node's own computer can improve its search for the person who runs it: the MCP prompt `improve_search` has it search their topics, fetch the pages good sources have that the node lacks, and report the junk it sees. Three new MCP tools do the changing: `fetch_pages` (the node looks through a site for pages about some words and keeps what it finds for a year, in `DIR/asked`), `focus_topics` (the panel's focus topics) and `node_tuning` (what earlier runs asked). `--mcp-manage` offers them to clients on other computers. See [docs/mcp.md](docs/mcp.md#improving-search-for-you).
 - A fourth, `grade_site`, lets such an app grade a site spam or of little use for the node alone, or lift the project's grade of it with `ok`. The grades are kept in `DIR/site-grades.json`, take the place of the `plumb/site-grades` set's for the sites they name, and count as far as the panel's Site grades setting says.
+- `improve_search` no longer spares an official site whose organization is a scam or whose site is parked, for sale or dead, and lists the sites it spares in its report.
 - The page index keeps each page as its item in Plumb's data format, with the set it came from, and is built from items: a page set held as a signed item set goes in as it is, and a page set's file is read as items as the index is built. Search results don't change. Every node builds its page index again at its first start, and searches the old one meanwhile. On a test of 1.5 million pages the build took about 17% longer, used about 4% more memory at its peak, and the index came out about 6% bigger.
 
 ### The JSON API
@@ -23,6 +40,7 @@
 
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
 - `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
+- `plumb-tools eval` lists a search's pages through the same steps as a node (`Listing` in plumb-index), where it kept a copy that had drifted, and searches as from the US in English, as a node does by default. Its rows now match what a node serves.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
 
 ## 0.4.0
