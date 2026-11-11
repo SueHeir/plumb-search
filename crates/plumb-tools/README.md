@@ -226,6 +226,8 @@ cargo test -p plumb-tools
 | `eval::tests::repository_query_files_are_valid` | Every `eval/*.tsv` suite and `fixtures/brand_queries.tsv` parses and is labeled the way results are keyed |
 | `cli::tests::definitions_are_consistent` | The clap definitions hold together |
 
+The tests of the commands that read and write records files share their sites through `test_sites.rs`: one site in each form a records file can hold it.
+
 **The conventions test.** [tests/conventions.rs](tests/conventions.rs) reads the source of the crates `plumb` is built from (not tests, comments or strings) and counts what [CLAUDE.md](../../CLAUDE.md#how-node-code-is-written) asks node code to avoid:
 
 | Count | What it is |
