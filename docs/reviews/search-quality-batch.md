@@ -4,7 +4,7 @@ The user requested parallel implementation chats using GPT-6.1 Sol with extra-hi
 
 Integration branch: `codex/search-quality-batch-20261009`.
 Pinned implementation base: `e33582cd8e30c5c288629b58f68348e56c9e91d7`.
-This base combines main's evaluation support, the HPC memory fixes, and the [verified implementation plan](search-improvement-plan.md).
+This base combines main's evaluation support, the test node memory fixes, and the [verified implementation plan](search-improvement-plan.md).
 
 ## Implementation chats
 
@@ -22,7 +22,7 @@ Each implementation chat has its own managed worktree and topic branch. The pare
 | Fix Plumb refreshes and useful page coverage | `01a12460-277d-7d80-b355-18c1f0bf65c5` | Integrated; core and software checks passed |
 | Improve Plumb language and location matching | `01a12460-2989-7033-9a3f-25d957274ec8` | Integrated; core and software checks passed |
 | Prepare Plumb combined batch evaluation | `01a12460-2b54-7011-8183-586fcab4d92a` | Integrated; core and software checks passed |
-| Reclaim old DIRT SOIL GRASS storage on HPC | `01a12461-cfa1-7dc2-b308-f6f23b9dbf7f` | Complete: 111.4 GiB net reclaimed |
+| Reclaim old DIRT SOIL GRASS storage on the test node | `01a12461-cfa1-7dc2-b308-f6f23b9dbf7f` | Complete: 111.4 GiB net reclaimed |
 
 All eleven chats use `gpt-6.1-sol` and `xhigh`. Storage cleanup is projectless and operates through SSH. Validation moved to separate Cargo target directories after a worker observed a foreign schema artifact in the initially shared directory. Worker builds use one job, no incremental compilation, and no development/test debug symbols to fit the Mac's 24 GiB RAM.
 
@@ -41,13 +41,13 @@ All eleven chats use `gpt-6.1-sol` and `xhigh`. Storage cleanup is projectless a
 
 ## Baseline and operations
 
-The initial connector/HPC audit observed 0.2.1 at the verified memory-fix checkout. The public website is a separate 0.2.0 deployment and is not a controlled baseline. Private routing identifiers are excluded from reports.
+The initial connector/test node audit observed 0.2.1 at the verified memory-fix checkout. The public website is a separate 0.2.0 deployment and is not a controlled baseline. Private routing identifiers are excluded from reports.
 
 Cleanup removed 240 verified Cargo cache roots from 234 inactive DIRT/SOIL/GRASS trees. Net reclaimed space was 111.41 GiB; user-available space rose from 23.06 to 134.47 GiB at cleanup completion. Source/Git/preserved-output checks passed, and the two running Plumb processes retained their PIDs and start times throughout deletion. The exact inventory and deleted paths are in the cleanup chat's local report.
 
-The HPC service restarted externally during dispatch, changing its checkout from `068faba` to `739dd11`, which includes findings-off support. The parent recorded the transition and kept the original probes. Runtime code state must not be inferred from the earlier checkout snapshot.
+The test node service restarted externally during dispatch, changing its checkout from `068faba` to `739dd11`, which includes findings-off support. The parent recorded the transition and kept the original probes. Runtime code state must not be inferred from the earlier checkout snapshot.
 
-A frozen search snapshot at `/home/suehr/scratch/plumb-quality-20261009/baseline-snapshot` contains site generation `000145` search/spelling files, all sixteen gzip page sets, the embedding model, and vectors. It uses 3,964,584,112 bytes across 30 files. Each copied file matched the source SHA-256, and site metadata matched before/after copying. Optional privacy/PIR buckets and source lockfiles are omitted; the snapshot is scoped to search evaluation. Future locks and derived indexes belong only in scratch. The snapshot consumes additional space after the cleanup measurement.
+A frozen search snapshot in the test node's scratch space contains site generation `000145` search/spelling files, all sixteen gzip page sets, the embedding model, and vectors. It uses 3,964,584,112 bytes across 30 files. Each copied file matched the source SHA-256, and site metadata matched before/after copying. Optional privacy/PIR buckets and source lockfiles are omitted; the snapshot is scoped to search evaluation. Future locks and derived indexes belong only in scratch. The snapshot consumes additional space after the cleanup measurement.
 
 The old 1,000-job agent evaluation was explicitly paused by the user. This batch does not resume it. Evaluation findings must not write to production.
 
