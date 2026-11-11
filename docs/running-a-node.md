@@ -134,7 +134,7 @@ Every flag of `plumb run`, grouped. Defaults are in brackets, and those in the p
 | `--embed-threads N` | Threads that embed sites [half the CPUs the node may use] |
 | `--mcp-read-pages` | Let every `/mcp` client use `read_page`, not only AI apps on this computer. Never on a public node |
 | `--mcp-findings` | Let every `/mcp` client keep and see findings, not only AI apps on this computer |
-| `--mcp-manage` | Let every `/mcp` client fetch pages and change focus topics, not only AI apps on this computer ([mcp.md](mcp.md#improving-search-for-you)). Never on a public node |
+| `--mcp-manage` | Let every `/mcp` client fetch pages, change focus topics, grade sites and see what was asked (`fetch_pages`, `focus_topics`, `grade_site`, `node_tuning`), not only AI apps on this computer ([mcp.md](mcp.md#improving-search-for-you)). Never on a public node |
 
 **Network.** `--network` joins the Plumb network; every other flag here needs it. [network.md](network.md) explains what they do.
 
@@ -168,7 +168,7 @@ The panel at `/app` shows what the node is doing and holds the settings that hav
 
 - Settings are saved in `DIR/settings.json` and apply at once. Until you save them, the profile's defaults apply.
 - **Site grades** (100% by default) is how far searches push down the sites the project's `plumb/site-grades` set marks: a site a language model judged spam loses 90% of its score at 100% (unless the search is its address), one of little use 30% (unless the search names it or it is an organization's official site), in this node's results and in other nodes' alike. 0 turns the grades off. An AI app on the node's computer can grade sites for the node alone with the MCP tool `grade_site`, which takes the place of the set's grade for that site ([Improving search for you](mcp.md#improving-search-for-you)); the setting scales those grades too. See [tools/grades](../tools/grades/README.md).
-- Optional features (the network, search by meaning, sharing popularity, search history, bootstrap and trusted nodes, search scope, answer limit, spending credits) are saved in `DIR/features.json` and apply when the node starts again. Once that file exists it wins over `--network`, `--search-by-meaning`, `--share-popularity`, `--search-history`, `--bootstrap`, `--trust-peer` and `--no-default-trust`; the log says when one of the first four is ignored. Delete the file while the node is stopped to go back to flags alone.
+- Optional features (the network, search by meaning, sharing popularity, search history, bootstrap and trusted nodes, search scope, answer limit, spending credits) are saved in `DIR/features.json` and apply when the node starts again. Once that file exists it wins over `--network`, `--search-by-meaning`, `--share-popularity`, `--search-history`, `--bootstrap`, `--trust-peer`, `--no-default-trust`, `--search-from`, `--answer-per-day` and `--no-spend-credits`; the log says when one of the first four is ignored. Delete the file while the node is stopped to go back to flags alone.
 
 ## Storage limits and focus topics
 

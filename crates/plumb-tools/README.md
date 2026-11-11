@@ -181,6 +181,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training |
 | [eval/contracts.rs](src/eval/contracts.rs) | `eval --report`: JSONL contracts and reproducible reports |
 | [eval/rerank.rs](src/eval/rerank.rs) | A cross-encoder second pass, for `eval --rerank-model` |
+| [eval/candidates.rs](src/eval/candidates.rs) | `eval --candidates-out`: each query's deep site candidates with their raw signals, for trying first stages offline |
 | [eval_labels.rs](src/eval_labels.rs) | `check-labels` |
 | [train_rank.rs](src/train_rank.rs), [train_rank/learn.rs](src/train_rank/learn.rs) | `train-rank`: LambdaMART trees, or a small neural ranker (`--learner net`) |
 | [storage.rs](src/storage.rs), [dead_sites.rs](src/dead_sites.rs), [top_sites.rs](src/top_sites.rs) | Read-only looks at a node's data and records |

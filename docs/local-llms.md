@@ -14,7 +14,7 @@ Plumb gives a local model web search with no API key: a node answers from its ow
 
 ## Which address
 
-There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md#tools): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, and on the node's own computer `read_page` and `report_finding`. Apps that take a SearXNG address use a node's `/search?format=json` instead.
+There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md#tools): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, and on the node's own computer `read_page`, `report_finding` and the tools that [improve search for you](mcp.md#improving-search-for-you) (`fetch_pages`, `focus_topics`, `grade_site`, `node_tuning`). Apps that take a SearXNG address use a node's `/search?format=json` instead.
 
 | You run | MCP address | SearXNG address |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md#tools): `s
 
 With your own node, searches don't leave your computer: the node answers them from its own index. The examples below use the desktop app's address; put yours in its place.
 
-`read_page` and `report_finding` are offered only to apps on the node's own computer ([who counts](mcp.md#reading-pages)). A Docker node sees requests through its published port as coming from Docker's network, not from this computer, so it offers neither. To have them with a Docker node, start `plumb mcp` inside the container as a command (see [Apps that start a command](#apps-that-start-a-command)).
+`read_page`, `report_finding` and the tools that improve search are offered only to apps on the node's own computer ([who counts](mcp.md#reading-pages)). A Docker node sees requests through its published port as coming from Docker's network, not from this computer, so it offers none of them. To have them with a Docker node, start `plumb mcp` inside the container as a command (see [Apps that start a command](#apps-that-start-a-command)).
 
 Use a model trained to call tools; models without tool training ignore the tools.
 
