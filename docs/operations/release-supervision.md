@@ -52,7 +52,7 @@ findings, peer results and mutable data outside controlled comparisons.
 Record the exact running image ID and revision, Compose configuration, selected
 page-set settings, source-generation pointers and relevant file hashes. Retain
 the previous image locally; do not prune it during the observation period.
-For HPC or desktop deployments, retain the old executable or app bundle too.
+For research-node or desktop deployments, retain the old executable or app bundle too.
 
 Built-in backups hold settings, network identity, credit and remote-control
 material, not corpus or index data. Treat those files as secrets: keep their
@@ -63,7 +63,7 @@ backup facility for sensitive state. A persistent Docker volume is not a backup.
 The page-index schema contributes to the derived index key. After successfully
 opening/building an index, `remove_other_indexes` deletes other `pages/index-*`
 directories. Therefore a previous schema key does not retain the old index.
-Do not keep a full duplicate corpus or derived index on the Droplet: its
+Do not keep a full duplicate corpus or derived index on the public server: its
 user-approved Plumb storage budget is 64 GB, independently of filesystem free
 space. Retain the prior image and a small protected configuration manifest
 locally. Existing source sets plus their counts, generation metadata and mtimes
@@ -80,7 +80,7 @@ unavailable throughout rebuilding. Do not require a full duplicate when this
 recovery tradeoff is accepted. Block incompatible destructive source migrations
 until their affected irreplaceable records have a verified recovery path.
 
-For a recovery copy where needed, use existing HPC capacity for nonsensitive
+For a recovery copy where needed, use the research node's existing capacity for nonsensitive
 source records and generation metadata, outside live startup cleanup paths.
 Do not transfer identity keys, tokens, credit state or private configuration as
 an ad hoc corpus copy. Sensitive state is the nine-file built-in backup scope
@@ -95,7 +95,7 @@ necessary, the deployment owner must gracefully stop the node and finalize sync
 and verification while quiescent, respecting the five-minute stop allowance.
 Preserve independent reference jobs and the production tunnel. Use actual
 copies or verified snapshots, never hard links to mutable files; preserve source
-mtimes. An authorized HPC pre-copy is preparation, not proof of recoverability.
+mtimes. An authorized pre-copy to the research node is preparation, not proof of recoverability.
 Invalid staged corpus publication remains blocked; scoped quarantine proof does
 not authorize promoting an ineligible full corpus.
 
@@ -106,12 +106,12 @@ Recheck immediately before any copy or rollout.
 
 | Host | Role and recovery path | Observed data / free disk |
 | --- | --- | --- |
-| Public droplet | Docker node and Caddy under `/opt/plumb-search/site`; data `/var/lib/docker/volumes/plumb-data/_data`; relay is separate | 46 GiB / 81 GiB |
+| Public server | Docker node and Caddy under `/opt/plumb-search/site`; data `/var/lib/docker/volumes/plumb-data/_data`; relay is separate | 46 GiB / 81 GiB |
 | LA and NY | Docker `plumb`, `/opt/plumb/docker-compose.yml`; same volume path; `--crawl-only` | LA 20 GiB / 12 GiB; NY 22 GiB / 11 GiB |
-| HPC | User `plumb.service`; checkout `/home/suehr/projects/plumb-search`; data `plumb-data`; separate tunnel service | 49 GiB / 126 GiB |
+| Research node | User `plumb.service`; a user checkout; data `plumb-data`; separate tunnel service | 49 GiB / 126 GiB |
 
-The 81 GiB Droplet free-space observation is physical capacity, not permission
-to exceed the 64 GB Plumb allocation. HPC is the intended home for larger corpus
+The 81 GiB public server free-space observation is physical capacity, not permission
+to exceed the 64 GB Plumb allocation. The research node is the intended home for larger corpus
 experiments, subject to measured disk and memory limits and no new paid
 provisioning. Full same-host crawler backups do not fit the observed free space. Do not assume
 compression will solve this or copy until the destination and remaining reserve
@@ -120,7 +120,7 @@ existing storage destination first. Crawl-only nodes skip serving page-index
 workers, but their signed crawl and credit persistence still need compatibility
 review. Do not delete retained crawl data to make an unverified backup fit.
 
-Observed rebuild evidence (read-only service logs, October 10): the Droplet
+Observed rebuild evidence (read-only service logs, October 10): the public server
 rebuilt 13,304,410 pages in 762.9 seconds (12m43s). Recent approximately
 2.814-million-site builds took 1044.3–1411.8 seconds (17m24s–23m32s). Its current
 page index occupies approximately 2.5 GiB. These are historical production
@@ -128,8 +128,8 @@ measurements, not a bound for a different schema, restored dataset or future
 load. Current node RSS/usage of 3.12 GiB is not rebuild peak memory. Peak temporary
 disk and peak memory for old/new rebuilds remain unmeasured. A recovery plan must
 allow at least the observed reconstruction interval when that index is missing;
-network redownload or remote transfer adds time. Avoid treating HPC timings
-(158.6 seconds for 13.727-million pages) as Droplet timings.
+network redownload or remote transfer adds time. Avoid treating research-node timings
+(158.6 seconds for 13.727-million pages) as public server timings.
 
 ## Publish, deploy and verify
 
@@ -139,7 +139,7 @@ branch protection at inspection. The deployment owner must verify required CI
 and the exact published SHA/digest before selecting an image. Do not deploy a
 floating tag solely because its name is `main` or `latest`.
 
-Publication does not update running containers. The inspected droplet has no
+Publication does not update running containers. The inspected server has no
 continuous pull updater. The crawler upgrade scripts perform a specific upgrade;
 their watches expire after 24 hours. Docker restart policies do not pull images.
 Deploy one host at a time with the retained configuration and persistent volume,
@@ -156,7 +156,7 @@ unbounded restart or rollback loop.
 
 ## Continuous execution readiness
 
-Registered Mac task execution is available. HPC SSH, an installed Codex CLI and
+Registered Mac task execution is available. Research node SSH, an installed Codex CLI and
 saved login do not establish a registered remote task host or a working durable
 agent runner. Its desktop update-manager service is not a project supervisor.
 Before enabling unattended execution, verify a supported authenticated bounded
