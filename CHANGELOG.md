@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Search
+
+- Two neighbouring letters typed the other way round count as one learned slip whichever letters they are, so "telsa" suggests Tesla rather than "tulsa" or a little-known name one changed letter away. The spelling model learned each swap only from its own two letters before, and few pairs of letters are seen swapped often enough, so most swaps cost as much as an edit never seen. A node learns it the next time it builds its index.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.

@@ -11,7 +11,8 @@
 //!   edit away found in at least [`MINED_RATIO`] times as many sites ("words
 //!   are usually spelled as intended"), and what was changed is counted as
 //!   substring rules of up to two letters (Brill and Moore): `k -> ck`,
-//!   `ll -> l`, `ie -> ei`. A rule's probability is how often its letters
+//!   `ll -> l`, `ie -> ei`, and any two neighbouring letters swapped
+//!   as one rule besides (`TURN`). A rule's probability is how often its letters
 //!   were typed that way, among all the times they were meant. A typo then
 //!   costs what its edits cost: a doubled letter dropped is cheap, a first
 //!   letter changed is dear.
@@ -64,6 +65,12 @@ const BUILD_PAIRS_CAP: usize = 4_000_000;
 const BUILD_WORDS_CAP: usize = 1_500_000;
 /// Words and word pairs found in fewer sites are left out of the file.
 const MIN_SAVED_COUNT: u32 = 3;
+/// The rule of any two neighbouring letters typed the other way round,
+/// whichever they are, learned from every such slip mined. Few pairs of
+/// letters are seen swapped often enough to learn on their own, so without
+/// it a swap ("telsa" for "tesla") cost as much as an edit never seen and
+/// lost to any learned change of a letter ("tulsa").
+const TURN: &str = "<>";
 
 /// Words in one string, so a million of them take little more memory than
 /// their letters.
@@ -561,7 +568,10 @@ fn rules(marked: &[char], edit: &Edit) -> Vec<(String, String)> {
             (s(at - 1..at), format!("{}{typed}", m[at - 1])),
             (s(at..at + 1), format!("{typed}{}", m[at])),
         ],
-        Edit::Turn { at } => vec![(s(at..at + 2), format!("{}{}", m[at + 1], m[at]))],
+        Edit::Turn { at } => vec![
+            (s(at..at + 2), format!("{}{}", m[at + 1], m[at])),
+            (TURN.to_string(), TURN.to_string()),
+        ],
     }
 }
 
@@ -761,6 +771,9 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
             .chain(term.chars())
             .chain(std::iter::once('$'))
             .collect();
+        // Each pair of neighbouring letters can be swapped.
+        let pairs = term.chars().count().saturating_sub(1) as u64;
+        *substrings.entry(TURN.to_string()).or_insert(0) += docs * pairs;
         for i in 0..marked.len() {
             *substrings.entry(marked[i].to_string()).or_insert(0) += docs;
             if i + 1 < marked.len() {
@@ -887,7 +900,10 @@ mod tests {
             rules_of("allstate", "alstate"),
             [vec![pair("al", "a"), pair("ll", "l")]]
         );
-        assert_eq!(rules_of("visa", "vias"), [vec![pair("sa", "as")]]);
+        assert_eq!(
+            rules_of("visa", "vias"),
+            [vec![pair("sa", "as"), pair(TURN, TURN)]]
+        );
         assert_eq!(
             rules_of("hertz", "herts"),
             [vec![pair("z", "s"), pair("tz", "ts"), pair("z$", "s$")]]

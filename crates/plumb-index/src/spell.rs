@@ -27,7 +27,8 @@
 //! With the spelling model the index learned from its own words
 //! ([`crate::spell_model`]), candidates are ranked by the noisy channel
 //! instead: what the edits cost by the slips the index's words show
-//! (`P(typed | meant)`), against how common the correction is
+//! (`P(typed | meant)`, a swap of two neighbouring letters learned as one
+//! slip whichever letters they are), against how common the correction is
 //! (`P(meant)`, or a site's link score for names). Two more corrections
 //! can be turned on ([`Tuning`]): a known word that is still far likelier
 //! a slip of a far commoner one ("amtrack"), and a word that the words

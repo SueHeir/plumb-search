@@ -339,6 +339,64 @@ fn well_known_names_one_slip_away_are_meant() {
 }
 
 #[test]
+fn swapped_letters_are_a_learned_slip_whichever_they_are() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "tesla.com",
+        Some("Tesla"),
+        None,
+        &["Tesla"],
+        &[],
+        popular(300, 30_000),
+    ));
+    // Words with two letters swapped, each pair of letters only once,
+    // too few to learn any of them on its own; and a `u` typed `e` three
+    // times, enough to learn.
+    let titles = [
+        ("Tulsa events", 60),
+        ("Garden", 25),
+        ("Gadren", 2),
+        ("Market", 25),
+        ("Makret", 2),
+        ("Silver", 25),
+        ("Silevr", 2),
+        ("Orange", 25),
+        ("Ornage", 2),
+        ("Window", 25),
+        ("Widnow", 2),
+        ("Buner", 25),
+        ("Bener", 2),
+        ("Sultar", 25),
+        ("Seltar", 2),
+        ("Kumba", 25),
+        ("Kemba", 2),
+    ];
+    let mut n = 0;
+    for (title, count) in titles {
+        for i in 0..count {
+            n += 1;
+            records.push(site(
+                &format!("slips{n}.com"),
+                Some(&format!("{title} {i}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + n, 5),
+            ));
+        }
+    }
+    let (_dir, searcher) = build(&records);
+    let model = searcher.spelling_model().expect("a spelling model");
+    // A swap of letters never seen swapped is still a learned slip.
+    assert!(model.ln_channel("telsa", "tesla") > model.ln_channel("tesxa", "tesla"));
+    // "tulsa" is a commoner word one learned slip away, but "telsa" is
+    // likelier Tesla with two letters swapped.
+    let results = search_spelled(&searcher, "telsa");
+    assert_eq!(suggestion(&results), suggested("tesla"));
+    assert!(domains(&results.hits).contains(&"tesla.com"));
+}
+
+#[test]
 fn a_likelier_slip_beats_a_well_known_name() {
     let mut records = typo_corpus();
     for (domain, name) in [("wired.com", "WIRED"), ("trier.de", "Trier")] {
