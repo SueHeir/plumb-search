@@ -305,7 +305,8 @@ plumb-tools fetch-data --dir data --cc-release <release-name>
 
 # 2. Fold it into records, keeping the best million. fetch-data prints this
 #    command with every file it saved. Only twice --top rows of the Common
-#    Crawl ranks are read (about 0.9 GB of memory per million rows).
+#    Crawl ranks are read (about 0.9 GB of memory per million rows);
+#    --limit-per-source N caps that, and the Tranco list, at N rows.
 plumb ingest --tranco data/tranco-top-1m.csv.zip \
     --cc-ranks data/<release-name>-domain-ranks.txt.gz \
     --wikidata data/wikidata-official-sites.tsv \

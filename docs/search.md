@@ -281,7 +281,7 @@ Only the results page applies personal signals, after ranking and mostly to the 
 
 `/search` applies them in `Visitor::rank` ([web/history.rs](../crates/plumb-node/src/web/history.rs)): About you, then history and clicks, then tastes, then verdicts, each re-sorting by score.
 
-Network popularity is different: it is the same for every searcher and applies inside the backend, before pages. A node shares picks only when started with `--share-popularity`, as threshold-encrypted reports that no node can read until many report the same pick ([plumb-net's popularity.rs](../crates/plumb-net/src/popularity.rs)). Browsers that opt in can also keep their searches as training examples, which `plumb click-labels` writes out, corrected for how far down each result was ([clicks.rs](../crates/plumb-node/src/clicks.rs)).
+Network popularity is different: it is the same for every searcher and applies inside the backend, before pages. A node shares picks only when started with `--share-popularity`, as threshold-encrypted reports that no node can read until many report the same pick ([plumb-net's popularity.rs](../crates/plumb-net/src/popularity.rs)). Browsers that opt in can also keep their searches as training examples, which `plumb click-labels` writes out, corrected for how far down each result was; with `--queries` it also writes the searches whose clicks clearly pick one site (opened at least `--min-opened` times, 2 by default) as a queries file for `plumb-tools train-rank` ([clicks.rs](../crates/plumb-node/src/clicks.rs)).
 
 ## Trying a ranking change
 
