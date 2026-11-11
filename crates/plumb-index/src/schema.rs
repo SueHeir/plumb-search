@@ -53,6 +53,7 @@ use tantivy::schema::{
 use tantivy::TantivyDocument;
 
 use crate::analysis::{JOINED_ANALYZER, WORDS_ANALYZER};
+use crate::hits::{is_garbled, is_unfilled};
 
 pub(crate) const DOMAIN: &str = "domain";
 pub(crate) const URL: &str = "url";
@@ -342,8 +343,11 @@ pub(crate) fn document(f: &Fields, site: &Item, redirect_names: &[String]) -> Ta
         }
         doc.add_text(f.title, &title);
     }
-    // The item's `about` is the homepage's description.
-    let description = non_empty(site.about.as_deref());
+    // The item's `about` is the homepage's description, unless it says
+    // nothing of the site, which results don't show either
+    // ([`is_unfilled`], [`is_garbled`]).
+    let description =
+        non_empty(site.about.as_deref()).filter(|text| !is_unfilled(text) && !is_garbled(text));
     if let Some(description) = description.filter(|_| !borrowed) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
     }
