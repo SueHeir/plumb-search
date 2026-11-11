@@ -4,14 +4,14 @@
 
 use anyhow::Result;
 use plumb_core::place::Place;
-use plumb_core::Operators;
+use plumb_core::{normalize_text, Operators};
 
 use super::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, options_allow,
     place_operator_pages, place_pages, site_pages_after_named_article, PageHit, PageSearcher,
     OPERATOR_PAGES,
 };
-use crate::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, Spelling};
+use crate::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling};
 
 /// Pages looked at per search, before [`place_pages`] picks.
 pub const PAGES_PER_SEARCH: usize = 10;
@@ -156,15 +156,8 @@ impl Listing<'_> {
         if spelled_right && !applied {
             results.spelling = None;
         }
-        // A query that is a page's whole name is about what the page is,
-        // not a search inside a site its first word names: "virginia
-        // woolf" is not virginia.gov's search for "woolf", nor "the last of
-        // us" last.fm's.
         if let Some(link) = &results.site_search {
-            if found
-                .iter()
-                .any(|hit| hit.named && hit.page.site.as_deref() != Some(link.domain.as_str()))
-            {
+            if found.iter().any(|hit| names_past_site(query, link, hit)) {
                 results.site_search = None;
             }
         }
@@ -211,6 +204,34 @@ impl Listing<'_> {
         // A pasted address is the page at it, whatever the ranking says.
         pages.list_typed_page(query, options, &mut results.pages)
     }
+}
+
+/// Whether `hit` is a page about something other than the site of `link`
+/// that the query names, so it is no search inside that site. A query that
+/// is the page's whole name is about what the page is: "virginia woolf" is
+/// not virginia.gov's search for "woolf", nor "the last of us" last.fm's.
+/// So is one that starts with the page's name, when the name runs on past
+/// the site's into the words the link would search for: "amazon river
+/// length" is about the Amazon River, not amazon.com's search for "river
+/// length".
+pub(super) fn names_past_site(query: &str, link: &SiteSearch, hit: &PageHit) -> bool {
+    if hit.page.site.as_deref() == Some(link.domain.as_str()) {
+        return false;
+    }
+    if hit.named {
+        return true;
+    }
+    let query = normalize_text(query);
+    let terms = normalize_text(&link.terms);
+    let title = normalize_text(&hit.page.title);
+    // Only for a site named first, with the words after it to search for.
+    let Some(name) = query.strip_suffix(terms.as_str()).map(str::trim_end) else {
+        return false;
+    };
+    !name.is_empty()
+        && !terms.is_empty()
+        && title.starts_with(&format!("{name} "))
+        && (query == title || query.starts_with(&format!("{title} ")))
 }
 
 /// Puts first in `found` the page of a site `query` names

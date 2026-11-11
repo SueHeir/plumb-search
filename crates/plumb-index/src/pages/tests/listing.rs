@@ -170,3 +170,46 @@ fn another_sites_page_comes_after_the_source_a_search_asks_for() {
     );
     assert_eq!(placed[0].at, 1);
 }
+
+#[test]
+fn a_page_whose_name_runs_past_the_sites_is_no_search_inside_it() {
+    use super::super::listing::names_past_site;
+    let link = |domain: &str, terms: &str| crate::SiteSearch {
+        domain: domain.into(),
+        terms: terms.into(),
+        url: format!("https://{domain}/s?q={terms}"),
+    };
+    let river = reference(
+        "https://en.wikipedia.org/wiki/Amazon_River",
+        "Amazon River",
+        0.9,
+    );
+    let amazon = link("amazon.com", "river length");
+    assert!(names_past_site("amazon river length", &amazon, &river));
+    assert!(names_past_site("Amazon  River length", &amazon, &river));
+    // A page named by the site's name alone, or by words that only start
+    // the query's, leaves the search to the site: "amazon prime video" is
+    // amazon.com's search when the page is Amazon (company).
+    let company = reference("https://en.wikipedia.org/wiki/Amazon", "Amazon", 0.9);
+    assert!(!names_past_site("amazon river length", &amazon, &company));
+    let rivers = reference("https://example.org/amazon-rivers", "Amazon Rivers", 0.9);
+    assert!(!names_past_site("amazon river length", &amazon, &rivers));
+    // Nor does a page about the site itself, or a name at the query's end
+    // ("river length amazon" searches amazon.com for "river length").
+    let mut own = river.clone();
+    own.page.site = Some("amazon.com".into());
+    assert!(!names_past_site("amazon river length", &amazon, &own));
+    assert!(!names_past_site("river length amazon", &amazon, &river));
+    // A page the whole query names is about what it is.
+    let mut woolf = reference(
+        "https://en.wikipedia.org/wiki/Virginia_Woolf",
+        "Virginia Woolf",
+        0.9,
+    );
+    woolf.named = true;
+    assert!(names_past_site(
+        "virginia woolf",
+        &link("virginia.gov", "woolf"),
+        &woolf
+    ));
+}
