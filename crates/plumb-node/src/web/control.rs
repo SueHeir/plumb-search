@@ -81,9 +81,10 @@ fn error(status: StatusCode, message: &str) -> Response {
     )
         .into_response();
     if status == StatusCode::UNAUTHORIZED {
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
     }
     response
 }

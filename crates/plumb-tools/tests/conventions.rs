@@ -47,12 +47,12 @@ struct Limits {
     long_files: usize,
 }
 
-/// The counts on 2026-10-13.
+/// The counts on 2026-10-13, lowered as changes removed some.
 const LIMITS: Limits = Limits {
-    raw_locks: 2,
-    direct_writes: 62,
+    raw_locks: 0,
+    direct_writes: 60,
     bare_spawns: 15,
-    unwraps: 19,
+    unwraps: 14,
     long_functions: 28,
     long_files: 0,
 };
