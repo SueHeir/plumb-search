@@ -286,3 +286,12 @@ xfinty	xfinity.com
 olympcs	olympics.com
 premeir league	premierleague.com
 nascr	nascar.com
+
+# Added 2026-11-11: typos plumbsearch.org got wrong. The review's
+# "telsa lease" was corrected to "tulsa lease", "telsa" to "telfa", "lowse"
+# to "loose" and "frod" to "from", and "hodna" got no suggestion.
+telsa	tesla.com
+telsa lease	tesla.com
+lowse	lowes.com
+frod	ford.com
+hodna	honda.com
