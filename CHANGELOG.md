@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Search
+
+- When the speller is sure of a spelling, the results page shows that spelling's results and offers the words as typed, where it used to only suggest it. It is sure only when each word it changes is one the pages neither know nor are named by, no site of the results as typed is named by the search, and the spelling names a page. A one-word search of fewer than seven letters keeps its own results ("hcnn" is not shown as Hann), and so does a word typed with accents or other letters English does not use, which the speller now leaves as typed ("Edlén equation" no longer suggests "ellen equation"). Words typed with broken characters stay whole.
+- The page titles' spelling is used when it names a page and is closer to what was typed, so "interupt" means interrupt and "rooling in the deep" Rolling in the Deep, where the sites' spelling read "internet" and "rowling". A word whose plural or singular names a site among the results is not corrected ("goodread" keeps goodreads.com rather than showing goodyear's results).
+- An article found only by what a search means can now come before sites just above it that barely match the search ("fleur de leaf" lists Fleur-de-lis before three florists). It never passes the first site, an official site or a site whose address was typed, and it stays after three sites when it stands out little from other near pages.
+- "www", "http" or "https" at the start of a typed address no longer links an article (World Wide Web).
+- uscis.gov's archive, newsroom, outreach and website report pages are left out of the reference set, as they led searches that only shared words with their titles.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
@@ -23,6 +31,7 @@
 
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
 - `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
+- `plumb-tools eval` lists a search's pages through the same code as a node (`Listing` in plumb-index), and then orders sites, routes tool sources and places pages again as a node's answers do, so the evals measure the rows a node serves. They search as from the US in English, a node's default. `--adult-sites` leaves out the adult blocklist, as safe search does.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
 
 ## 0.4.0
