@@ -68,13 +68,13 @@ flowchart LR
 | [findings.rs](src/findings.rs), [experiments.rs](src/experiments.rs) | What AI agents report through MCP; ranking experiments from `experiments.json` |
 | **Web and MCP** | |
 | [web.rs](src/web.rs) | The router, `plumb serve`, shutdown signals |
-| [web/search.rs](src/web/search.rs), [results.rs](src/web/results.rs), [hit.rs](src/web/hit.rs), [answers.rs](src/web/answers.rs), [places.rs](src/web/places.rs), [weather.rs](src/web/weather.rs) | The results page: own and network results, pages, places, instant answers, info box |
+| [web/search.rs](src/web/search.rs), [results.rs](src/web/results.rs), [hit.rs](src/web/hit.rs), [answers.rs](src/web/answers.rs), [places.rs](src/web/places.rs), [weather.rs](src/web/weather.rs), [plugin_results.rs](src/web/plugin_results.rs) | The results page: own and network results, pages, places, instant answers, info box, and what plugins add |
 | [web/api.rs](src/web/api.rs), [searxng.rs](src/web/searxng.rs), [backend.rs](src/web/backend.rs) | JSON API, SearXNG-format results; the `SearchBackend` and `StatusSource` traits |
 | [web/panel.rs](src/web/panel.rs), [panel/](src/web/panel/view.rs), [setup.rs](src/web/setup.rs), [control.rs](src/web/control.rs), [nodes.rs](src/web/nodes.rs) | The panel at `/app`; the remote control API; controlling other nodes |
 | [web/private.rs](src/web/private.rs), [relay.rs](src/web/relay.rs) | Private search page and buckets; relaying sealed bucket requests |
 | [web/history.rs](src/web/history.rs), [link.rs](src/web/link.rs), [tune.rs](src/web/tune.rs), [welcome.rs](src/web/welcome.rs) | History, link codes, tuning and About you pages |
 | [web/html.rs](src/web/html.rs), [home.rs](src/web/home.rs), [params.rs](src/web/params.rs) | Page frame, escaping, links; home and setup pages; search parameters |
-| [mcp.rs](src/mcp.rs), [mcp/](src/mcp/tools.rs), [web/mcp.rs](src/web/mcp.rs) | The MCP server and its tools, including those that improve search for the node's owner ([mcp/manage.rs](src/mcp/manage.rs)); `POST /mcp`; `plumb mcp` over stdio |
+| [mcp.rs](src/mcp.rs), [mcp/](src/mcp/tools.rs), [web/mcp.rs](src/web/mcp.rs) | The MCP server and its tools: `official_site` ([mcp/official_site.rs](src/mcp/official_site.rs)) and `check_lookalike` ([mcp/lookalike.rs](src/mcp/lookalike.rs)) with the owner evidence they share ([mcp/identity.rs](src/mcp/identity.rs)), and those that improve search for the node's owner ([mcp/manage.rs](src/mcp/manage.rs)); `POST /mcp`; `plumb mcp` over stdio |
 
 ## How it works
 
