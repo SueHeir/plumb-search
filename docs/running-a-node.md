@@ -315,6 +315,8 @@ plumb ingest --tranco data/tranco-top-1m.csv.zip \
     --top 1000000 --out data/records.jsonl
 #    Optional: add --wat with Common Crawl WAT files, listed in each crawl's
 #    https://data.commoncrawl.org/crawl-data/<CC-MAIN-YYYY-WW>/wat.paths.gz.
+#    --limit-per-source N reads at most N rows of the Tranco list and the
+#    Common Crawl ranks, and keeps the best N records of each --records file.
 
 # 3. Crawl homepages: half sites never tried, half sites due again,
 #    best link score first.

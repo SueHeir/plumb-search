@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Search
+
+- A sure spelling is shown in place of the results, searched as spelled ("Showing results for"): "abrahm" lists Abraham first rather than under "Did you mean". It has to name a page, and each word it changes has to be one the pages neither know nor are named by and fewer than 20 sites have, with no site of the results as typed named by the query or by that word. "corvel website for providers" stays as typed, since corvel.com is listed. A one-word search shorter than seven letters, and a word typed with letters outside a-z ("Edlén equation"), stay as typed and only get "Did you mean". MCP answers say "Showing results for" when their results are the spelling's.
+- A word no page and no site has gets a spelling from the page titles, however few pages have the near word ("rhinoplasy" is rhinoplasty).
+- The page titles' spelling stands in for the sites' when it names a page and is fewer edits from the words typed: "interupt" is interrupt, not internet, and "rooling in the deep" is Rolling in the Deep. A spelling of a site's name stays.
+- A word with accents is no longer corrected to one without ("Edlén equation" no longer asks "Did you mean ellen equation"), a word whose plural names a site in the results keeps its own spelling ("goodread" lists goodreads.com rather than Goodyear), and a garbled word typed with letters outside a-z gets no junk suggestion.
+- An article found only by what a search means can come before the sites just above it that barely match the search: "fleur de leaf" lists Fleur-de-lis above florists that lack its words. It never passes the first site, an official site or a site the search names by its address, and an article that stands out little from the other pages near the search stays after the first three sites, as such articles were wrong twice as often as right.
+- The "www", "http" or "https" a typed address starts with no longer links an article ("www.pearsonmylabs.com access code" is not about the World Wide Web).
+- In a medical search, public and clinical health sites' pages come before other sites' pages, and no other site's page comes above a source the search names. A reference page on one of the best sites needs a word of the search besides the site's name.
+- The reference page set no longer takes WebMD, Healthline, eMedicineHealth, unitconverters.net, support.apple.com or uscis.gov's archive, news and outreach pages, takes only BabyCenter's sections and history.com's articles and topics, and keeps no headings or passages of its pages, which are listed only for words of their title. Its fetcher makes up for pages that fail, keeps a site whose requests failed no more than one time in 20, and follows links on sites whose sitemaps list nothing.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
@@ -23,6 +34,8 @@
 
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
 - `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
+- `plumb-tools eval` lists a search's rows as a node serves them: the node and the eval share one page listing (`Listing` in plumb-index), and the eval now places pages again after the learned order, routes tool sources and orders sites as a node does. It searches as from the US in English by default, as a node with no other region or language does; `any` turns either off. Eval numbers from before this change can differ from later ones for that reason alone.
+- `improve_search` lets an AI app grade an official site as spam when the organization itself is a scam, or of little use when the site is parked, for sale or dead, and lists the official sites it spared in its report.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
 
 ## 0.4.0

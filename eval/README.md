@@ -165,7 +165,7 @@ plumb-tools train-rank --features features.jsonl --features features-typo.jsonl 
 - In a full eval, compare with the hand-made order through the `hand` line of [sweeps/learned.tsv](sweeps/learned.tsv).
 - `--rerank-model DIR` (with `--features-out`) also scores the first 20 results with a cross-encoder model (a folder with `config.json`, `tokenizer.json` and `model.safetensors`), to try a second pass.
 
-`plumb click-labels --data DIR --out clicks.jsonl --queries clicks.tsv` writes a queries file from the searches a node's users chose to keep as training examples, for `--features-out` in the same way.
+`plumb click-labels --data DIR --out clicks.jsonl --queries clicks.tsv` writes a queries file from the searches a node's users chose to keep as training examples, for `--features-out` in the same way. A search goes in when its clicks clearly pick one site: opened from it at least `--min-opened` times (2), and wanted at least twice as much as the next site.
 
 With `--vectors` and `--model`, searches are embedded the way nodes embed them (`QueryInstruction::Split` in plumb-node's [cli.rs](../crates/plumb-node/src/cli.rs)), so the features match what a node serves.
 
