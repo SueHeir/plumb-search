@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Search
+
+- A misspelled search shows the results for its spelling when the spelling is sure ("Showing results for ballarat. Search instead for ballrat"), where it showed the typo's results under a "Did you mean" line. A spelling is sure when every word it changes is unknown to the pages, names nothing and is in fewer than 20 sites, none of the typed results is a site that word names (or names by its plural or singular, so "goodread" keeps goodreads.com), and the spelling names a page. A web address, an exact search, words split or joined, a one-word search under seven letters and a word typed with letters outside a-z ("Edlén equation") keep their results as typed, with the suggestion. The MCP answer says "Showing results for" too.
+- A word that no page and no site has is taken for a slip of the likeliest near word in the page titles, however few pages have it ("rhinoplasy"). The page titles' spelling also wins over the sites' when it names a page and is fewer edits away, or the sites' names no page: "interupt" is spelled interrupt, not internet, and "rooling in the deep" Rolling in the Deep. A spelling of a site's name ("wels fargo") stays the sites'. Garbled text from another script gets no suggestion.
+- Sites a language model graded spam or of little use are pushed down when the node holds the project's signed set `plumb/site-grades`: spam loses 90% of its score, low-value sites 30% (unless the search names them or they are an organization's official site). Other nodes' answers are graded the same way. The panel's new **Site grades** setting (100% by default) says how much the grades count, and 0 turns them off. With no set held, results don't change. In the 1,000-search review the grades scored within noise of none and took 117 useless results out of top tens.
+- In a medical search, the pages of public and clinical health sites (MedlinePlus, NIH, NHS, CDC, FDA, WHO, Mayo Clinic and others) come before other sites' pages. Any search lists the pages of a source it names first, and no other site's page above that source ("NHS sprained ankle RICE"). A reference page on one of a search's best sites needs a word of the search besides the site's name, and "1,500" is read as one number.
+- The "www", "http" or "https" a typed address starts with no longer links an article ("http://mymemphis.edu/" is not about HTTP); "http caching" still links HTTP.
+- The reference page set no longer fetches WebMD, Healthline, eMedicineHealth or unitconverters.net, and takes only BabyCenter's sections and history.com's articles and topics. The live set changes only when the project fetches it again.
+- `--page-vectors`, hidden and for trying out, takes a directory of vectors files for every page set, not only articles, with rules for which pages meaning may list and where. Without it nothing changes.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
@@ -13,6 +23,7 @@
 ### The JSON API
 
 - `/api/search?full=1` gives each page as its item in Plumb's data format, with the page set it came from beside it: a page in `pages` and in `assembled.rows` is `{"item", "set", "score", ...}` where it was `{"page", "score", ...}`. The rest of the answer is the same, and so is `/api/search` without `full=1`. A paper search with `full=1` gives its `pages` the same way. A script that reads pages from `full=1` now finds a page's description in `about`, an article's first sentences in `text`, the site a page is about in its `about` edge (`{"rel": "about", "to": "site:apple.com"}`; the item's own `site` is the site its address is on), a paper's DOI and arXiv ID in `ids.doi` and `ids.arxiv`, its date in `published`, its authors and venue in `fields.authors` and `fields.venue`, and a package's version, release date and license in `fields.package`. [docs/searching.md](docs/searching.md#what-comes-back) describes each member. A script that also asks older nodes can tell the two forms apart by `item` or `page`, as the Zotero add-on does.
+- A page listed only for what the search means, though it stands out little from the pages near it, carries `"unsure": true` and stays after up to 3 sites.
 - The Zotero add-on 0.1.1 reads pages in either form, so it works with nodes before and after this change. A copy from before lists only the sites of a full answer from a node with it, so update the add-on first.
 
 ### Private search
@@ -23,6 +34,9 @@
 
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
 - `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
+- `plumb-tools grades pick` picks sites to grade, with what a search shows of each, [tools/grades](tools/grades/README.md) has a language model grade them, and `plumb-tools set site-grades` builds the `plumb/site-grades` set. `plumb-tools eval --site-grades DIR` measures with the grades applied.
+- `plumb-tools fetch-pages` makes up for a page that fails with the next one picked, leaves a site that refuses 100 pages in a row, follows links two deep on a site whose sitemaps list none of its pages, and keeps a site's pages when no more than one request in 20 failed, where one failure left the whole site out.
+- `plumb-tools page-meaning` takes several vectors files, or a directory, and reports each search for each file.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
 
 ## 0.4.0
