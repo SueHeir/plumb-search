@@ -208,7 +208,10 @@ pub(in crate::web) fn render_panel(view: &PanelView<'_>) -> String {
     } else {
         "overview"
     };
-    let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
+    let title = sections
+        .iter()
+        .find(|(key, _)| *key == section)
+        .map_or("Overview", |&(_, title)| title);
     let site = escape_html(origin);
     let bar = crate::web::app_bar_for("settings", true, base);
     let mut body = format!("<div class=\"wrap node-panel\">{bar}<div class=\"node-layout\"><aside class=\"node-sidebar\"><p class=\"eyebrow\">{}</p>{switcher}<nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
