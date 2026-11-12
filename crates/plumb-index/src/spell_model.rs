@@ -55,6 +55,12 @@ const MAX_WORD_CHARS: usize = 24;
 /// rules say: typos rarely start a word ("fedx" is fedex, not edx), and
 /// the pairs mined include names that differ in their first letter.
 const FIRST_LETTER_SHARE: f32 = 0.1;
+/// The rule, on both sides, of any two neighbouring letters typed the
+/// other way round. A rule for one pair of letters ("sl" -> "ls") needs a
+/// few pairs of words to show it, which most pairs of letters never get,
+/// while a letter typed as another always has its one-letter rule. This
+/// one learns from every turn, so "telsa" is a likely slip of "tesla".
+const ANY_TURN: &str = "<>";
 /// Stupid Backoff's discount for a word seen without the word before it.
 const BACKOFF: f64 = 0.4;
 /// While building, the most word pairs and words held at once. Past
@@ -561,7 +567,10 @@ fn rules(marked: &[char], edit: &Edit) -> Vec<(String, String)> {
             (s(at - 1..at), format!("{}{typed}", m[at - 1])),
             (s(at..at + 1), format!("{typed}{}", m[at])),
         ],
-        Edit::Turn { at } => vec![(s(at..at + 2), format!("{}{}", m[at + 1], m[at]))],
+        Edit::Turn { at } => vec![
+            (s(at..at + 2), format!("{}{}", m[at + 1], m[at])),
+            (ANY_TURN.to_string(), ANY_TURN.to_string()),
+        ],
     }
 }
 
@@ -768,7 +777,10 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
                 *substrings.entry(pair).or_insert(0) += docs;
             }
         }
-        letters += docs * term.chars().count() as u64;
+        let chars = term.chars().count() as u64;
+        // Each pair of neighbouring letters is a place a turn can happen.
+        *substrings.entry(ANY_TURN.to_string()).or_insert(0) += docs * (chars - 1);
+        letters += docs * chars;
         meant.push((term.chars().collect(), docs));
     })?;
     let mut by_deletion: Vec<(u64, u32)> = Vec::new();
@@ -887,7 +899,10 @@ mod tests {
             rules_of("allstate", "alstate"),
             [vec![pair("al", "a"), pair("ll", "l")]]
         );
-        assert_eq!(rules_of("visa", "vias"), [vec![pair("sa", "as")]]);
+        assert_eq!(
+            rules_of("visa", "vias"),
+            [vec![pair("sa", "as"), pair(ANY_TURN, ANY_TURN)]]
+        );
         assert_eq!(
             rules_of("hertz", "herts"),
             [vec![pair("z", "s"), pair("tz", "ts"), pair("z$", "s$")]]
@@ -952,6 +967,14 @@ mod tests {
         assert!(m.ln_channel("amtrac", "amtrak") > m.ln_channel("amtrc", "amtrak"));
         assert!(m.learned("amtrack", "amtrak"));
         assert!(!m.learned("amtrek", "amtrak"));
+    }
+
+    #[test]
+    fn turns_cost_what_turns_do_without_a_rule_for_the_letters() {
+        let m = Model::with_rules(&[("e", "u", 0.001), (ANY_TURN, ANY_TURN, 0.002)], 1e-6);
+        assert!((m.ln_channel("telsa", "tesla") - 0.002f64.ln()).abs() < 1e-6);
+        assert!(m.learned("telsa", "tesla"));
+        assert!(m.ln_channel("telsa", "tesla") > m.ln_channel("telsa", "tulsa"));
     }
 
     #[test]

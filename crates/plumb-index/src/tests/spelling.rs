@@ -385,6 +385,71 @@ fn a_likelier_slip_beats_a_well_known_name() {
 }
 
 #[test]
+fn letters_typed_the_other_way_round_are_a_likely_slip() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "tesla.com",
+        Some("Tesla"),
+        None,
+        &["Tesla"],
+        &[],
+        popular(400, 20_000),
+    ));
+    records.push(site(
+        "tulsa.gov",
+        Some("Tulsa"),
+        None,
+        &["Tulsa"],
+        &[],
+        popular(300, 25_000),
+    ));
+    // The sites teach that a letter is often typed as "u", and show many
+    // turns, but never one of "sl", nor any one pair of letters turned
+    // often enough to be a rule of its own.
+    let words = [
+        ("metal", "mutal"),
+        ("melon", "mulon"),
+        ("pedal", "pudal"),
+        ("world", "wrold"),
+        ("house", "hosue"),
+        ("garden", "gardne"),
+        ("market", "makret"),
+    ];
+    let mut n = 0;
+    for (meant, slip) in words {
+        for (word, count) in [(meant, 30), (slip, 2)] {
+            for i in 0..count {
+                n += 1;
+                records.push(site(
+                    &format!("turns{n}.com"),
+                    Some(&format!("{word} {i}")),
+                    None,
+                    &[],
+                    &[],
+                    obscure(5_000_000 + n, 5),
+                ));
+            }
+        }
+    }
+    for i in 0..60 {
+        records.push(site(
+            &format!("tulsa{i}.com"),
+            Some(&format!("Tulsa lease {i}")),
+            None,
+            &[],
+            &[],
+            obscure(6_000_000 + i, 5),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    for typed in ["telsa", "telsa lease"] {
+        let results = search_spelled(&searcher, typed);
+        let fixed = suggestion(&results).unwrap_or_default();
+        assert!(fixed.starts_with("tesla"), "{typed}: {fixed}");
+    }
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
