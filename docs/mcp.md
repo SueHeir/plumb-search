@@ -102,7 +102,7 @@ curl -s https://plumbsearch.org/mcp -H 'content-type: application/json' -d '{
 
 ## Tools
 
-The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs). They answer from the node's index, except `read_page`, which fetches a page, and `report_finding`, which keeps what an agent found. Where `read_page` is offered, `site_info` also reads the front page of a site the index has no title or description for, or the page or subdomain an address names. Every tool also takes an optional `country`: a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country decides.
+The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs). They answer from the node's index, except `read_page`, which fetches a page, and `report_finding`, which keeps what an agent found. Where `read_page` is offered, `site_info` also reads the front page of a site the index has no title or description for, or the page or subdomain an address names. `official_site`, `check_lookalike`, `search`, `site_info` and `facts` also take an optional `country`: a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country decides.
 
 | Tool | Takes | Returns | Offered to |
 | --- | --- | --- | --- |
@@ -242,8 +242,9 @@ How `/mcp` is served ([web/mcp.rs](../crates/plumb-node/src/web/mcp.rs)):
 | [findings.rs](../crates/plumb-node/src/findings.rs) | Keeping and matching findings |
 | [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs) | `node_tuning`, `focus_topics`, `fetch_pages`, `grade_site` and the `improve_search` prompt |
 
-The end-to-end tests run every tool over the fixture index, through `plumb mcp --index` and through `/mcp`:
+The tests in [mcp/tests/](../crates/plumb-node/src/mcp/tests) cover every tool and the protocol. The end-to-end tests run `official_site`, `check_lookalike` and `read_page` over the fixture index, through `plumb mcp --index` and through `/mcp`:
 
 ```sh
+cargo test -p plumb-node mcp
 cargo test -p plumb-node --test end_to_end mcp
 ```

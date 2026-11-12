@@ -83,7 +83,7 @@ services:
       - --drop-dead-sites
       # Page set and map files change here only by hand for now, and sets
       # this node has no file of are not taken: this
-      # machine has under 8 GB, and a much bigger set (hpc's 6.8 million
+      # machine has under 8 GB, and a much bigger set (a bigger node's 6.8 million
       # Wikipedia pages) would not fit next to the node (2026-10-09).
       - --set-updates
       - "off"
