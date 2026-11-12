@@ -68,7 +68,7 @@ flowchart LR
 | [findings.rs](src/findings.rs), [experiments.rs](src/experiments.rs) | What AI agents report through MCP; ranking experiments from `experiments.json` |
 | **Web and MCP** | |
 | [web.rs](src/web.rs) | The router, `plumb serve`, shutdown signals |
-| [web/search.rs](src/web/search.rs), [results.rs](src/web/results.rs), [hit.rs](src/web/hit.rs), [answers.rs](src/web/answers.rs), [places.rs](src/web/places.rs), [weather.rs](src/web/weather.rs) | The results page: own and network results, pages, places, instant answers, info box |
+| [web/search.rs](src/web/search.rs), [results.rs](src/web/results.rs), [hit.rs](src/web/hit.rs), [answers.rs](src/web/answers.rs), [places.rs](src/web/places.rs), [weather.rs](src/web/weather.rs), [plugin_results.rs](src/web/plugin_results.rs) | The results page: own and network results, pages, places, instant answers, info box, what plugins add |
 | [web/api.rs](src/web/api.rs), [searxng.rs](src/web/searxng.rs), [backend.rs](src/web/backend.rs) | JSON API, SearXNG-format results; the `SearchBackend` and `StatusSource` traits |
 | [web/panel.rs](src/web/panel.rs), [panel/](src/web/panel/view.rs), [setup.rs](src/web/setup.rs), [control.rs](src/web/control.rs), [nodes.rs](src/web/nodes.rs) | The panel at `/app`; the remote control API; controlling other nodes |
 | [web/private.rs](src/web/private.rs), [relay.rs](src/web/relay.rs) | Private search page and buckets; relaying sealed bucket requests |

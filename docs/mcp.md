@@ -102,7 +102,7 @@ curl -s https://plumbsearch.org/mcp -H 'content-type: application/json' -d '{
 
 ## Tools
 
-The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs). They answer from the node's index, except `read_page`, which fetches a page, and `report_finding`, which keeps what an agent found. Where `read_page` is offered, `site_info` also reads the front page of a site the index has no title or description for, or the page or subdomain an address names. Every tool also takes an optional `country`: a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country decides.
+The tools are defined in [mcp/tools.rs](../crates/plumb-node/src/mcp/tools.rs), and those that change the node in [mcp/manage.rs](../crates/plumb-node/src/mcp/manage.rs). They answer from the node's index, except `read_page`, which fetches a page, and `report_finding`, which keeps what an agent found. Where `read_page` is offered, `site_info` also reads the front page of a site the index has no title or description for, or the page or subdomain an address names. Every tool also takes an optional `country`: a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country decides.
 
 | Tool | Takes | Returns | Offered to |
 | --- | --- | --- | --- |
