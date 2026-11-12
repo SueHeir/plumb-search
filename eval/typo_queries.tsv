@@ -1,4 +1,5 @@
-# Misspelled versions of eval/brand_queries.tsv, for typo suggestions.
+# Misspelled versions of eval/brand_queries.tsv, for typo suggestions,
+# alone and next to a task word.
 # Hand-made: dropped, doubled, swapped and neighbouring-key letters, plus
 # common misspellings ("craiglist", "marriot", "world health organisation").
 # Each typo's expected sites are the brand query's.
@@ -286,3 +287,31 @@ xfinty	xfinity.com
 olympcs	olympics.com
 premeir league	premierleague.com
 nascr	nascar.com
+
+# A misspelled name next to a task word, where the other word can pull the
+# spelling toward a different name ("telsa lease" was fixed to "tulsa lease"
+# in run 7 of the 1,000-search review).
+telsa lease	tesla.com
+telsa model 3 price	tesla.com
+amazn returns	amazon.com
+netflx login	netflix.com
+spotfy premium	spotify.com
+paypl customer service	paypal.com
+chsae credit card	chase.com
+wells frago login	wellsfargo.com
+costoc gas prices	costco.com
+targte weekly ad	target.com
+starbuks menu	starbucks.com
+mcdonlds breakfast hours	mcdonalds.com
+southwset flights	southwest.com
+dleta baggage fees	delta.com
+hilotn honors	hilton.com
+marriot bonvoy	marriott.com
+expeida hotels	expedia.com
+geicco quote	geico.com
+fedx tracking	fedex.com
+verizn outage	verizon.com
+githbu pricing	github.com
+discrod download	discord.com
+nvidai drivers	nvidia.com
+reddt news	reddit.com

@@ -39,7 +39,7 @@ plumb-tools eval --index DIR --queries eval/brand_queries.tsv
 | File | Kind of search | Expected answer | Run with |
 | --- | --- | --- | --- |
 | `brand_queries.tsv` | An organization's name ("chase") | Its official site | |
-| `typo_queries.tsv` | A misspelled name ("chsae") | The brand's site | `--follow-suggestions` to measure what one click on "Did you mean" finds |
+| `typo_queries.tsv` | A misspelled name ("chsae"), alone or with a task word ("telsa lease") | The brand's site | `--follow-suggestions` to measure what one click on "Did you mean" finds |
 | `ai_queries.tsv` | What an AI agent looks up ("rust docs", "paypal login") | The official site | |
 | `utility_queries.tsv` | A tool or a quick fact ("weather", "20 usd to eur") | Any site that does the job | |
 | `described_queries.tsv` | A site described, not named ("cheap flights") | Any of several fitting sites | `--vectors`, `--model` for search by meaning |
