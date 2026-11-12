@@ -38,6 +38,7 @@ Every page about Plumb Search, grouped by what you want to do. New here? Start w
 | [Cache-first network search](cache-first-search.md) | Network search's bucket cache and scheduled rounds |
 | [Page sets](pages.md) | The signed sets of single pages: Wikipedia, GitHub, Stack Exchange, packages, books, papers and podcasts |
 | [How search is doing](search-quality.md) | Results of the 1,000-search review, run by run, with charts |
+| [Roadmap](roadmap.md) | What is left to do: weak spots in search, open items of the improvement plan, and data to rebuild |
 
 ## The code
 

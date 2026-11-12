@@ -92,7 +92,7 @@ Plumb is good at finding a thing by its name and weaker when a search describes 
 
 ## Contributing
 
-Issues and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) has the details, and [SECURITY.md](SECURITY.md) says how to report a security problem. Before opening a pull request, run:
+Issues and pull requests are welcome: [the roadmap](docs/roadmap.md) lists what is left to do, [CONTRIBUTING.md](CONTRIBUTING.md) has the details, and [SECURITY.md](SECURITY.md) says how to report a security problem. Before opening a pull request, run:
 
 ```sh
 cargo fmt --all --check
