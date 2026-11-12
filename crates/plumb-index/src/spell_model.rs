@@ -11,7 +11,8 @@
 //!   edit away found in at least [`MINED_RATIO`] times as many sites ("words
 //!   are usually spelled as intended"), and what was changed is counted as
 //!   substring rules of up to two letters (Brill and Moore): `k -> ck`,
-//!   `ll -> l`, `ie -> ei`. A rule's probability is how often its letters
+//!   `ll -> l`, `ie -> ei`, and every turn of two letters also as one rule
+//!   for any two ([`TURN`]). A rule's probability is how often its letters
 //!   were typed that way, among all the times they were meant. A typo then
 //!   costs what its edits cost: a doubled letter dropped is cheap, a first
 //!   letter changed is dear.
@@ -55,6 +56,11 @@ const MAX_WORD_CHARS: usize = 24;
 /// rules say: typos rarely start a word ("fedx" is fedex, not edx), and
 /// the pairs mined include names that differ in their first letter.
 const FIRST_LETTER_SHARE: f32 = 0.1;
+/// The rule every pair of letters typed the other way round is also read
+/// as. Turns are common slips, but each pair of letters is turned in too
+/// few mined pairs to learn it alone, while a letter changed is learned
+/// from every word it is in: "telsa" was taken for "tulsa", not "tesla".
+const TURN: &str = "~~";
 /// Stupid Backoff's discount for a word seen without the word before it.
 const BACKOFF: f64 = 0.4;
 /// While building, the most word pairs and words held at once. Past
@@ -561,7 +567,10 @@ fn rules(marked: &[char], edit: &Edit) -> Vec<(String, String)> {
             (s(at - 1..at), format!("{}{typed}", m[at - 1])),
             (s(at..at + 1), format!("{typed}{}", m[at])),
         ],
-        Edit::Turn { at } => vec![(s(at..at + 2), format!("{}{}", m[at + 1], m[at]))],
+        Edit::Turn { at } => vec![
+            (s(at..at + 2), format!("{}{}", m[at + 1], m[at])),
+            (TURN.into(), TURN.into()),
+        ],
     }
 }
 
@@ -768,7 +777,10 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
                 *substrings.entry(pair).or_insert(0) += docs;
             }
         }
-        letters += docs * term.chars().count() as u64;
+        let len = term.chars().count() as u64;
+        // Any two letters in a row can be turned.
+        *substrings.entry(TURN.into()).or_insert(0) += docs * len.saturating_sub(1);
+        letters += docs * len;
         meant.push((term.chars().collect(), docs));
     })?;
     let mut by_deletion: Vec<(u64, u32)> = Vec::new();
@@ -887,7 +899,10 @@ mod tests {
             rules_of("allstate", "alstate"),
             [vec![pair("al", "a"), pair("ll", "l")]]
         );
-        assert_eq!(rules_of("visa", "vias"), [vec![pair("sa", "as")]]);
+        assert_eq!(
+            rules_of("visa", "vias"),
+            [vec![pair("sa", "as"), pair(TURN, TURN)]]
+        );
         assert_eq!(
             rules_of("hertz", "herts"),
             [vec![pair("z", "s"), pair("tz", "ts"), pair("z$", "s$")]]

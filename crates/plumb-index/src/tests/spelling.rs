@@ -385,6 +385,51 @@ fn a_likelier_slip_beats_a_well_known_name() {
 }
 
 #[test]
+fn letters_typed_the_other_way_round_are_a_slip_of_any_letters() {
+    let mut records = typo_corpus();
+    for (domain, name, rank) in [("tulsa.gov", "Tulsa", 200), ("tesla.com", "Tesla", 300)] {
+        records.push(site(
+            domain,
+            Some(name),
+            None,
+            &[name],
+            &[],
+            popular(rank, 30_000),
+        ));
+    }
+    // Each pair of letters is turned round in one slip only, too few to
+    // learn that pair, but together they teach that letters are often
+    // typed the other way round.
+    let words = [
+        ("because", "becuase"),
+        ("problem", "probelm"),
+        ("world", "wrold"),
+        ("garden", "gardne"),
+    ];
+    for (i, (word, slip)) in words.into_iter().enumerate() {
+        for (j, text) in std::iter::repeat_n(word, 30)
+            .chain(std::iter::repeat_n(slip, 2))
+            .enumerate()
+        {
+            let n = (i * 100 + j) as u64;
+            records.push(site(
+                &format!("turned{n}.com"),
+                Some(&format!("Notes on {text} {n}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + n, 10),
+            ));
+        }
+    }
+    let (_dir, searcher) = build(&records);
+    let model = searcher.spelling_model().expect("a spelling model");
+    assert!(model.ln_channel("telsa", "tesla") > model.ln_channel("telsa", "tulsa"));
+    let results = search_spelled(&searcher, "telsa");
+    assert_eq!(suggestion(&results), suggested("tesla"));
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
