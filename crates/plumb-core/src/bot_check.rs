@@ -148,8 +148,9 @@ const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»',
 /// Title beginnings, after [`normalize_text`], that only a bot check or a
 /// page standing in for the homepage has ("Just a moment...", "Checking
 /// your browser before accessing example.com", "Bot Verification | Example
-/// Council", "Redirecting Request. Please wait.").
+/// Council", "Redirecting Request. Please wait.", "Antibot Block (chiki)").
 const CHECK_TITLE_STARTS: &[&str] = &[
+    "antibot block",
     "attention required",
     "bot verification",
     "checking your browser",
@@ -193,6 +194,7 @@ const CHECK_PHRASES: &[&str] = &[
 
 /// Vendors whose own homepages talk about their checks.
 const CHECK_VENDORS: &[&str] = &[
+    "antibot",
     "captcha",
     "cloudflare",
     "ddos-guard",
@@ -545,6 +547,7 @@ mod tests {
             "Link11 - CAPTCHA",
             "Access Denied",
             "Verification",
+            "Antibot Block (chiki)",
         ] {
             assert!(check("example.com", title), "{title}");
         }
@@ -701,6 +704,10 @@ mod tests {
             ("captcha.com", "Captcha - BotDetect CAPTCHA Generator"),
             ("ddos-guard.net", "DDoS-Guard: DDoS protection and CDN"),
             ("killbot.ru", "KillBot - anti-bot protection"),
+            (
+                "antibot.cloud",
+                "AntiBot Block: bot protection for websites",
+            ),
             ("192-168-1-1-ip.co", "192.168.1.1 Admin Login"),
             ("github.com", "GitHub - SueHeir/plumb-search: Find websites"),
             ("accessdenied.org", "Access Denied Productions"),
