@@ -11,7 +11,7 @@
 //!   edit away found in at least [`MINED_RATIO`] times as many sites ("words
 //!   are usually spelled as intended"), and what was changed is counted as
 //!   substring rules of up to two letters (Brill and Moore): `k -> ck`,
-//!   `ll -> l`, `ie -> ei`. A rule's probability is how often its letters
+//!   `ll -> l`, `ie -> ei`, and any two letters turned round. A rule's probability is how often its letters
 //!   were typed that way, among all the times they were meant. A typo then
 //!   costs what its edits cost: a doubled letter dropped is cheap, a first
 //!   letter changed is dear.
@@ -64,6 +64,13 @@ const BUILD_PAIRS_CAP: usize = 4_000_000;
 const BUILD_WORDS_CAP: usize = 1_500_000;
 /// Words and word pairs found in fewer sites are left out of the file.
 const MIN_SAVED_COUNT: u32 = 3;
+/// The rule for any two neighbouring letters typed the other way round,
+/// as both its meant and typed letters. A swapped letter falls back to
+/// what that letter is typed as anywhere; without this, two letters
+/// turned round would cost an unseen edit unless those very letters were
+/// learned, though turning letters round is among the commonest slips
+/// ("telsa" for tesla, not tulsa).
+const ANY_TURN: &str = "<>";
 
 /// Words in one string, so a million of them take little more memory than
 /// their letters.
@@ -561,7 +568,10 @@ fn rules(marked: &[char], edit: &Edit) -> Vec<(String, String)> {
             (s(at - 1..at), format!("{}{typed}", m[at - 1])),
             (s(at..at + 1), format!("{typed}{}", m[at])),
         ],
-        Edit::Turn { at } => vec![(s(at..at + 2), format!("{}{}", m[at + 1], m[at]))],
+        Edit::Turn { at } => vec![
+            (s(at..at + 2), format!("{}{}", m[at + 1], m[at])),
+            (ANY_TURN.to_string(), ANY_TURN.to_string()),
+        ],
     }
 }
 
@@ -768,7 +778,9 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
                 *substrings.entry(pair).or_insert(0) += docs;
             }
         }
-        letters += docs * term.chars().count() as u64;
+        let chars = term.chars().count() as u64;
+        *substrings.entry(ANY_TURN.to_string()).or_insert(0) += docs * (chars - 1);
+        letters += docs * chars;
         meant.push((term.chars().collect(), docs));
     })?;
     let mut by_deletion: Vec<(u64, u32)> = Vec::new();
@@ -887,7 +899,10 @@ mod tests {
             rules_of("allstate", "alstate"),
             [vec![pair("al", "a"), pair("ll", "l")]]
         );
-        assert_eq!(rules_of("visa", "vias"), [vec![pair("sa", "as")]]);
+        assert_eq!(
+            rules_of("visa", "vias"),
+            [vec![pair("sa", "as"), pair(ANY_TURN, ANY_TURN)]]
+        );
         assert_eq!(
             rules_of("hertz", "herts"),
             [vec![pair("z", "s"), pair("tz", "ts"), pair("z$", "s$")]]
@@ -952,6 +967,17 @@ mod tests {
         assert!(m.ln_channel("amtrac", "amtrak") > m.ln_channel("amtrc", "amtrak"));
         assert!(m.learned("amtrack", "amtrak"));
         assert!(!m.learned("amtrek", "amtrak"));
+    }
+
+    #[test]
+    fn letters_turned_round_cost_what_any_turn_does() {
+        // Vowels are often typed for each other and letters turned round,
+        // but "ls" for "sl" was never seen as such.
+        let m = Model::with_rules(&[("e", "u", 0.001), (ANY_TURN, ANY_TURN, 0.002)], 1e-6);
+        assert!(m.learned("telsa", "tesla"));
+        assert!(m.ln_channel("telsa", "tesla") > m.ln_channel("telsa", "tulsa"));
+        let unseen = Model::with_rules(&[("e", "u", 0.001)], 1e-6);
+        assert!(!unseen.learned("telsa", "tesla"));
     }
 
     #[test]
