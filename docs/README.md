@@ -71,3 +71,8 @@ Dated reviews and plans, kept as they were written. The code has moved on since,
 | [reviews/architecture.md](reviews/architecture.md) | An architecture and data-flow map from 2026-10-04 |
 | [reviews/privacy-security.md](reviews/privacy-security.md) | A privacy and security review from 2026-10-04 |
 | [reviews/search-generality-audit.md](reviews/search-generality-audit.md) | An audit that search rules are general, not fitted to test cases |
+| [reviews/search-quality-batch.md](reviews/search-quality-batch.md) | How the search-quality batch of 2026-10-09 was run |
+| [reviews/search-improvement-plan.md](reviews/search-improvement-plan.md) | The search improvement plan after the 2026-10-09 audit, with the cases it found |
+| [reviews/search-quality-results.md](reviews/search-quality-results.md) | What that batch's release changed and measured, 2026-10-10 |
+| [reviews/paper-repair-integration.md](reviews/paper-repair-integration.md) | How paper records are checked and repaired, from October 2026 |
+| [operations/release-supervision.md](operations/release-supervision.md) | The runbook for 0.2.x search-quality releases |
