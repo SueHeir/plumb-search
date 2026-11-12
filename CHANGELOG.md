@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Search
+
+- Sites a language model graded spam or of little use, published by the project as the signed set `plumb/site-grades`, are pushed down in a node's searches and in the answers other nodes send it: spam loses 90% of its score (unless the search is its address) and low value 30% (unless the search names it or it is an official site). The panel's Site grades setting (100% by default) scales both, and 0 turns them off ([network.md](docs/network.md), [running-a-node.md](docs/running-a-node.md#the-panel-and-saved-settings)).
+- A sure spelling now shows its results in place of the typed search's ("Showing results for"): when each word it changes is one the page sets neither know nor are named by and fewer than 20 sites have, no result as typed is named by the search, and the spelling names a page. "ballrat" shows Ballarat's results. A word that no page and no site has is taken for a slip of the nearest page title word, however rare ("rhinoplasy" is rhinoplasty).
+- The page titles' spelling stands in for the sites' when it names a page and is closer to what was typed: "interupt" is no longer read as "internet", and "rooling in the deep" is Rolling in the Deep. A spelling of a site's name stays.
+- A word typed with accents stays as typed in the sites' speller ("Edlén" is not "ellen"), a spelling is not offered when a result is named by the typed word's plural, and words in mis-decoded text are kept whole.
+- In a medical search, the pages of public and clinical health sites (MedlinePlus, the NIH, the NHS, the CDC, the FDA, the WHO and others) come before other sites' pages, and no other site's page is listed above a source the search names. A reference page on a best site needs a word of the search besides the site's name.
+- A typed address's `www` and `http` no longer link to articles: "www.pearsonmylabs.com access code" is not about the World Wide Web.
+- Search by meaning over page sets (`--page-vectors`, for trying out, off by default) searches every set's vectors, not only articles', and lists the nearest page only when it stands out from the rest and is near the sites listed. See [pages.md](docs/pages.md) for the limits and what they were checked against.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
@@ -21,6 +31,10 @@
 
 ### Tools
 
+- `plumb-tools set site-grades` writes a language model's grades as the `plumb/site-grades` set, and [tools/grades](tools/grades/README.md) has the script that grades sites.
+- Fetching the `docs`, `reference` and `subpages2` sets reads the sitemaps about a site's roots first, makes up for pages that are gone or moved with the next ones picked, leaves a site that refuses 100 pages in a row, follows links two deep on a site with no sitemap, and keeps a site's pages when no more than one request in 20 failed ([pages.md](docs/pages.md)). The reference set no longer fetches WebMD, Healthline, eMedicineHealth, unitconverters.net or support.apple.com, nor uscis.gov's archive, news and outreach pages, and its pages are written without their headings or passages.
+- The evals list a search's pages through the same code a node does (`Listing` in plumb-index), order its sites after the learned order as a node does, and search as from the US in English, a node's default, where they had drifted from what a node serves.
+- `plumb-tools embed-pages --without-snippet` embeds pages from their title and description alone.
 - A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
 - `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
