@@ -524,7 +524,7 @@ async fn add(State(state): State<AppState>, request: Request) -> Response {
     };
     let mut id_bytes = [0u8; 6];
     if getrandom::fill(&mut id_bytes).is_err() {
-        id_bytes = now_unix().to_le_bytes()[..6].try_into().unwrap();
+        id_bytes.copy_from_slice(&now_unix().to_le_bytes()[..6]);
     }
     let remote = RemoteNode {
         id: hex_encode(&id_bytes),

@@ -176,12 +176,9 @@ pub fn build_page_index_with_budget(
                     document.add_u64(fields.paper_year, year);
                     stats.papers.publication_year += 1;
                 }
-                if let Some(date) = paper
-                    .publication_date
-                    .as_deref()
-                    .filter(|d| day_number(d).is_some())
-                {
-                    document.add_u64(fields.paper_day, day_number(date).unwrap());
+                let date = paper.publication_date.as_deref();
+                if let Some((date, day)) = date.and_then(|date| Some((date, day_number(date)?))) {
+                    document.add_u64(fields.paper_day, day);
                     stats.papers.publication_day += 1;
                     if stats
                         .papers

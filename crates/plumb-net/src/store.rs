@@ -71,7 +71,9 @@ impl DeliveryAck {
         }
         // The rename and its directory entry must survive receiver restart.
         #[cfg(unix)]
-        fs::File::open(self.path.parent().unwrap())?.sync_all()?;
+        if let Some(dir) = self.path.parent() {
+            fs::File::open(dir)?.sync_all()?;
+        }
         Ok(())
     }
 }
