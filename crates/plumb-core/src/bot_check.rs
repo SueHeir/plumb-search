@@ -23,6 +23,7 @@ const CHECK_TITLES: &[&str] = &[
     "are you a robot",
     "are you human",
     "attention required",
+    "bad request",
     "bot check",
     "bot verification",
     "client challenge",
@@ -63,6 +64,7 @@ const CHECK_TITLES: &[&str] = &[
 /// System Down", "Walmart: Verifica tu identidad", "Unsupported Browser |
 /// Microsoft Teams".
 const STAND_IN_TITLE_PARTS: &[&str] = &[
+    "400 bad request",
     "404 not found",
     "500 internal server error",
     "502 bad gateway",
@@ -447,18 +449,32 @@ pub fn is_sign_in_portal(domain: &str, title: &str) -> bool {
 }
 
 /// Whether `text` shows what the crawler sent rather than what the site
-/// says: this crawler's User-Agent (`PlumbSearch/0.1.0 (+https://...)`) or
-/// an IPv4 address in brackets, the visitor's address as KillBot's check
-/// puts it ("KillBot user verification [203.0.113.7] [PlumbSearch/...]").
-/// Such text would also publish the crawler's address.
+/// says: this crawler's User-Agent (`PlumbSearch/0.1.0 (+https://...)`), an
+/// IPv4 address in brackets, the visitor's address as KillBot's check puts
+/// it ("KillBot user verification [203.0.113.7] [PlumbSearch/...]"), or an
+/// address with nothing but a time beside it ("203.0.113.7 12.10.2026
+/// 04:12:25", which some hosts title every page they block with). Such text
+/// would also publish the crawler's address.
 pub fn echoes_the_request(text: &str) -> bool {
     if shows_the_user_agent(text) {
         return true;
     }
-    text.split('[')
-        .skip(1)
-        .filter_map(|after| after.split_once(']'))
-        .any(|(inside, _)| inside.trim().parse::<std::net::Ipv4Addr>().is_ok())
+    let is_address = |word: &str| word.trim().parse::<std::net::Ipv4Addr>().is_ok();
+    let stamped = {
+        let mut words = text.split_whitespace();
+        words.next().is_some_and(is_address)
+            && words.clone().next().is_some()
+            && words.all(|word| {
+                word.chars()
+                    .all(|c| c.is_ascii_digit() || ".:-/".contains(c))
+            })
+    };
+    stamped
+        || text
+            .split('[')
+            .skip(1)
+            .filter_map(|after| after.split_once(']'))
+            .any(|(inside, _)| is_address(inside))
 }
 
 /// Whether `text` shows this crawler's User-Agent.
@@ -579,6 +595,8 @@ mod tests {
             ("statesman.com", "Client Challenge"),
             ("example.com", "Example: Under Maintenance"),
             ("example.com", "503 Service Unavailable"),
+            ("sphost4.com", "Bad Request"),
+            ("example.com", "400 Bad Request | nginx"),
             ("example.com", "Error"),
             ("amazon.com.au", "Server Busy"),
             ("canva.com", "Unsupported client – Canva"),
@@ -641,7 +659,16 @@ mod tests {
             &[],
             None,
         ));
+        for title in [
+            "107.155.87.14 12.10.2026 04:12:25",
+            "203.0.113.7 2026-10-12",
+        ] {
+            assert!(check("slivkursov.pro", title), "{title}");
+        }
         assert!(!echoes_the_request("Array [1.5] and [x]"));
+        // An address alone, or with words, is a site's name or subject.
+        assert!(!echoes_the_request("1.1.1.1"));
+        assert!(!echoes_the_request("192.168.1.1 Router Login 2026"));
         assert!(!check(crate::HOME_SITE, "Plumb Search"));
     }
 
