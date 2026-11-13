@@ -2,7 +2,7 @@
 
 ## Scope and decision
 
-This release combines scoped docs/symbol retrieval, bounded source passages, owner-evidence identity tools, direct entity facts, shared places/news assembly, language filtering before candidate caps, precise paper-date APIs, safe refresh/cache publication, provider identity validation, build attestation and the existing HPC memory fixes.
+This release combines scoped docs/symbol retrieval, bounded source passages, owner-evidence identity tools, direct entity facts, shared places/news assembly, language filtering before candidate caps, precise paper-date APIs, safe refresh/cache publication, provider identity validation, build attestation and the existing memory fixes.
 
 The experimental whole-query promotion is retained for diagnostics and opt-in development but disabled by default in native and private search. The final subject-guard run improved many cases yet dropped a present passport destination and substantially demoted several established owners. The bounded release uses the conservative ranking path plus a generic retention correction. No frozen labels were changed, and query/host/DOI-specific exceptions were not restored.
 
@@ -46,7 +46,7 @@ The core evaluation does not load the full 24-million-place index. A separate ma
 
 At final code `96198f5`, 1,696 workspace tests passed with five ignored; strict workspace Clippy and formatting passed, along with three MCP example tests, one paper helper test and ten Python contract/provider-identity tests. Focused native semantic-boundary controls, all 29 private tests and private WASM checks passed. Exact-head GitHub CI remains a separate merge check.
 
-Main merge and HPC/Mac activation are separate milestones. Deployments preserve the old executable and consistent recoverable data outside startup index cleanup. Mac recovery must fit its 10 GB Plumb allocation, using validated nonsensitive recovery on existing HPC where needed while sensitive local state stays local. Cleanup reclaimed 111.41 GiB from verified inactive DIRT/SOIL/GRASS build trees without deleting source/Git/preserved outputs.
+Main merge and test-server activation are separate milestones. Deployments preserve the old executable and consistent recoverable data outside startup index cleanup. A desktop deployment's recovery must fit its 10 GB Plumb allocation, using validated nonsensitive recovery on the test server where needed while sensitive local state stays local. Cleanup reclaimed 111.41 GiB from verified inactive build trees without deleting source/Git/preserved outputs.
 
 ## Next priorities
 
