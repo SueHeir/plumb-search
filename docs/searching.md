@@ -210,7 +210,7 @@ The search addresses take the same parameters as the results page:
 |---|---|
 | `q` | The search. Cut to 200 characters. |
 | `limit` | Results, 10 by default, at most 100. Not a whole number: 400. |
-| `country`, `only`, `lang`, `safe`, `exact`, `net` | As in [Settings](#settings) |
+| `country`, `only`, `lang`, `safe`, `news`, `exact`, `net` | As in [Settings](#settings) |
 | `kind`, `after`, `before`, `order` | [Paper search](#papers) |
 | `full` | `1` for the whole page as an object (`/api/search`) |
 | `format`, `pageno`, `safesearch`, `categories`, `time_range` | SearXNG (`/search?format=json`) |

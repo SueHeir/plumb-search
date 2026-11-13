@@ -225,6 +225,8 @@ plumb healthcheck --url http://127.0.0.1:8080 --timeout 5   # both are the defau
 curl -s http://127.0.0.1:8080/api/status
 ```
 
+`plumb build-info` prints the version, Git revision and whether the build had uncommitted changes, as JSON, without starting a node.
+
 `/api/status` answers at any time, setup included, with the node's status and build:
 
 | Field | Meaning |

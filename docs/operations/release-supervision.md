@@ -1,5 +1,7 @@
 # Search release supervision
 
+_A record: written for the 0.2 releases in October 2026 and kept as it was. Node management has since shipped (0.4), so check anything here against [running a node](../running-a-node.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md)._
+
 This runbook covers 0.2.x search-quality releases. LLMs may help evaluate search
 results; node management and recommendation product features belong to 0.3.x.
 Use subscription-backed agent execution only. Do not enable API-billed model
