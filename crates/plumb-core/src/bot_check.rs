@@ -18,11 +18,13 @@ use crate::{canonical_domain, normalize_text, parent_domain, Redirect};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
+    "400 bad request",
     "403 forbidden",
     "access denied",
     "are you a robot",
     "are you human",
     "attention required",
+    "bad request",
     "bot check",
     "bot verification",
     "client challenge",
@@ -63,6 +65,7 @@ const CHECK_TITLES: &[&str] = &[
 /// System Down", "Walmart: Verifica tu identidad", "Unsupported Browser |
 /// Microsoft Teams".
 const STAND_IN_TITLE_PARTS: &[&str] = &[
+    "400 bad request",
     "404 not found",
     "500 internal server error",
     "502 bad gateway",
@@ -312,6 +315,7 @@ pub fn is_stand_in_homepage(
 ) -> bool {
     is_bot_check_page(domain, title, description, headings, body_text)
         || defaced_or_checking(title)
+        || title.is_some_and(only_an_address_and_time)
         || only_greets(title, description, headings, body_text)
         || only_an_abuse_contact(title, description, headings, body_text)
 }
@@ -323,6 +327,20 @@ fn defaced_or_checking(title: Option<&str>) -> bool {
     title
         .map(normalize_text)
         .is_some_and(|title| title == "checking" || title.starts_with("hacked by "))
+}
+
+/// Whether a homepage's title is a server's address and the time and
+/// nothing else, with no letters: russerialov.net's "107.155.87.14
+/// 12.10.2026 04:12:25", which a search for "python requests timeout"
+/// found by meaning. A server shows it for a host it has no site for.
+fn only_an_address_and_time(title: &str) -> bool {
+    let mut words = title.split_whitespace();
+    let mut address = false;
+    words.all(|word| {
+        address |= word.parse::<std::net::Ipv4Addr>().is_ok();
+        word.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ':' | '-' | '/' | ','))
+    }) && address
 }
 
 /// Whether a homepage's whole text greets and says nothing else
@@ -558,6 +576,8 @@ mod tests {
                 "the-brooklyn-star.com",
                 "Hacked By Peyman Siyahi & M@raz Ali",
             ),
+            ("russerialov.net", "107.155.87.14 12.10.2026 04:12:25"),
+            ("example.com", "203.0.113.7"),
         ] {
             assert!(
                 is_stand_in_homepage(domain, Some(title), None, &[], None),
@@ -569,6 +589,13 @@ mod tests {
             "example.com",
             "Hacked by North Korea: inside the Sony breach"
         ));
+        // A title of numbers alone, with no address, is the site's own.
+        for title in ["1984", "2048", "24/7", "1.1.1.1 the free app"] {
+            assert!(
+                !is_stand_in_homepage("example.com", Some(title), None, &[], None),
+                "{title}"
+            );
+        }
     }
 
     #[test]
@@ -580,6 +607,9 @@ mod tests {
             ("example.com", "Example: Under Maintenance"),
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
+            ("sphost4.com", "Bad Request"),
+            ("example.com", "400 Bad Request"),
+            ("example.com", "Example | 400 Bad Request"),
             ("amazon.com.au", "Server Busy"),
             ("canva.com", "Unsupported client – Canva"),
             ("oilpatchsurplus.com", "Website Suspended"),
