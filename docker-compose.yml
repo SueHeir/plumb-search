@@ -19,9 +19,10 @@ services:
       # cannot be renamed.
       - plumb-data:/data
     # Settings are flags of `plumb run` (see docs/docker.md). To change them,
-    # uncomment this line and add flags, keeping --data and --bind as they are
-    # (leave out --network to keep the node to itself):
-    # command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--sites", "250000"]
+    # uncomment this line and add flags. It replaces the image's default command
+    # whole, so keep --data and --bind as they are, and --network and
+    # --search-by-meaning unless you want them off:
+    # command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--sites", "250000"]
     init: true
     restart: unless-stopped
     # A stopping node first finishes an index build that is under way: up to
