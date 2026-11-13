@@ -64,6 +64,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `spelling` | Show what an index's spelling model learned |
 | | `embed` | Make each site's vector for search by meaning (the model downloads on first use) |
 | Ranking | `eval` | Measure where the expected answers of test searches rank (see [eval/README.md](../../eval/README.md)) |
+| | `live-eval` | Ask the same test searches of a node that is already running, through its JSON API, and count what it listed |
 | | `check-labels` | Check that the pages a queries file expects are in the page sets |
 | | `train-rank` | Train the learned ranking on what `eval --features-out` wrote, and measure it |
 | Records and data | `storage` | Measure a node's storage and private-search bucket sizes, read-only |
@@ -179,6 +180,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [search.rs](src/search.rs) | `index`, `search`, `spelling` |
 | [embed.rs](src/embed.rs) | `embed` |
 | [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training |
+| [live_eval.rs](src/live_eval.rs) | `live-eval`: the suites against a running node's `/api/search` |
 | [eval/contracts.rs](src/eval/contracts.rs) | `eval --report`: JSONL contracts and reproducible reports |
 | [eval/rerank.rs](src/eval/rerank.rs) | A cross-encoder second pass, for `eval --rerank-model` |
 | [eval_labels.rs](src/eval_labels.rs) | `check-labels` |

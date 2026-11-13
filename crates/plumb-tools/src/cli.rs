@@ -42,6 +42,9 @@ pub enum Command {
     FetchLeads(FetchLeadsArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Ask the same queries of a node that is already running, through its
+    /// JSON API, and count where it listed each expected answer.
+    LiveEval(LiveEvalArgs),
     /// Check that the pages a queries file expects are in the page sets.
     CheckLabels(crate::eval_labels::CheckLabelsArgs),
     /// Train the learned ranking on the test searches `eval
@@ -710,6 +713,36 @@ fn any_or(text: &str, parse: fn(&str) -> Result<String, String>) -> Result<Strin
     } else {
         parse(text)
     }
+}
+
+/// `plumb-tools live-eval`: the test searches against a running node.
+#[derive(Debug, Clone, Args)]
+pub struct LiveEvalArgs {
+    /// The node to ask, such as http://127.0.0.1:8080 (a node in Docker),
+    /// http://127.0.0.1:7586 (the desktop app) or https://plumbsearch.org.
+    #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:8080")]
+    pub node: String,
+    /// A queries file, the same ones `eval` reads. Can be given more than
+    /// once; each is measured on its own.
+    #[arg(long, value_name = "PATH")]
+    pub queries: Vec<PathBuf>,
+    /// Ask only this many queries of each file, spread evenly over it, to
+    /// keep a run short and a public node's load small.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// Ask only one half of the queries, as `eval --half` does
+    /// [default: both].
+    #[arg(long, value_name = "HALF")]
+    pub half: Option<Half>,
+    /// Check the node's instant answer against the expected texts rather
+    /// than its results, as `eval --facts` does. `fact_queries.tsv` is
+    /// measured this way whether this is given or not.
+    #[arg(long)]
+    pub facts: bool,
+    /// Print every query the node did not answer first, with where its
+    /// expected answer was instead.
+    #[arg(long)]
+    pub misses: bool,
 }
 
 /// A half of a queries file, for `plumb-tools eval --half`.

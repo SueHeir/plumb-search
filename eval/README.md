@@ -4,6 +4,7 @@ The searches every ranking change is measured with, and the scripts around them.
 
 - [What is here](#what-is-here)
 - [Run a suite](#run-a-suite)
+- [Ask a running node](#ask-a-running-node)
 - [The suites](#the-suites)
 - [File format](#file-format)
 - [Tune and held-out halves](#tune-and-held-out-halves)
@@ -33,6 +34,25 @@ plumb-tools eval --index DIR --queries eval/brand_queries.tsv
 ```
 
 `DIR` is a site index: a node's `DATA/indexes/<id>/` or one built with `plumb-tools index` (see [plumb-tools](../crates/plumb-tools/README.md#workflows)). For each queries file `eval` prints the number of queries, the share answered first (top-1) and in the first three (top-3), and the mean reciprocal rank within the results fetched (`MRR@10` by default), with a `miss:` line for each query it got wrong. Give `--queries` several times to measure several files in one run; each is measured on its own. `--min-top1 0.9` makes it exit with an error when a file's top-1 is below 90%.
+
+## Ask a running node
+
+```sh
+plumb-tools live-eval --node https://plumbsearch.org --queries eval/brand_queries.tsv --limit 20
+```
+
+`live-eval` asks a node that is already running through [`/api/search?full=1`](../docs/searching.md#what-comes-back), so it needs no index, no page set files and no model: it measures what a node serves rather than what an index holds. Use it to check a server, a node in Docker or the desktop app after a change, and to see the three outcomes an index alone cannot tell apart:
+
+| Column | What it counts |
+| --- | --- |
+| `#1`, `top3` | The expected answer is among the rows the node lists, first or in the first three |
+| `deeper` | It is in the answer's `pages` but not among the rows: a results page lists at most two pages, so a film, a song or a repository a search names can be in the answer while the rows show sites |
+| `panel` | It is only the panel above the results, as a song's lyrics are |
+| `nowhere` | It is not in the answer at all |
+
+`--limit N` asks N queries of each file, spread evenly over it, and `--half` asks one half, as for `eval`. `--misses` prints every query not answered first. `fact_queries.tsv` is measured as `eval --facts` measures it, against the node's instant answer, and `--facts` does that for any file.
+
+Numbers from `live-eval` and from `eval` are not the same measure: `eval` ranks every result it fetched, `live-eval` only what the node listed. Compare a node with itself before and after a change, and use `eval` for ranking work.
 
 ## The suites
 
