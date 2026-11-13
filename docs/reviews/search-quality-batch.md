@@ -47,7 +47,7 @@ Cleanup removed 240 verified Cargo cache roots from 234 inactive DIRT/SOIL/GRASS
 
 The HPC service restarted externally during dispatch, changing its checkout from `068faba` to `739dd11`, which includes findings-off support. The parent recorded the transition and kept the original probes. Runtime code state must not be inferred from the earlier checkout snapshot.
 
-A frozen search snapshot at `/home/suehr/scratch/plumb-quality-20261009/baseline-snapshot` contains site generation `000145` search/spelling files, all sixteen gzip page sets, the embedding model, and vectors. It uses 3,964,584,112 bytes across 30 files. Each copied file matched the source SHA-256, and site metadata matched before/after copying. Optional privacy/PIR buckets and source lockfiles are omitted; the snapshot is scoped to search evaluation. Future locks and derived indexes belong only in scratch. The snapshot consumes additional space after the cleanup measurement.
+A frozen search snapshot on the HPC node (`plumb-quality-20261009/baseline-snapshot`) contains site generation `000145` search/spelling files, all sixteen gzip page sets, the embedding model, and vectors. It uses 3,964,584,112 bytes across 30 files. Each copied file matched the source SHA-256, and site metadata matched before/after copying. Optional privacy/PIR buckets and source lockfiles are omitted; the snapshot is scoped to search evaluation. Future locks and derived indexes belong only in scratch. The snapshot consumes additional space after the cleanup measurement.
 
 The old 1,000-job agent evaluation was explicitly paused by the user. This batch does not resume it. Evaluation findings must not write to production.
 
