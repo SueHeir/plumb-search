@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Search
+
+- A misspelled search shows the spelling's results when the spelling is sure ("Showing results for ..."), where before it kept the results as typed unless nothing had its words: "abrahm" listed rulesforrebels.info first and Abraham only second, and "ballrat" now shows Ballarat's. A spelling is sure when each word it changes is one the pages neither know nor are named by and fewer than 20 sites have, no site found as typed is named by the search or by that word (or its plural), and the spelling names a page. A one-word search shorter than seven letters, and a word typed with letters outside a-z ("Edlén equation"), stay as typed. [search.md](docs/search.md) has the rules.
+- A word no page and no site has gets a suggestion from the page titles however few pages have the near word ("rhinoplasy" is rhinoplasty), and the titles' spelling stands in for the sites' when it names a page: "interupt" is interrupt, not internet, and "rooling in the deep" is Rolling in the Deep.
+- Sites the project's new signed set `plumb/site-grades` marks as spam or of little use, as a language model graded them, fall behind sites that match as well: spam loses 90% of its score unless the search is its address, little use 30% unless the search names it or it is an official site. Every node takes the set as it takes the adult list. The panel's Site grades setting (100% by default, 0 turns it off) says how far ([running a node](docs/running-a-node.md)).
+- In a medical search the pages of public and clinical health sites come before other sites' pages, and no other site's page is placed above a health source the search names. A search looks at twice as many pages as before and keeps 10 it may list, so a page it could never show no longer takes the place of one it can.
+- A node given page vectors (`--page-vectors`, made with `plumb-tools embed-pages`) lists the page nearest a search in meaning after the first three sites, from every page set it has vectors for. Code pages (docs, repositories, packages, questions) are listed this way only for searches about code. An article that stands out clearly is listed before sites just above it that barely match, but never above the first site, an official site or a site the search names by address. Without the flag nothing changes. [pages.md](docs/pages.md) has the details.
+- The "www", "http" or "https" a typed address starts with no longer links the search to an article ("www.pearsonmylabs.com access code" is not about World Wide Web).
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
