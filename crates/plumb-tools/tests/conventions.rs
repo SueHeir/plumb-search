@@ -53,7 +53,7 @@ const LIMITS: Limits = Limits {
     direct_writes: 62,
     bare_spawns: 15,
     unwraps: 19,
-    long_functions: 28,
+    long_functions: 27,
     long_files: 0,
 };
 

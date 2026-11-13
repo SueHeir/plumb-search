@@ -188,53 +188,55 @@ pub(crate) const LANGUAGE_CHOICES: &[(&str, &str)] = &[
     ("zh", "中文"),
 ];
 
+/// One `<option>`, with `attributes` after its value.
+fn option_html(value: &str, attributes: &str, selected: bool, name: &str) -> String {
+    let selected = if selected { " selected" } else { "" };
+    format!("<option value=\"{value}\"{attributes}{selected}>{name}</option>")
+}
+
+/// The options of a select over codes: `first`, then a current code that
+/// neither lists (so applying the settings keeps it), then `listed`, each
+/// marked with `lang` when `tag_language` is set.
+fn code_options(
+    first: &[(&str, &str)],
+    listed: &[(&str, &str)],
+    current: &str,
+    tag_language: bool,
+) -> String {
+    let mut html: String = first
+        .iter()
+        .map(|(code, name)| option_html(code, "", *code == current, name))
+        .collect();
+    if !first.iter().chain(listed).any(|(code, _)| *code == current) {
+        let code = escape_html(current);
+        let _ = write!(html, "<option value=\"{code}\" selected>{code}</option>");
+    }
+    for (code, name) in listed {
+        let lang = if tag_language {
+            format!(" lang=\"{code}\"")
+        } else {
+            String::new()
+        };
+        html.push_str(&option_html(code, &lang, *code == current, name));
+    }
+    html
+}
+
 pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     let options = &settings.options;
-    let current = Some(settings.country_mode.as_str());
-    let mut choices =
-        format!(
-        "<option value=\"auto\"{}>Automatic</option><option value=\"any\"{}>Any country</option>",
-        if current == Some("auto") { " selected" } else { "" },
-        if current == Some("any") { " selected" } else { "" }
+    let choices = code_options(
+        &[("auto", "Automatic"), ("any", "Any country")],
+        COUNTRY_CHOICES,
+        &settings.country_mode,
+        false,
     );
-    let listed = current.is_some_and(|c| {
-        c == "auto" || c == "any" || COUNTRY_CHOICES.iter().any(|(code, _)| *code == c)
-    });
-    if let (Some(code), false) = (current, listed) {
-        let _ = write!(
-            choices,
-            "<option value=\"{0}\" selected>{0}</option>",
-            escape_html(code)
-        );
-    }
-    for (code, name) in COUNTRY_CHOICES {
-        let selected = if current == Some(*code) {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(
-            choices,
-            "<option value=\"{code}\"{selected}>{name}</option>"
-        );
-    }
     let safe_choices: String = [
         (SafeSearch::Off, "Off"),
         (SafeSearch::Moderate, "Moderate"),
         (SafeSearch::Strict, "Strict"),
     ]
     .into_iter()
-    .map(|(level, name)| {
-        let selected = if options.safe == level {
-            " selected"
-        } else {
-            ""
-        };
-        format!(
-            "<option value=\"{}\"{selected}>{name}</option>",
-            level.as_str()
-        )
-    })
+    .map(|(level, name)| option_html(level.as_str(), "", options.safe == level, name))
     .collect();
     let news_choices: String = [
         (RecentNews::Collapsed, "Folded"),
@@ -242,41 +244,14 @@ pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -
         (RecentNews::Off, "Off"),
     ]
     .into_iter()
-    .map(|(view, name)| {
-        let selected = if options.recent == view {
-            " selected"
-        } else {
-            ""
-        };
-        format!(
-            "<option value=\"{}\"{selected}>{name}</option>",
-            view.as_str()
-        )
-    })
+    .map(|(view, name)| option_html(view.as_str(), "", options.recent == view, name))
     .collect();
-    let language = options.language.as_deref();
-    let mut language_choices = format!(
-        "<option value=\"any\"{}>Any language</option>",
-        if language.is_none() { " selected" } else { "" }
+    let language_choices = code_options(
+        &[("any", "Any language")],
+        LANGUAGE_CHOICES,
+        options.language.as_deref().unwrap_or("any"),
+        true,
     );
-    if let Some(code) = language.filter(|c| !LANGUAGE_CHOICES.iter().any(|(l, _)| l == c)) {
-        let _ = write!(
-            language_choices,
-            "<option value=\"{0}\" selected>{0}</option>",
-            escape_html(code)
-        );
-    }
-    for (code, name) in LANGUAGE_CHOICES {
-        let selected = if language == Some(*code) {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(
-            language_choices,
-            "<option value=\"{code}\" lang=\"{code}\"{selected}>{name}</option>"
-        );
-    }
     let network = match settings.network {
         NetSetting::Unavailable => {
             "<label class=\"off\"><input type=\"checkbox\" disabled> Use the Plumb network \
