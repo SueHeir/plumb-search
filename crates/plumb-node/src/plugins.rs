@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use plumb_core::locks::Locked;
 use plumb_core::SafeSearch;
 use plumb_plugin::{About, ActInput, Item, Note, Output, Query, Request, Shown, ShownResult};
 use serde::{Deserialize, Serialize};
@@ -1162,6 +1163,10 @@ struct Inner {
     /// folder name, and the file they are kept in.
     suggest: Mutex<BTreeMap<String, Suggest>>,
     suggest_file: Option<PathBuf>,
+    /// Held while a choice is saved, so that an older copy of the choices
+    /// never lands last, without holding `suggest`, which searches read,
+    /// across the write.
+    suggest_saving: Mutex<()>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -1203,6 +1208,7 @@ impl Plugins {
                 token,
                 suggest: Mutex::default(),
                 suggest_file: None,
+                suggest_saving: Mutex::default(),
             }),
         }
     }
@@ -1230,7 +1236,7 @@ impl Plugins {
     /// What a search that fits `plugin` does: the owner's choice, or its
     /// `plugin.json`'s.
     pub fn suggest(&self, plugin: &Plugin) -> Suggest {
-        let chosen = self.inner.suggest.lock().expect("suggest lock");
+        let chosen = self.inner.suggest.locked();
         chosen
             .get(&plugin.id)
             .copied()
@@ -1238,23 +1244,26 @@ impl Plugins {
     }
 
     /// Keeps the owner's choice of what a search that fits the plugin in
-    /// folder `id` does; from the next search on.
+    /// folder `id` does; from the next search on. It writes a file, so it
+    /// runs off async threads, and a choice that can't be saved isn't used.
     pub fn set_suggest(&self, id: &str, suggest: Suggest) -> Result<()> {
         let Some(plugin) = self.inner.plugins.iter().find(|p| p.id == id) else {
             bail!("no plugin {id:?} on this node");
         };
-        let mut chosen = self.inner.suggest.lock().expect("suggest lock");
+        let _saving = self.inner.suggest_saving.locked();
+        let mut next = self.inner.suggest.locked().clone();
         if suggest == plugin.manifest.suggest {
-            chosen.remove(id);
+            next.remove(id);
         } else {
-            chosen.insert(id.to_string(), suggest);
+            next.insert(id.to_string(), suggest);
         }
         if let Some(file) = &self.inner.suggest_file {
-            let json = serde_json::to_vec_pretty(&*chosen)?;
+            let json = serde_json::to_vec_pretty(&next)?;
             let part = file.with_extension("json.part");
-            std::fs::write(&part, json).with_context(|| format!("writing {}", part.display()))?;
-            std::fs::rename(&part, file).with_context(|| format!("writing {}", file.display()))?;
+            plumb_core::storage::write_atomic(file, &part, &json, None, None)
+                .with_context(|| format!("writing {}", file.display()))?;
         }
+        *self.inner.suggest.locked() = next;
         Ok(())
     }
 
