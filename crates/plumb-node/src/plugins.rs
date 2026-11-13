@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use plumb_core::locks::Locked;
 use plumb_core::SafeSearch;
 use plumb_plugin::{About, ActInput, Item, Note, Output, Query, Request, Shown, ShownResult};
 use serde::{Deserialize, Serialize};
@@ -1230,7 +1231,7 @@ impl Plugins {
     /// What a search that fits `plugin` does: the owner's choice, or its
     /// `plugin.json`'s.
     pub fn suggest(&self, plugin: &Plugin) -> Suggest {
-        let chosen = self.inner.suggest.lock().expect("suggest lock");
+        let chosen = self.inner.suggest.locked();
         chosen
             .get(&plugin.id)
             .copied()
@@ -1243,7 +1244,7 @@ impl Plugins {
         let Some(plugin) = self.inner.plugins.iter().find(|p| p.id == id) else {
             bail!("no plugin {id:?} on this node");
         };
-        let mut chosen = self.inner.suggest.lock().expect("suggest lock");
+        let mut chosen = self.inner.suggest.locked();
         if suggest == plugin.manifest.suggest {
             chosen.remove(id);
         } else {
@@ -1252,8 +1253,8 @@ impl Plugins {
         if let Some(file) = &self.inner.suggest_file {
             let json = serde_json::to_vec_pretty(&*chosen)?;
             let part = file.with_extension("json.part");
-            std::fs::write(&part, json).with_context(|| format!("writing {}", part.display()))?;
-            std::fs::rename(&part, file).with_context(|| format!("writing {}", file.display()))?;
+            plumb_core::storage::write_atomic(file, &part, &json, None, None)
+                .with_context(|| format!("writing {}", file.display()))?;
         }
         Ok(())
     }
