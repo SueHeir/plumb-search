@@ -217,7 +217,7 @@ The search addresses take the same parameters as the results page:
 
 ### What comes back
 
-A site result (`/api/search`) has `domain`, `url`, `title`, `description`, `score`, `text_score` and `link_score`, and when they apply `country`, `named` (the search names this site), `official` and `key_pages`.
+A site result (`/api/search`) has `domain`, `url`, `title`, `description`, `score`, `text_score` and `link_score`, and when they apply `country`, `named` (the search names this site), `official` and `key_pages`. Ranking also leaves some of its working in when it has it: `demand` (how much the site's Wikipedia article is read), `missing_words` (the search does not name the site and the site lacks some of its main words), `placing_text_score` and `query_evidence` (how well the site matches the search by words and by meaning). These help to see why a site is where it is; their members may change between releases.
 
 With `full=1`, the object holds `hits` (the sites), `pages` (page rows), `assembled` (the page's order: `rows` of `{"kind": "site", "site", "pages"}` or `{"kind": "page", "page"}`, with `places`, `recent`, `answer` and `profile`), and, when there are any, `answer`, `profile`, `info`, `places`, `recent`, `spelling`, `site_search` and the node's plugin results. The [Zotero plugin](../zotero/) reads `assembled.rows`, `pages` and `hits`.
 
