@@ -477,24 +477,17 @@ impl NewsStore {
             (HEADLINES_FILE, headlines),
             (LANGUAGES_FILE, languages),
         ];
-        if self.budget.is_some() {
-            plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
-                .map_err(io::Error::other)?;
-            for (name, bytes) in files {
-                let path = self.dir.join(name);
-                plumb_core::storage::write_atomic(
-                    &path,
-                    &path.with_extension("json.tmp"),
-                    bytes,
-                    self.budget.as_ref(),
-                    None,
-                )?;
-            }
-        } else {
-            fs::create_dir_all(&self.dir)?;
-            for (name, bytes) in files {
-                write_bytes(&self.dir.join(name), bytes)?;
-            }
+        plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
+            .map_err(io::Error::other)?;
+        for (name, bytes) in files {
+            let path = self.dir.join(name);
+            plumb_core::storage::write_atomic(
+                &path,
+                &path.with_extension("json.tmp"),
+                bytes,
+                self.budget.as_ref(),
+                None,
+            )?;
         }
         #[cfg(unix)]
         {
@@ -995,12 +988,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
             None
         }
     }
-}
-
-fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(&temporary, path)
 }
 
 /// Absolute UTC publication time alongside Unix seconds and relative display age.

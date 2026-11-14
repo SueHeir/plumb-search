@@ -753,16 +753,28 @@ pub(in crate::web) async fn save_plugins(
             "The plugin choices could not be read.",
         );
     };
+    let mut chosen = Vec::with_capacity(choices.len());
     for (plugin, choice) in choices {
         let Some(suggest) = crate::plugins::Suggest::parse(&choice) else {
             return panel_error(StatusCode::BAD_REQUEST, "That is not a plugin choice.");
         };
-        if let Err(err) = state.settings.plugins.set_suggest(&plugin, suggest) {
-            return panel_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Could not save plugin choices: {err:#}"),
-            );
-        }
+        chosen.push((plugin, suggest));
+    }
+    // Each choice is saved to disk.
+    let plugins = state.settings.plugins.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        chosen
+            .into_iter()
+            .try_for_each(|(plugin, suggest)| plugins.set_suggest(&plugin, suggest))
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|saved| saved);
+    if let Err(err) = saved {
+        return panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not save plugin choices: {err:#}"),
+        );
     }
     Redirect::to("/app?section=search&saved=plugins").into_response()
 }

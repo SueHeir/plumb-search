@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use plumb_core::locks::Locked;
 use plumb_core::SafeSearch;
 use plumb_plugin::{About, ActInput, Item, Note, Output, Query, Request, Shown, ShownResult};
 use serde::{Deserialize, Serialize};
@@ -1161,7 +1162,7 @@ struct Inner {
     /// The owner's choices of what a search that fits a plugin does, by
     /// folder name, and the file they are kept in.
     suggest: Mutex<BTreeMap<String, Suggest>>,
-    suggest_file: Option<PathBuf>,
+    suggest_file: Option<Mutex<PathBuf>>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -1221,7 +1222,7 @@ impl Plugins {
         Plugins {
             inner: Arc::new(Inner {
                 suggest: Mutex::new(chosen),
-                suggest_file: Some(file),
+                suggest_file: Some(Mutex::new(file)),
                 ..inner
             }),
         }
@@ -1230,7 +1231,7 @@ impl Plugins {
     /// What a search that fits `plugin` does: the owner's choice, or its
     /// `plugin.json`'s.
     pub fn suggest(&self, plugin: &Plugin) -> Suggest {
-        let chosen = self.inner.suggest.lock().expect("suggest lock");
+        let chosen = self.inner.suggest.locked();
         chosen
             .get(&plugin.id)
             .copied()
@@ -1243,17 +1244,20 @@ impl Plugins {
         let Some(plugin) = self.inner.plugins.iter().find(|p| p.id == id) else {
             bail!("no plugin {id:?} on this node");
         };
-        let mut chosen = self.inner.suggest.lock().expect("suggest lock");
-        if suggest == plugin.manifest.suggest {
-            chosen.remove(id);
-        } else {
-            chosen.insert(id.to_string(), suggest);
-        }
-        if let Some(file) = &self.inner.suggest_file {
-            let json = serde_json::to_vec_pretty(&*chosen)?;
-            let part = file.with_extension("json.part");
-            std::fs::write(&part, json).with_context(|| format!("writing {}", part.display()))?;
-            std::fs::rename(&part, file).with_context(|| format!("writing {}", file.display()))?;
+        // The file's lock keeps writes in order, and searches, which read
+        // `suggest`, don't wait while one goes to disk.
+        let file = self.inner.suggest_file.as_ref().map(|file| file.locked());
+        let json = {
+            let mut chosen = self.inner.suggest.locked();
+            if suggest == plugin.manifest.suggest {
+                chosen.remove(id);
+            } else {
+                chosen.insert(id.to_string(), suggest);
+            }
+            serde_json::to_vec_pretty(&*chosen)?
+        };
+        if let Some(file) = file {
+            crate::node::store::write_atomically(&file, &json)?;
         }
         Ok(())
     }

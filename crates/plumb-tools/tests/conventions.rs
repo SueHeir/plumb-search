@@ -47,10 +47,10 @@ struct Limits {
     long_files: usize,
 }
 
-/// The counts on 2026-10-13.
+/// The counts on 2026-11-14.
 const LIMITS: Limits = Limits {
-    raw_locks: 2,
-    direct_writes: 62,
+    raw_locks: 0,
+    direct_writes: 54,
     bare_spawns: 15,
     unwraps: 19,
     long_functions: 28,

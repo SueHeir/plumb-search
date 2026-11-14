@@ -2,7 +2,7 @@
 //! out, the saved state, and the numbered index directories.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -440,19 +440,8 @@ pub(super) fn save_state(paths: &Paths, state: &SavedState) -> Result<()> {
 /// renames it over `path` and flushes the directory (on Unix): readers see
 /// the old file or the new one, never a mix, even after a power cut.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = crate::temp_path_for(path);
-    let written = File::create(&tmp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    if let Err(err) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("writing {}", tmp.display()));
-    }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("moving {} to {}", tmp.display(), path.display()));
-    }
+    plumb_core::storage::write_atomic(path, &crate::temp_path_for(path), bytes, None, None)
+        .with_context(|| format!("writing {}", path.display()))?;
     crate::sync_parent_dir(path);
     Ok(())
 }

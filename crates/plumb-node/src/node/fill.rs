@@ -295,11 +295,7 @@ impl FillState {
     }
 
     fn save(&self, net_dir: &Path) -> Result<()> {
-        let path = net_dir.join(FILL_FILE);
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec(self)?)
-            .and_then(|()| fs::rename(&tmp, &path))
-            .with_context(|| format!("saving {}", path.display()))
+        super::store::write_atomically(&net_dir.join(FILL_FILE), &serde_json::to_vec(self)?)
     }
 
     /// Notes the topics kept now (`key`). New topics make room (`prune`)
