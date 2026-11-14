@@ -94,46 +94,7 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
             },
             "annotations": read_only,
         },
-        {
-            "name": "search",
-            "title": "Search",
-            "description": "Search the web (web_search) with Plumb Search: sites by name or topic, \
-                 best first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
-                 placed among them, package cards (version, install command, docs) when the query \
-                 says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
-                 the time somewhere, facts about what the query names, recent headlines, and local places \
-                 when the query includes a town (restaurants in Denver). Near me requires an actual location; \
-                 country alone is not a location. Package cards supplement troubleshooting results. \
-                 Plumb indexes homepages and page sets, not the full text of the web, so search \
-                 for names and topics, then open the page you need.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "What to search for." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
-                    "country": country,
-                    "language": { "type": "string", "description": "Optional language of the sites, a code such as en or de (default en); \"any\" for every language." },
-                    "site": { "type": "string", "description": "Optional: only results on this site, a domain such as docs.python.org or github.com (like site: in the query): the pages Plumb has there, and a link into the site's own search for the rest." },
-                    "kind": {
-                        "type": "string",
-                        "enum": KINDS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
-                        "description": format!(
-                            "Optional: only one kind of result, best first: {}.",
-                            KINDS
-                                .iter()
-                                .map(|(key, what)| format!("{key} ({what})"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    },
-                    "after": { "type": "string", "description": "Paper publication on or after YYYY or YYYY-MM-DD; unknown dates are excluded. Requires kind=paper when a kind is supplied." },
-                    "before": { "type": "string", "description": "Paper publication on or before YYYY or YYYY-MM-DD; day precision requires an actual publication day." },
-                    "order": { "type": "string", "enum": ["relevance", "newest"], "description": "Paper ordering; newest orders within relevance tiers." },
-                },
-                "required": ["query"],
-            },
-            "annotations": read_only,
-        },
+        search_tool(&country, &read_only),
         {
             "name": "package",
             "title": "Package",
@@ -210,6 +171,50 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
             .push(report_finding_tool(share));
     }
     tools
+}
+
+/// The `search` tool, which takes the same `country` as the others.
+fn search_tool(country: &Value, read_only: &Value) -> Value {
+    json!({
+        "name": "search",
+        "title": "Search",
+        "description": "Search the web (web_search) with Plumb Search: sites by name or topic, \
+             best first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
+             placed among them, package cards (version, install command, docs) when the query \
+             says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
+             the time somewhere, facts about what the query names, recent headlines, and local places \
+             when the query includes a town (restaurants in Denver). Near me requires an actual location; \
+             country alone is not a location. Package cards supplement troubleshooting results. \
+             Plumb indexes homepages and page sets, not the full text of the web, so search \
+             for names and topics, then open the page you need.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "What to search for." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
+                "country": country,
+                "language": { "type": "string", "description": "Optional language of the sites, a code such as en or de (default en); \"any\" for every language." },
+                "site": { "type": "string", "description": "Optional: only results on this site, a domain such as docs.python.org or github.com (like site: in the query): the pages Plumb has there, and a link into the site's own search for the rest." },
+                "kind": {
+                    "type": "string",
+                    "enum": KINDS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                    "description": format!(
+                        "Optional: only one kind of result, best first: {}.",
+                        KINDS
+                            .iter()
+                            .map(|(key, what)| format!("{key} ({what})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                },
+                "after": { "type": "string", "description": "Paper publication on or after YYYY or YYYY-MM-DD; unknown dates are excluded. Requires kind=paper when a kind is supplied." },
+                "before": { "type": "string", "description": "Paper publication on or before YYYY or YYYY-MM-DD; day precision requires an actual publication day." },
+                "order": { "type": "string", "enum": ["relevance", "newest"], "description": "Paper ordering; newest orders within relevance tiers." },
+            },
+            "required": ["query"],
+        },
+        "annotations": read_only,
+    })
 }
 
 /// `report_finding`'s description, with `share` and `share_query` when the
