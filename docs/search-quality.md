@@ -115,12 +115,12 @@ Every number behind the charts is in [`search-quality/runs.tsv`](search-quality/
 
 ## The index behind it
 
-What plumbsearch.org held on 2026-10-14, running 0.3.1 (from its [`/api/status`](https://plumbsearch.org/api/status)):
+What plumbsearch.org held on 2026-11-14, running 0.4.0 (from its [`/api/status`](https://plumbsearch.org/api/status)):
 
 | | |
 | --- | ---: |
-| Sites | 2,811,021 |
-| Sites with a vector for search by meaning | 2,224,213 |
+| Sites | 2,792,424 |
+| Sites with a vector for search by meaning | 2,371,855 |
 | Pages from page sets | 13,304,410 |
 | Places | 24,014,360 |
 
