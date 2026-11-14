@@ -11,9 +11,12 @@ python datetime strftime	https://docs.python.org/3/*
 python os.path	https://docs.python.org/3/*
 python asyncio tutorial	https://docs.python.org/3/*
 python virtual environment venv	https://docs.python.org/3/*
+tomllib	https://docs.python.org/3/*
+python asyncio gather	https://docs.python.org/3/*
 javascript array sort	https://developer.mozilla.org/en-US/docs/*
 javascript array.prototype.map()	https://developer.mozilla.org/en-US/docs/*
 javascript promise all	https://developer.mozilla.org/en-US/docs/*
+javascript padstart	https://developer.mozilla.org/en-US/docs/*
 fetch api javascript	https://developer.mozilla.org/en-US/docs/*
 css grid layout	https://developer.mozilla.org/en-US/docs/*
 css flexbox justify-content	https://developer.mozilla.org/en-US/docs/*

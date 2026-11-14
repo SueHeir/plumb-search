@@ -229,6 +229,7 @@ cargo book	rust-lang.org
 rust playground	rust-lang.org
 python asyncio docs	python.org
 pip documentation	pypa.io
+mypy documentation	mypy-lang.org
 uv python package manager	astral.sh
 ruff linter	astral.sh
 poetry python	python-poetry.org
