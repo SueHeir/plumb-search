@@ -197,86 +197,52 @@ pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -
         if current == Some("auto") { " selected" } else { "" },
         if current == Some("any") { " selected" } else { "" }
     );
-    let listed = current.is_some_and(|c| {
-        c == "auto" || c == "any" || COUNTRY_CHOICES.iter().any(|(code, _)| *code == c)
-    });
-    if let (Some(code), false) = (current, listed) {
-        let _ = write!(
-            choices,
-            "<option value=\"{0}\" selected>{0}</option>",
-            escape_html(code)
-        );
-    }
-    for (code, name) in COUNTRY_CHOICES {
-        let selected = if current == Some(*code) {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(
-            choices,
-            "<option value=\"{code}\"{selected}>{name}</option>"
-        );
-    }
-    let safe_choices: String = [
-        (SafeSearch::Off, "Off"),
-        (SafeSearch::Moderate, "Moderate"),
-        (SafeSearch::Strict, "Strict"),
-    ]
-    .into_iter()
-    .map(|(level, name)| {
-        let selected = if options.safe == level {
-            " selected"
-        } else {
-            ""
-        };
-        format!(
-            "<option value=\"{}\"{selected}>{name}</option>",
-            level.as_str()
-        )
-    })
-    .collect();
-    let news_choices: String = [
-        (RecentNews::Collapsed, "Folded"),
-        (RecentNews::Expanded, "Open"),
-        (RecentNews::Off, "Off"),
-    ]
-    .into_iter()
-    .map(|(view, name)| {
-        let selected = if options.recent == view {
-            " selected"
-        } else {
-            ""
-        };
-        format!(
-            "<option value=\"{}\"{selected}>{name}</option>",
-            view.as_str()
-        )
-    })
-    .collect();
+    listed_options(
+        &mut choices,
+        current.filter(|c| *c != "auto" && *c != "any"),
+        COUNTRY_CHOICES,
+        false,
+    );
+    let safe_choices = plain_options([
+        (
+            SafeSearch::Off.as_str(),
+            "Off",
+            options.safe == SafeSearch::Off,
+        ),
+        (
+            SafeSearch::Moderate.as_str(),
+            "Moderate",
+            options.safe == SafeSearch::Moderate,
+        ),
+        (
+            SafeSearch::Strict.as_str(),
+            "Strict",
+            options.safe == SafeSearch::Strict,
+        ),
+    ]);
+    let news_choices = plain_options([
+        (
+            RecentNews::Collapsed.as_str(),
+            "Folded",
+            options.recent == RecentNews::Collapsed,
+        ),
+        (
+            RecentNews::Expanded.as_str(),
+            "Open",
+            options.recent == RecentNews::Expanded,
+        ),
+        (
+            RecentNews::Off.as_str(),
+            "Off",
+            options.recent == RecentNews::Off,
+        ),
+    ]);
     let language = options.language.as_deref();
     let mut language_choices = format!(
         "<option value=\"any\"{}>Any language</option>",
         if language.is_none() { " selected" } else { "" }
     );
-    if let Some(code) = language.filter(|c| !LANGUAGE_CHOICES.iter().any(|(l, _)| l == c)) {
-        let _ = write!(
-            language_choices,
-            "<option value=\"{0}\" selected>{0}</option>",
-            escape_html(code)
-        );
-    }
-    for (code, name) in LANGUAGE_CHOICES {
-        let selected = if language == Some(*code) {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(
-            language_choices,
-            "<option value=\"{code}\" lang=\"{code}\"{selected}>{name}</option>"
-        );
-    }
+    listed_options(&mut language_choices, language, LANGUAGE_CHOICES, true);
     let network = match settings.network {
         NetSetting::Unavailable => {
             "<label class=\"off\"><input type=\"checkbox\" disabled> Use the Plumb network \
@@ -341,6 +307,46 @@ pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -
         exact = if options.exact { " checked" } else { "" },
         debug = if settings.debug { " checked" } else { "" }
     )
+}
+
+/// Writes a `<select>`'s options from `list`, with `current` selected. A
+/// current value not in the list (set by an older form or a hand-made link)
+/// is kept as its own option so applying the settings doesn't drop it.
+fn listed_options(out: &mut String, current: Option<&str>, list: &[(&str, &str)], lang: bool) {
+    if let Some(code) = current.filter(|c| !list.iter().any(|(l, _)| l == c)) {
+        let _ = write!(
+            out,
+            "<option value=\"{0}\" selected>{0}</option>",
+            escape_html(code)
+        );
+    }
+    for (code, name) in list {
+        let selected = if current == Some(*code) {
+            " selected"
+        } else {
+            ""
+        };
+        let lang = if lang {
+            format!(" lang=\"{code}\"")
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            out,
+            "<option value=\"{code}\"{lang}{selected}>{name}</option>"
+        );
+    }
+}
+
+/// Options of a fixed `<select>`: value, label and whether it is chosen.
+fn plain_options<'a>(items: impl IntoIterator<Item = (&'a str, &'a str, bool)>) -> String {
+    items
+        .into_iter()
+        .map(|(value, name, chosen)| {
+            let selected = if chosen { " selected" } else { "" };
+            format!("<option value=\"{value}\"{selected}>{name}</option>")
+        })
+        .collect()
 }
 
 /// The gear's "Private search" switch, shown only where the node serves
