@@ -286,3 +286,20 @@ xfinty	xfinity.com
 olympcs	olympics.com
 premeir league	premierleague.com
 nascr	nascar.com
+
+# A misspelled brand with a task word, where the word around it can pull the
+# fix toward another word one slip away (run 7's "telsa lease" became "tulsa").
+telsa lease	tesla.com
+telsa model 3	tesla.com
+amazom returns	amazon.com
+netflx login	netflix.com
+spotfy premium	spotify.com
+walmrat pharmacy	walmart.com
+costoc gas prices	costco.com
+ebya motors	ebay.com
+paypla fees	paypal.com
+adobe acrobt	adobe.com
+nkie shoes	nike.com
+delat flight status	delta.com
+airbnd host	airbnb.com
+chsae login	chase.com
