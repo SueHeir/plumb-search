@@ -1322,3 +1322,49 @@ fn docs_pages_asked_for_as_a_tutorial_or_examples_are_named() {
         Some("Argparse Tutorial")
     );
 }
+
+#[test]
+fn docs_pages_lead_a_best_site_that_matches_no_word() {
+    let (_dir, searcher) = searcher(&short_docs_fixture());
+    // A site listed only for what it means: no word of the query in it.
+    let unmatched = |domain: &str| {
+        let mut hit = known_site(domain, false, 0.5);
+        hit.official = true;
+        hit.missing_words = true;
+        hit.text_score = 0.17;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 0.0,
+            semantic_closeness: Some(0.24),
+            query_coverage: 0.0,
+            substantive_coverage: 0.0,
+            remaining_coverage: 0.0,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words: 0,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let docs_at = |query: &str, sites: &[crate::Hit]| {
+        let mut placed = place_pages(query, sites, searcher.search(query, 10).unwrap());
+        keep_page_rules(query, sites, &mut placed);
+        placed
+            .iter()
+            .find(|p| p.hit.page.set == DOCS_SET && p.under.is_none())
+            .map(|p| p.at)
+    };
+    // "tomllib" wants Python's page before trillian.im, which a node
+    // listed first only for being near it in meaning.
+    let sites = [unmatched("trillian.im"), site("toml.io", false)];
+    assert_eq!(docs_at("tomllib", &sites), Some(0));
+    // A best site with the query's word in it keeps its place.
+    let sites = [site("toml.io", false), unmatched("trillian.im")];
+    assert_eq!(docs_at("tomllib", &sites), Some(1));
+}

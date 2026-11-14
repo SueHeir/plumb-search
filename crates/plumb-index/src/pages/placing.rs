@@ -263,7 +263,8 @@ fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
 ///
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
-/// docs page found by its words never comes before the best site.
+/// docs page found by its words never comes before a best site that has
+/// any of them.
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
     // The site of what the query names, when it is listed.
@@ -692,8 +693,24 @@ pub(crate) fn kept_below(hit: &PageHit, sites: &[crate::Hit], names_best: bool) 
         return false;
     };
     let official = names_best || best.named && best.official;
-    (docs_found_by_words(hit) || official && !hit.page.is_article())
+    (docs_found_by_words(hit) && !matches_no_word(best) || official && !hit.page.is_article())
         && !on_site(&hit.page, &best.domain)
+}
+
+/// Whether `site` was listed only for being near the query in meaning:
+/// no word of the query is in its text or names it. Such a site does not
+/// keep a docs page found by the query's words below it: "tomllib" wants
+/// Python's page before trillian.im.
+pub(crate) fn matches_no_word(site: &crate::Hit) -> bool {
+    !site.named
+        && site.query_evidence.as_ref().is_some_and(|evidence| {
+            evidence.lexical_score == 0.0
+                && evidence.query_coverage == 0.0
+                && evidence.partial_name_words == 0
+                && evidence.named_subject_words == 0
+                && !evidence.full_name
+                && !evidence.typed_domain
+        })
 }
 
 /// Whether `page` is on `domain` or one of its subdomains.
@@ -711,7 +728,8 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// identifier comes first ("rfc 3339" wants RFC 3339 itself, not
 /// rfc-editor.org); then the docs page of an API the query
 /// names as code ("Object.keys" wants MDN's page, see
-/// [`docs_named_as_code`]); any other docs page found by its words, or
+/// [`docs_named_as_code`]); any other docs page found by its words,
+/// unless the best site has none of them ([`matches_no_word`]), or
 /// another site's page while the query names the best site's owner, never
 /// comes before the best site (see [`kept_below`]); a namesake of a better
 /// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
@@ -938,8 +956,9 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         }
         let at = if docs_found_by_words(&hit) {
             // A docs page found by its words comes after the best site:
-            // "docker desktop download" wants docker.com first.
-            1
+            // "docker desktop download" wants docker.com first, unless
+            // that site has none of the query's words ([`matches_no_word`]).
+            usize::from(!sites.first().is_some_and(matches_no_word))
         } else if hit.whole {
             // Only the best of them leads: another edition of the book
             // comes after the best site.
