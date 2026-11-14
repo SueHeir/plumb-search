@@ -86,6 +86,7 @@ flowchart TD
     index --> core["plumb-core"]
     net --> core
     crawl --> core
+    crawl --> format
     ingest --> core
     embed --> core
     private["plumb-private<br/>WebAssembly"] --> answer

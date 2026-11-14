@@ -120,7 +120,7 @@ Apply it with `docker compose up -d`. With `docker run`, put the command after t
 
 "First start only" flags apply while `/data/records.jsonl` does not exist yet. To change them later, start over with an empty volume.
 
-**The panel.** `/app` is the same panel as the desktop app's, with Overview, Search & browser, Resources, Network & privacy, AI & plugins, Remote control, Activity and About. It changes settings only from the computer the node runs on, and a browser reaching the container through Docker's port does not count as that, so in Docker the panel is read-only. To change what the panel would:
+**The panel.** `/app` is the same panel as the desktop app's, with Overview, Search & browser, Resources, Network & privacy, AI & plugins, Remote control, Activity, Backup and About. It changes settings only from the computer the node runs on, and a browser reaching the container through Docker's port does not count as that, so in Docker the panel is read-only. To change what the panel would:
 
 - control the node from the [desktop app](#control-it-from-the-desktop-app), whose forms change it;
 - for features (network, search by meaning, trusted and bootstrap nodes), stop the node and write `/data/features.json`, which takes precedence over the feature flags at the next start. Its `bootstrap` list replaces the default one, so keep the network's first nodes in it:

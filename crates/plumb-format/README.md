@@ -22,6 +22,7 @@ flowchart LR
   node["plumb-node<br/>sets.rs, signed_sets.rs, denylist, site rules"] --> format
   index["plumb-index<br/>items.rs: items read as pages"] --> format
   core["plumb-core<br/>subsites.rs: the built-in site rules"] --> format
+  crawl["plumb-crawl<br/>records.rs: a crawl's sites as items"] --> format
   format --> ed["ed25519-dalek"]
   format --> json["serde_json"]
 ```

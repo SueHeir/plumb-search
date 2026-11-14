@@ -32,7 +32,7 @@ flowchart LR
 
 ## What is in it
 
-About 43,000 lines, tests included.
+About 50,000 lines, tests included.
 
 ### The site index
 
@@ -81,6 +81,8 @@ About 43,000 lines, tests included.
 | [pages/search.rs](src/pages/search.rs), [pages/scoring.rs](src/pages/scoring.rs) | searching pages, entities, definitions and songs, and scoring them |
 | [pages/placing.rs](src/pages/placing.rs) | `place_pages`: where each page goes among the sites, and `keep_page_rules` |
 | [pages/listing.rs](src/pages/listing.rs) | `Listing`: the pages a search lists with its sites and the spelling they suggest, as a node and the evals list them |
+| [pages/linking.rs](src/pages/linking.rs) | entity linking: the article a part of the query means ("how did napoleon become emperor" means Napoleon) |
+| [pages/dump.rs](src/pages/dump.rs) | the page index's documents written out as text, for the golden files (`PageSearcher::dump`) |
 | [pages/sites.rs](src/pages/sites.rs), [pages/named_site.rs](src/pages/named_site.rs) | pages and the sites they are about; the inner page a query names with its site |
 | [pages/docs.rs](src/pages/docs.rs), [pages/papers.rs](src/pages/papers.rs), [pages/records.rs](src/pages/records.rs), [pages/repos.rs](src/pages/repos.rs) | documentation pages, papers, records named by identifier ("rfc 3339"), repositories |
 | [items.rs](src/items.rs) | data format items read back as pages |

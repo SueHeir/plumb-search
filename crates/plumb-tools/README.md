@@ -179,6 +179,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [search.rs](src/search.rs) | `index`, `search`, `spelling` |
 | [embed.rs](src/embed.rs) | `embed` |
 | [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training |
+| [eval/candidates.rs](src/eval/candidates.rs) | `eval --candidates-out`: each test search's deep site candidates with the raw signals a first stage could score them by |
 | [eval/contracts.rs](src/eval/contracts.rs) | `eval --report`: JSONL contracts and reproducible reports |
 | [eval/rerank.rs](src/eval/rerank.rs) | A cross-encoder second pass, for `eval --rerank-model` |
 | [eval_labels.rs](src/eval_labels.rs) | `check-labels` |

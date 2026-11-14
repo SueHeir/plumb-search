@@ -40,6 +40,7 @@ flowchart LR
 | [run.rs](src/run.rs) | `plumb run`: flags to a `NodeConfig`, stop on Ctrl-C or SIGTERM; `plumb remote-control` |
 | [ingest.rs](src/ingest.rs) | `plumb ingest`: folds seed files and earlier records files into one records file, as sites' stored items |
 | [limits.rs](src/limits.rs), [build_info.rs](src/build_info.rs) | Raises the open-file limit; the version and Git revision built in |
+| [tls.rs](src/tls.rs) | The certificate a node makes for itself for `--https-bind`, which the desktop app trusts by its fingerprint |
 | **The long-running node** | |
 | [node.rs](src/node.rs) | `NodeConfig`, `NodeSettings`, `Status`, `start`, `NodeHandle`, `supervise` and the shared state `Inner` |
 | [node/worker.rs](src/node/worker.rs) | Setup, crawl rounds, index builds and the refresh schedule, with retries |
@@ -71,6 +72,8 @@ flowchart LR
 | [web/search.rs](src/web/search.rs), [results.rs](src/web/results.rs), [hit.rs](src/web/hit.rs), [answers.rs](src/web/answers.rs), [places.rs](src/web/places.rs), [weather.rs](src/web/weather.rs) | The results page: own and network results, pages, places, instant answers, info box |
 | [web/api.rs](src/web/api.rs), [searxng.rs](src/web/searxng.rs), [backend.rs](src/web/backend.rs) | JSON API, SearXNG-format results; the `SearchBackend` and `StatusSource` traits |
 | [web/panel.rs](src/web/panel.rs), [panel/](src/web/panel/view.rs), [setup.rs](src/web/setup.rs), [control.rs](src/web/control.rs), [nodes.rs](src/web/nodes.rs) | The panel at `/app`; the remote control API; controlling other nodes |
+| [web/plugins.rs](src/web/plugins.rs), [plugin_results.rs](src/web/plugin_results.rs) | Plugin buttons and lookups for a page; what plugins add to a results page: results, offers, buttons and notes |
+| [web/go.rs](src/web/go.rs), [network.rs](src/web/network.rs) | Opening a result (`/go`) and blocking a site from a results page; searching the network from the web pages, with a rate limit |
 | [web/private.rs](src/web/private.rs), [relay.rs](src/web/relay.rs) | Private search page and buckets; relaying sealed bucket requests |
 | [web/history.rs](src/web/history.rs), [link.rs](src/web/link.rs), [tune.rs](src/web/tune.rs), [welcome.rs](src/web/welcome.rs) | History, link codes, tuning and About you pages |
 | [web/html.rs](src/web/html.rs), [home.rs](src/web/home.rs), [params.rs](src/web/params.rs) | Page frame, escaping, links; home and setup pages; search parameters |
@@ -220,7 +223,7 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 
 - **Locks.** Take std locks with `plumb_core::locks` (`locked()`, `read_locked()`, `write_locked()`), never hold one across `.await`, and never hold one async code or the network needs during file I/O, an fsync or a fold.
 - **Blocking work.** Disk I/O, whole-file parsing and heavy CPU go in `spawn_blocking` or the worker's `blocking()`. The plumb-net swarm task never waits on disk or a slow lock.
-- **Jobs.** Long-running jobs start through `supervise` and check `stopping()` or `check_stop()` in their loops. A job that takes a gigabyte or so holds `one_big_job()`, taken before `hold_records()`, never after, and says roughly how much memory it takes in its doc comment. Stream records (`build_from_file`, `for_each_record`) rather than holding two copies.
+- **Jobs.** Long-running jobs start through `supervise` and check `stopping()` or `check_stop()` in their loops. A job that takes a gigabyte or so holds `one_big_job()`, taken before `hold_records()`, never after, and says roughly how much memory it takes in its doc comment. Stream records (`build_from_file`, `outline::for_each_site`) rather than holding two copies.
 - **Files.** Write through `plumb_core::storage` (`write_atomic`, `write_atomic_private`, `replace_file`, `remove_file`, `create_directory`) so writes are atomic and charged to the storage budget. Read, append to or fold `records.jsonl` and its journal only under `hold_records()`.
 - **Input.** Cap every peer message's size before decoding it, check before keeping or passing on, and fetch caller-chosen URLs only through plumb-crawl's resolver, which drops private addresses.
 - **Output.** Everything shown or returned goes through the denylist (`StatusSource::denies`; for the sites other nodes answer a network search with, `StatusSource::allows_site`, before they are ranked). Links go through `safe_href` and `http_url`. Results pages send `Referrer-Policy: no-referrer`; the panel sends `same-origin`.

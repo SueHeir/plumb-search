@@ -37,7 +37,7 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 - Each job checks `stopping()` / `check_stop()` in its loops.
 - A job that can take a GB or so of memory holds `one_big_job()` while it runs, taken before `hold_records()`, never after. plumbsearch.org ran out of memory on 2026-10-13 when three such jobs ran at once.
 - A job that holds a big dataset says in its doc comment roughly how much memory it takes.
-- Prefer streaming (`build_from_file`, `for_each_record`) to loading a whole record set, and never keep two full copies of something big.
+- Prefer streaming (`build_from_file`, `outline::for_each_site`) to loading a whole record set, and never keep two full copies of something big.
 
 **Files.**
 - Write through `plumb_core::storage`: `write_atomic`, `write_atomic_private` for keys and other secrets, `replace_file`, `remove_file`, `create_directory`. Writes are then atomic and charged to the node's storage budget.
