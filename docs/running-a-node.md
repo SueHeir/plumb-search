@@ -134,7 +134,7 @@ Every flag of `plumb run`, grouped. Defaults are in brackets, and those in the p
 | `--embed-threads N` | Threads that embed sites [half the CPUs the node may use] |
 | `--mcp-read-pages` | Let every `/mcp` client use `read_page`, not only AI apps on this computer. Never on a public node |
 | `--mcp-findings` | Let every `/mcp` client keep and see findings, not only AI apps on this computer |
-| `--mcp-manage` | Let every `/mcp` client fetch pages and change focus topics, not only AI apps on this computer ([mcp.md](mcp.md#improving-search-for-you)). Never on a public node |
+| `--mcp-manage` | Let every `/mcp` client fetch pages, change focus topics, grade sites and see what earlier runs asked, not only AI apps on this computer ([mcp.md](mcp.md#improving-search-for-you)). Never on a public node |
 
 **Network.** `--network` joins the Plumb network; every other flag here needs it. [network.md](network.md) explains what they do.
 
