@@ -762,3 +762,57 @@ fn mistyped_addresses_suggest_the_site_s_address() {
         assert_eq!(spelled(typed).0, None, "{typed}");
     }
 }
+
+#[test]
+fn letters_typed_the_other_way_round_are_a_likely_slip() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "tesla.com",
+        Some("Tesla"),
+        None,
+        &["Tesla"],
+        &[],
+        popular(300, 30_000),
+    ));
+    let mut n = 0;
+    let mut titles = |title: &str, count: u64, records: &mut Vec<Item>| {
+        for i in 0..count {
+            n += 1;
+            records.push(site(
+                &format!("slips{n}.com"),
+                Some(&format!("{title} {i}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + n, 5),
+            ));
+        }
+    };
+    titles("Tulsa news", 60, &mut records);
+    // The sites teach that an `e` is sometimes typed `u`, three times...
+    for (meant, typed) in [("bread", "bruad"), ("clean", "cluan"), ("steam", "stuam")] {
+        titles(meant, 30, &mut records);
+        titles(typed, 2, &mut records);
+    }
+    // ...and that two letters are often typed the other way round, though
+    // never the same two letters three times.
+    for (meant, typed) in [
+        ("garden", "gardne"),
+        ("market", "makret"),
+        ("planet", "plaent"),
+        ("winter", "witner"),
+        ("forest", "foerst"),
+        ("bridge", "birdge"),
+    ] {
+        titles(meant, 30, &mut records);
+        titles(typed, 2, &mut records);
+    }
+    let (_dir, searcher) = build(&records);
+    let model = searcher.spelling_model().expect("a spelling model");
+    assert!(model.ln_channel("telsa", "tesla") > model.ln_channel("telsa", "tulsa"));
+    // "tulsa" is the commoner word, one changed letter from "telsa", but
+    // "tesla" is one swap of neighbouring letters away.
+    let results = search_spelled(&searcher, "telsa");
+    assert_eq!(suggestion(&results), suggested("tesla"));
+    assert_eq!(domains(&results.hits)[0], "tesla.com");
+}

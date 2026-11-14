@@ -14,7 +14,10 @@
 //!   `ll -> l`, `ie -> ei`. A rule's probability is how often its letters
 //!   were typed that way, among all the times they were meant. A typo then
 //!   costs what its edits cost: a doubled letter dropped is cheap, a first
-//!   letter changed is dear.
+//!   letter changed is dear. Two neighbouring letters typed the other way
+//!   round are one of the commonest slips, but each pair of letters is
+//!   rarely seen swapped often enough to be a rule, so a swap no rule
+//!   covers costs what swaps cost on average ([`ANY_TURN`]).
 //! - **A word-pair model** over the sites' names, titles, link texts and
 //!   descriptions: in how many sites each word and each pair of
 //!   neighbouring words is found. Scored with Stupid Backoff, it says how
@@ -55,6 +58,11 @@ const MAX_WORD_CHARS: usize = 24;
 /// rules say: typos rarely start a word ("fedx" is fedex, not edx), and
 /// the pairs mined include names that differ in their first letter.
 const FIRST_LETTER_SHARE: f32 = 0.1;
+/// The rule, (meant, typed), that holds the probability of two
+/// neighbouring letters typed the other way round, whichever letters they
+/// are. No word's letters make it, since only words of letters are mined,
+/// and a model built before it was added simply lacks it.
+pub(crate) const ANY_TURN: (&str, &str) = ("<>", "><");
 /// Stupid Backoff's discount for a word seen without the word before it.
 const BACKOFF: f64 = 0.4;
 /// While building, the most word pairs and words held at once. Past
@@ -218,20 +226,23 @@ impl Model {
 
     /// For each edit that turns `meant` into `typed`, the probability of
     /// its likeliest learned rule (0 when none covers it), and whether it
-    /// changes the first letter.
+    /// changes the first letter. A swap of two letters no rule covers
+    /// takes the probability of any swap ([`ANY_TURN`]).
     fn edits(&self, typed: &str, meant: &str) -> impl Iterator<Item = (f32, bool)> + '_ {
         edit_rules(meant, typed).into_iter().map(|forms| {
             let first = forms
                 .iter()
                 .any(|(r, t)| r.starts_with('^') || t.starts_with('^'));
+            let rule = |meant: &str, typed: &str| self.rules.get(&(meant.into(), typed.into()));
             let p = forms
                 .iter()
-                .filter_map(|rule| {
-                    self.rules
-                        .get(&(rule.0.as_str().into(), rule.1.as_str().into()))
-                })
+                .filter_map(|(r, t)| rule(r, t))
                 .fold(0.0, |best: f32, &p| best.max(p));
-            (p, first)
+            let turn = matches!(forms.as_slice(), [(r, t)] if is_turn(r, t));
+            match rule(ANY_TURN.0, ANY_TURN.1) {
+                Some(&any) if turn && p == 0.0 => (any, first),
+                _ => (p, first),
+            }
         })
     }
 
@@ -580,6 +591,13 @@ fn edit_rules(meant: &str, typed: &str) -> Vec<Vec<(String, String)>> {
         .collect()
 }
 
+/// Whether the rule `meant -> typed` is two different letters typed the
+/// other way round, as [`Edit::Turn`]'s rule is.
+fn is_turn(meant: &str, typed: &str) -> bool {
+    let (m, t): (Vec<char>, Vec<char>) = (meant.chars().collect(), typed.chars().collect());
+    matches!((m.as_slice(), t.as_slice()), ([a, b], [c, d]) if a == d && b == c && a != b)
+}
+
 /// `edit` with its position moved past the leading `^`.
 fn shift(edit: Edit) -> Edit {
     match edit {
@@ -745,14 +763,18 @@ pub(crate) fn plural_pair(a: &str, b: &str) -> bool {
 /// and the edits counted as substring rules ([`rules`]), each
 /// weighted by the sites the misspelling is found in. A rule's probability
 /// is that weight over the weight of the sites its meant letters are found
-/// in (across all words found in at least [`MINED_RATIO`] sites). Returns
-/// the rules and the probability of an edit no rule covers.
+/// in (across all words found in at least [`MINED_RATIO`] sites). Swaps of
+/// two neighbouring letters are also counted together, over all the
+/// neighbouring letters meant, as the rule [`ANY_TURN`]. Returns the rules
+/// and the probability of an edit no rule covers.
 pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Result<(Rules, f32)> {
     // The words that can be meant, and how often each substring of one or
     // two letters is meant.
     let mut meant: Vec<(Vec<char>, u64)> = Vec::new();
     let mut substrings: HashMap<String, u64> = HashMap::new();
     let mut letters: u64 = 0;
+    // Neighbouring letters inside the words meant, for ANY_TURN.
+    let mut letter_pairs: u64 = 0;
     for_each_term(searcher, fields, |term, docs| {
         if docs < MINED_RATIO || !minable(term) {
             return;
@@ -769,6 +791,7 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
             }
         }
         letters += docs * term.chars().count() as u64;
+        letter_pairs += docs * (term.chars().count() as u64 - 1);
         meant.push((term.chars().collect(), docs));
     })?;
     let mut by_deletion: Vec<(u64, u32)> = Vec::new();
@@ -783,6 +806,8 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
     // Per rule: sites with the misspellings, and how many misspellings.
     let mut weights: HashMap<(String, String), (u64, u32)> = HashMap::new();
     let mut typos: u64 = 0;
+    // Sites with a swap of two letters, and how many such misspellings.
+    let mut turns: (u64, u32) = (0, 0);
     for_each_term(searcher, fields, |term, docs| {
         if !minable(term) {
             return;
@@ -818,6 +843,13 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
         };
         let meant_word: String = meant[best as usize].0.iter().collect();
         typos += docs;
+        if matches!(
+            osa_edits(&meant[best as usize].0, &chars)[..],
+            [Edit::Turn { .. }]
+        ) {
+            turns.0 += docs;
+            turns.1 += 1;
+        }
         for forms in edit_rules(&meant_word, term) {
             for rule in forms {
                 let weight = weights.entry(rule).or_insert((0, 0));
@@ -826,6 +858,8 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
             }
         }
     })?;
+    weights.insert((ANY_TURN.0.into(), ANY_TURN.1.into()), turns);
+    substrings.insert(ANY_TURN.0.into(), letter_pairs);
     let mut rules = HashMap::with_capacity(weights.len());
     for ((r, t), (weight, pairs)) in weights {
         // A rule only a pair or two show may be chance: names that differ
@@ -876,6 +910,22 @@ mod tests {
     fn pair(a: &str, b: &str) -> (String, String) {
         (a.to_string(), b.to_string())
     }
+
+    #[test]
+    fn swaps_no_rule_covers_cost_what_any_swap_does() {
+        let model = Model::with_rules(&[("sa", "as", 0.01), ANY_TURN_RULE], 1e-6);
+        // "telsa": "sl" typed "ls", which no rule covers.
+        assert_eq!(model.ln_channel("telsa", "tesla"), f64::from(0.001f32).ln());
+        // A learned swap keeps its own probability.
+        assert_eq!(model.ln_channel("vias", "visa"), f64::from(0.01f32).ln());
+        // Anything else no rule covers is unseen.
+        assert_eq!(model.ln_channel("tasla", "tesla"), f64::from(1e-6f32).ln());
+        // A model without the rule prices a swap as unseen.
+        let older = Model::with_rules(&[], 1e-6);
+        assert_eq!(older.ln_channel("telsa", "tesla"), f64::from(1e-6f32).ln());
+    }
+
+    const ANY_TURN_RULE: (&str, &str, f32) = (ANY_TURN.0, ANY_TURN.1, 0.001);
 
     #[test]
     fn edits_read_as_substring_rules() {
