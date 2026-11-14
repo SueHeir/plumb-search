@@ -230,8 +230,12 @@ python3 eval/contracts/compare.py baseline/core.jsonl candidate/core.jsonl --mod
 
 Both reports must have the same suites and cases, clock, embedding model, query instruction, `--limit`, `--pages-top` and isolation. `--mode ranker` (the default) requires the same index, page files and vectors and allows ranking knobs and the learned model to differ, listing each difference. `--mode corpus` requires the same knobs and model and allows the corpus to differ. The comparison reports, per group and metric, the mean change over families with a 95% interval from 500 family resamples, and names every `manual` case that newly fails.
 
-> [!WARNING]
-> [contracts/run_batch.py](contracts/run_batch.py), which wraps a report run, a comparison and the identity checks, still calls `plumb index` and `plumb eval`. Those commands are in `plumb-tools` now, so the script fails; run `plumb-tools eval --report` and `compare.py` directly.
+[contracts/run_batch.py](contracts/run_batch.py) wraps a report run, a comparison and the identity checks in one bounded batch with its provenance in `batch.json`. It takes the node (`--plumb`, for `build-info` and `ingest`) and runs `index` and `eval` with `plumb-tools` from beside it, or from `--plumb-tools`:
+
+```sh
+cargo build --release -p plumb-node -p plumb-tools
+python3 eval/contracts/run_batch.py --plumb target/release/plumb --fixture-baseline --out-dir /tmp/batch
+```
 
 [contracts/scratch-mcp.md](contracts/scratch-mcp.md) describes the `eval_mcp` example, which serves frozen indexes through the node's own web and MCP routes for checks of what an API or MCP client sees.
 

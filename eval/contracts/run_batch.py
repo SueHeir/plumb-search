@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One bounded combined evaluation after integration; no model calls or builds.
 
-Uses an already-built binary and immutable corpus. Writes only --out-dir.
+Uses already-built binaries (plumb and plumb-tools) and an immutable corpus. Writes only --out-dir.
 An optional scratch MCP target exercises real identity tools; it must be
 loopback, and its embedded revision must match the executable. This script
 never starts/stops production, refreshes data, or resumes an LLM runner.
@@ -41,7 +41,9 @@ def run(command, out, seconds, *, cwd=ROOT):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--plumb", type=Path, required=True)
+    ap.add_argument("--plumb", type=Path, required=True, help="the node, for build-info and ingest")
+    ap.add_argument("--plumb-tools", type=Path,
+                    help="for index and eval [default: plumb-tools beside --plumb]")
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--compare", type=Path, help="baseline core.jsonl; validate fixed-corpus pairing")
     ap.add_argument("--index", type=Path)
@@ -67,10 +69,13 @@ def main():
         ap.error("budgets must be positive")
     if args.mcp and urllib.parse.urlsplit(args.mcp).hostname not in ("127.0.0.1", "localhost", "::1"):
         ap.error("--mcp must name a loopback scratch candidate, never production")
+    args.plumb = args.plumb.resolve()
+    args.plumb_tools = (args.plumb_tools or args.plumb.with_name("plumb-tools" + args.plumb.suffix)).resolve()
+    if not args.plumb_tools.is_file():
+        ap.error(f"no plumb-tools at {args.plumb_tools}; give --plumb-tools")
     # Refuse overwriting a previous run: every batch has complete provenance.
     args.out_dir = args.out_dir.resolve()
     args.out_dir.mkdir(parents=True, exist_ok=False)
-    args.plumb = args.plumb.resolve()
     build = json.loads(subprocess.check_output([str(args.plumb), "build-info"], text=True, timeout=10))
     plan = {"schema": 1, "build": build, "fixed_time": args.eval_time,
             "features": {"findings": False, "personalization": False, "plugins": False,
@@ -88,14 +93,14 @@ def main():
                 "--cc-ranks", ROOT / "fixtures/cc-domain-ranks.txt", "--wat", ROOT / "fixtures/sample.wat",
                 "--wikidata", ROOT / "fixtures/wikidata-official-sites.tsv", "--out", records],
                 args.out_dir / "ingest.log", 60))
-            plan["steps"].append(run([args.plumb, "index", "--records", records, "--index", args.index],
+            plan["steps"].append(run([args.plumb_tools, "index", "--records", records, "--index", args.index],
                                      args.out_dir / "index.log", 60))
             args.acceptance = [ROOT / "eval/contracts/offline.jsonl"]
         elif not args.index:
             ap.error("--index or --fixture-baseline is required")
         elif not args.acceptance and not args.queries:
             args.acceptance = [ROOT / "eval/contracts/audit.jsonl", ROOT / "eval/contracts/family_heldout.jsonl"]
-        core = [args.plumb, "eval", "--index", args.index, "--limit", "100", "--rank", args.rank,
+        core = [args.plumb_tools, "eval", "--index", args.index, "--limit", "100", "--rank", args.rank,
                 "--eval-time", args.eval_time, "--pages-top", args.pages_top, "--report", args.out_dir / "core.jsonl"]
         for flag, paths in (("--pages", args.pages), ("--queries", args.queries), ("--acceptance", args.acceptance)):
             for path in paths:
