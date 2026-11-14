@@ -230,8 +230,14 @@ python3 eval/contracts/compare.py baseline/core.jsonl candidate/core.jsonl --mod
 
 Both reports must have the same suites and cases, clock, embedding model, query instruction, `--limit`, `--pages-top` and isolation. `--mode ranker` (the default) requires the same index, page files and vectors and allows ranking knobs and the learned model to differ, listing each difference. `--mode corpus` requires the same knobs and model and allows the corpus to differ. The comparison reports, per group and metric, the mean change over families with a 95% interval from 500 family resamples, and names every `manual` case that newly fails.
 
-> [!WARNING]
-> [contracts/run_batch.py](contracts/run_batch.py), which wraps a report run, a comparison and the identity checks, still calls `plumb index` and `plumb eval`. Those commands are in `plumb-tools` now, so the script fails; run `plumb-tools eval --report` and `compare.py` directly.
+[contracts/run_batch.py](contracts/run_batch.py) wraps a report run, a comparison and the identity checks, and writes what it ran to `batch.json` in a new `--out-dir`. It takes `build-info` and `ingest` from `--plumb` and `index` and `eval` from `--plumb-tools` (by default the `plumb-tools` beside `--plumb`). `--fixture-baseline` builds a small index from `fixtures/` and runs `offline.jsonl`; give two runs the same `--index` to compare them, since each fixture run builds its own index and the comparison refuses a changed corpus:
+
+```sh
+python3 eval/contracts/run_batch.py --plumb target/release/plumb --index INDEX --out-dir baseline
+python3 eval/contracts/run_batch.py --plumb target/release/plumb --index INDEX --out-dir candidate --compare baseline/core.jsonl
+```
+
+Peak memory comes from `/usr/bin/time`; without it the run still finishes and `batch.json` says memory went unmeasured.
 
 [contracts/scratch-mcp.md](contracts/scratch-mcp.md) describes the `eval_mcp` example, which serves frozen indexes through the node's own web and MCP routes for checks of what an API or MCP client sees.
 
