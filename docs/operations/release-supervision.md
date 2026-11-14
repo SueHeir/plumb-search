@@ -106,9 +106,9 @@ Recheck immediately before any copy or rollout.
 
 | Host | Role and recovery path | Observed data / free disk |
 | --- | --- | --- |
-| Public droplet | Docker node and Caddy under `/opt/plumb-search/site`; data `/var/lib/docker/volumes/plumb-data/_data`; relay is separate | 46 GiB / 81 GiB |
-| LA and NY | Docker `plumb`, `/opt/plumb/docker-compose.yml`; same volume path; `--crawl-only` | LA 20 GiB / 12 GiB; NY 22 GiB / 11 GiB |
-| HPC | User `plumb.service`; checkout `/home/suehr/projects/plumb-search`; data `plumb-data`; separate tunnel service | 49 GiB / 126 GiB |
+| Public server | Docker node and Caddy; data in the `plumb-data` volume; relay is separate | 46 GiB / 81 GiB |
+| Two crawlers | Docker `plumb` with `--crawl-only`; same volume | 20 GiB / 12 GiB and 22 GiB / 11 GiB |
+| HPC | User `plumb.service` from a source checkout; data `plumb-data`; separate tunnel service | 49 GiB / 126 GiB |
 
 The 81 GiB Droplet free-space observation is physical capacity, not permission
 to exceed the 64 GB Plumb allocation. HPC is the intended home for larger corpus
