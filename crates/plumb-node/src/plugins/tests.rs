@@ -182,14 +182,20 @@ async fn offers_run_when_asked_and_the_owner_choice_is_kept() {
     assert!(plugins
         .offers("creep lyrics", None, Some("test"))
         .is_empty());
-    plugins.set_suggest("test", Suggest::Keywords).unwrap();
+    plugins
+        .set_suggest(&[("test".into(), Suggest::Keywords)])
+        .unwrap();
     assert!(plugins.offers("creep lyrics", None, None).is_empty());
-    assert!(plugins.set_suggest("nope", Suggest::Keywords).is_err());
+    assert!(plugins
+        .set_suggest(&[("nope".into(), Suggest::Keywords)])
+        .is_err());
     let kept: BTreeMap<String, Suggest> =
         serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(kept.get("test"), Some(&Suggest::Keywords));
     // Choosing the plugin's own default again forgets the choice.
-    plugins.set_suggest("test", Suggest::Button).unwrap();
+    plugins
+        .set_suggest(&[("test".into(), Suggest::Button)])
+        .unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "{}");
 }
 

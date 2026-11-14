@@ -1206,7 +1206,8 @@ struct Opened {
 /// in the activity log with the hosts it may reach.
 fn load_plugins(inner: &Inner) -> crate::plugins::Plugins {
     let plugins =
-        crate::plugins::Plugins::load_dir(&inner.config.data_dir.join(crate::plugins::PLUGINS_DIR));
+        crate::plugins::Plugins::load_dir(&inner.config.data_dir.join(crate::plugins::PLUGINS_DIR))
+            .with_budget(inner.storage.clone());
     for plugin in plugins.list() {
         inner.journal.info(format!(
             "Plugin {} is on; it may fetch from {}",

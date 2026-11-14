@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use plumb_core::locks::Locked;
+use plumb_core::storage::StorageBudget;
 use plumb_core::SafeSearch;
 use plumb_plugin::{About, ActInput, Item, Note, Output, Query, Request, Shown, ShownResult};
 use serde::{Deserialize, Serialize};
@@ -1162,6 +1164,10 @@ struct Inner {
     /// folder name, and the file they are kept in.
     suggest: Mutex<BTreeMap<String, Suggest>>,
     suggest_file: Option<PathBuf>,
+    /// Held while the choices are saved.
+    saving: Mutex<()>,
+    /// The node's storage budget, charged for the choices' file.
+    budget: Option<Arc<StorageBudget>>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -1203,6 +1209,8 @@ impl Plugins {
                 token,
                 suggest: Mutex::default(),
                 suggest_file: None,
+                saving: Mutex::default(),
+                budget: None,
             }),
         }
     }
@@ -1227,33 +1235,53 @@ impl Plugins {
         }
     }
 
+    /// These plugins, charging the file of the owner's choices to `budget`.
+    pub fn with_budget(self, budget: Option<Arc<StorageBudget>>) -> Self {
+        let inner = Arc::into_inner(self.inner).expect("not shared yet");
+        Plugins {
+            inner: Arc::new(Inner { budget, ..inner }),
+        }
+    }
+
     /// What a search that fits `plugin` does: the owner's choice, or its
     /// `plugin.json`'s.
     pub fn suggest(&self, plugin: &Plugin) -> Suggest {
-        let chosen = self.inner.suggest.lock().expect("suggest lock");
-        chosen
+        self.inner
+            .suggest
+            .locked()
             .get(&plugin.id)
             .copied()
             .unwrap_or(plugin.manifest.suggest)
     }
 
-    /// Keeps the owner's choice of what a search that fits the plugin in
-    /// folder `id` does; from the next search on.
-    pub fn set_suggest(&self, id: &str, suggest: Suggest) -> Result<()> {
-        let Some(plugin) = self.inner.plugins.iter().find(|p| p.id == id) else {
-            bail!("no plugin {id:?} on this node");
-        };
-        let mut chosen = self.inner.suggest.lock().expect("suggest lock");
-        if suggest == plugin.manifest.suggest {
-            chosen.remove(id);
-        } else {
-            chosen.insert(id.to_string(), suggest);
+    /// Keeps the owner's choices of what a search that fits each plugin,
+    /// by folder name, does; from the next search on. Writes a file, so
+    /// it runs off the async threads. The file is written outside the
+    /// lock searches read, under `saving`, so writes land in order.
+    pub fn set_suggest(&self, choices: &[(String, Suggest)]) -> Result<()> {
+        let mut found = Vec::new();
+        for (id, suggest) in choices {
+            let Some(plugin) = self.inner.plugins.iter().find(|p| &p.id == id) else {
+                bail!("no plugin {id:?} on this node");
+            };
+            found.push((plugin, id, suggest));
         }
+        let _saving = self.inner.saving.locked();
+        let json = {
+            let mut chosen = self.inner.suggest.locked();
+            for (plugin, id, suggest) in found {
+                if *suggest == plugin.manifest.suggest {
+                    chosen.remove(id);
+                } else {
+                    chosen.insert(id.clone(), *suggest);
+                }
+            }
+            serde_json::to_vec_pretty(&*chosen)?
+        };
         if let Some(file) = &self.inner.suggest_file {
-            let json = serde_json::to_vec_pretty(&*chosen)?;
             let part = file.with_extension("json.part");
-            std::fs::write(&part, json).with_context(|| format!("writing {}", part.display()))?;
-            std::fs::rename(&part, file).with_context(|| format!("writing {}", file.display()))?;
+            plumb_core::storage::write_atomic(file, &part, &json, self.inner.budget.as_ref(), None)
+                .with_context(|| format!("writing {}", file.display()))?;
         }
         Ok(())
     }
