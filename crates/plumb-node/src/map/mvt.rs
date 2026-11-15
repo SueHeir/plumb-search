@@ -341,10 +341,8 @@ fn decode_value(bytes: &[u8]) -> Result<Value<'_>> {
     while !pb.done() {
         value = match pb.key()? {
             (1, 2) => Value::Str(std::str::from_utf8(pb.bytes()?).unwrap_or("")),
-            (2, 5) => Value::Num(f64::from(f32::from_le_bytes(
-                pb.fixed(4)?.try_into().unwrap(),
-            ))),
-            (3, 1) => Value::Num(f64::from_le_bytes(pb.fixed(8)?.try_into().unwrap())),
+            (2, 5) => Value::Num(f64::from(f32::from_le_bytes(pb.fixed(4)?.try_into()?))),
+            (3, 1) => Value::Num(f64::from_le_bytes(pb.fixed(8)?.try_into()?)),
             (4 | 5, 0) => Value::Num(pb.varint()? as i64 as f64),
             (6, 0) => {
                 let n = pb.varint()?;

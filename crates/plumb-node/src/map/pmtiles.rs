@@ -101,8 +101,8 @@ impl Header {
             "PMTiles version {} (only 3 is read)",
             bytes[7]
         );
-        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
-        let i32_at = |at: usize| i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(std::array::from_fn(|i| bytes[at + i]));
+        let i32_at = |at: usize| i32::from_le_bytes(std::array::from_fn(|i| bytes[at + i]));
         Ok(Header {
             root_offset: u64_at(8),
             root_length: u64_at(16),

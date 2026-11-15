@@ -453,10 +453,11 @@ impl RecordStore {
             )?;
             let before_dir = accounted.parent().map(file_bytes).transpose()?.unwrap_or(0);
             let written = (|| -> Result<()> {
-                if self.journal.is_none() {
-                    self.journal = Some(open_journal(&self.journal_path)?);
-                }
-                let journal = self.journal.as_mut().unwrap();
+                let journal = match self.journal.take() {
+                    Some(journal) => journal,
+                    None => open_journal(&self.journal_path)?,
+                };
+                let journal = self.journal.insert(journal);
                 let written = journal.write_all(lines).and_then(|()| journal.sync_data());
                 if written.is_err() {
                     journal.set_len(len)?;

@@ -203,12 +203,11 @@ pub(in crate::web) fn render_panel(view: &PanelView<'_>) -> String {
         sections.push(("backup", "Backup"));
     }
     sections.push(("about", "About"));
-    let section = if sections.iter().any(|(key, _)| *key == query.section) {
-        query.section.as_str()
-    } else {
-        "overview"
-    };
-    let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
+    let (section, title) = sections
+        .iter()
+        .copied()
+        .find(|(key, _)| *key == query.section)
+        .unwrap_or(("overview", "Overview"));
     let site = escape_html(origin);
     let bar = crate::web::app_bar_for("settings", true, base);
     let mut body = format!("<div class=\"wrap node-panel\">{bar}<div class=\"node-layout\"><aside class=\"node-sidebar\"><p class=\"eyebrow\">{}</p>{switcher}<nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));

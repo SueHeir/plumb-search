@@ -564,8 +564,8 @@ impl Vectors {
         match result {
             Ok(written) => {
                 let detached = lease.is_some_and(|lease| self.file.attach_lease(lease));
-                if detached {
-                    lifecycle.as_ref().unwrap().detach(path, old);
+                if let Some(lifecycle) = lifecycle.as_ref().filter(|_| detached) {
+                    lifecycle.detach(path, old);
                 }
                 let new = match (file_bytes(path), path.parent().map(file_bytes).transpose()) {
                     (Ok(bytes), Ok(parent)) => {

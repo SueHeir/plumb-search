@@ -24,7 +24,7 @@
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -83,7 +83,7 @@ fn error(status: StatusCode, message: &str) -> Response {
     if status == StatusCode::UNAUTHORIZED {
         response
             .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     }
     response
 }
