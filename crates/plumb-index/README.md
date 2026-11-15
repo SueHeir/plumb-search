@@ -80,6 +80,8 @@ About 43,000 lines, tests included.
 | [pages/page.rs](src/pages/page.rs) | reading each set's rows as pages (`Page::from_set`) |
 | [pages/search.rs](src/pages/search.rs), [pages/scoring.rs](src/pages/scoring.rs) | searching pages, entities, definitions and songs, and scoring them |
 | [pages/placing.rs](src/pages/placing.rs) | `place_pages`: where each page goes among the sites, and `keep_page_rules` |
+| [pages/linking.rs](src/pages/linking.rs) | entity linking: the article a part of the query means when the rest says more ("how did napoleon become emperor"), and `add_meant`, the page nearest the query in meaning on a node with page vectors |
+| [pages/dump.rs](src/pages/dump.rs) | `PageSearcher::dump`: the page index's documents and terms as text, for golden files |
 | [pages/listing.rs](src/pages/listing.rs) | `Listing`: the pages a search lists with its sites and the spelling they suggest, as a node and the evals list them |
 | [pages/sites.rs](src/pages/sites.rs), [pages/named_site.rs](src/pages/named_site.rs) | pages and the sites they are about; the inner page a query names with its site |
 | [pages/docs.rs](src/pages/docs.rs), [pages/papers.rs](src/pages/papers.rs), [pages/records.rs](src/pages/records.rs), [pages/repos.rs](src/pages/repos.rs) | documentation pages, papers, records named by identifier ("rfc 3339"), repositories |
