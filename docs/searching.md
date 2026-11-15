@@ -210,7 +210,8 @@ The search addresses take the same parameters as the results page:
 |---|---|
 | `q` | The search. Cut to 200 characters. |
 | `limit` | Results, 10 by default, at most 100. Not a whole number: 400. |
-| `country`, `only`, `lang`, `safe`, `exact`, `net` | As in [Settings](#settings) |
+| `country`, `only`, `lang`, `safe`, `exact` | As in [Settings](#settings) |
+| `net` | As in [Settings](#settings), on the results page only: the JSON addresses answer from the node's own index, and [`/api/network/search`](#the-json-api) asks the network |
 | `kind`, `after`, `before`, `order` | [Paper search](#papers) |
 | `full` | `1` for the whole page as an object (`/api/search`) |
 | `format`, `pageno`, `safesearch`, `categories`, `time_range` | SearXNG (`/search?format=json`) |
