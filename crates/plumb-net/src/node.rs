@@ -86,6 +86,7 @@ use self::batches::{
     crawler_views, replay_agreement, resend_pending, BatchListRetries, BatchRetries,
 };
 pub use self::batches::{RecordDelivery, MAX_RECORD_DELIVERY_BYTES};
+use self::behaviour::{Behaviour, BehaviourEvent};
 use self::swarm::build_swarm;
 use crate::agree::{Agreement, AgreementStatus};
 use crate::allowance::{Allowance, Source};
@@ -595,32 +596,43 @@ pub fn load_or_create_key(path: &std::path::Path) -> Result<Keypair> {
     }
 }
 
-#[derive(NetworkBehaviour)]
-struct Behaviour {
-    /// First, so a connection past the limits is turned away before any
-    /// other behaviour sees it.
-    limits: connection_limits::Behaviour,
-    relay_client: relay::client::Behaviour,
-    relay: Toggle<relay::Behaviour>,
-    dcutr: dcutr::Behaviour,
-    autonat: autonat::Behaviour,
-    upnp: Toggle<upnp::tokio::Behaviour>,
-    mdns: Toggle<mdns::tokio::Behaviour>,
-    identify: identify::Behaviour,
-    ping: ping::Behaviour,
-    kad: kad::Behaviour<kad::store::MemoryStore>,
-    gossipsub: gossipsub::Behaviour,
-    buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
-    batches: request_response::cbor::Behaviour<BatchRequest, BatchResponse>,
-    reports: request_response::cbor::Behaviour<ReportRequest, ReportResponse>,
-    oblivious: request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
-    credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
-    fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
-    pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
-    sets: request_response::cbor::Behaviour<SetsRequest, SetsResponse>,
-    trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
-    profile: request_response::cbor::Behaviour<ProfileRequest, ProfileResponse>,
-    leads: request_response::cbor::Behaviour<LeadRequest, LeadResponse>,
+/// The swarm's behaviours, in a module of their own for the `allow`.
+/// `limits`, `upnp`, `mdns` and `ping` have handler events of a type that
+/// cannot exist (`Infallible`), and Rust 1.100 calls the code the derive
+/// writes to pass them on unreachable. The `allow` can go once libp2p's
+/// derive carries its own.
+#[allow(unreachable_code)]
+mod behaviour {
+    use super::*;
+
+    #[derive(NetworkBehaviour)]
+    pub(super) struct Behaviour {
+        /// First, so a connection past the limits is turned away before any
+        /// other behaviour sees it.
+        pub(super) limits: connection_limits::Behaviour,
+        pub(super) relay_client: relay::client::Behaviour,
+        pub(super) relay: Toggle<relay::Behaviour>,
+        pub(super) dcutr: dcutr::Behaviour,
+        pub(super) autonat: autonat::Behaviour,
+        pub(super) upnp: Toggle<upnp::tokio::Behaviour>,
+        pub(super) mdns: Toggle<mdns::tokio::Behaviour>,
+        pub(super) identify: identify::Behaviour,
+        pub(super) ping: ping::Behaviour,
+        pub(super) kad: kad::Behaviour<kad::store::MemoryStore>,
+        pub(super) gossipsub: gossipsub::Behaviour,
+        pub(super) buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
+        pub(super) batches: request_response::cbor::Behaviour<BatchRequest, BatchResponse>,
+        pub(super) reports: request_response::cbor::Behaviour<ReportRequest, ReportResponse>,
+        pub(super) oblivious:
+            request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
+        pub(super) credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
+        pub(super) fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
+        pub(super) pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
+        pub(super) sets: request_response::cbor::Behaviour<SetsRequest, SetsResponse>,
+        pub(super) trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
+        pub(super) profile: request_response::cbor::Behaviour<ProfileRequest, ProfileResponse>,
+        pub(super) leads: request_response::cbor::Behaviour<LeadRequest, LeadResponse>,
+    }
 }
 
 pub async fn start(

@@ -42,6 +42,10 @@ pub enum Command {
     FetchLeads(FetchLeadsArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Whether a change made search better: compares two runs of `eval
+    /// --recall --outcomes-out` over the same searches, without the change
+    /// and with it.
+    Judge(crate::judge::JudgeArgs),
     /// Check that the pages a queries file expects are in the page sets.
     CheckLabels(crate::eval_labels::CheckLabelsArgs),
     /// Train the learned ranking on the test searches `eval
@@ -679,6 +683,16 @@ pub struct EvalArgs {
     /// build; only the few most recently used indexes are kept.
     #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
     pub pages_cache: Option<PathBuf>,
+    /// For a sealed file: print totals only, so that no line names a
+    /// search. The `miss:` lines and the per-search lines of --recall are
+    /// left out, and a failed run says only that it failed.
+    #[arg(long, conflicts_with_all = ["show", "show_suggestions", "explain", "sweep", "features_out", "candidates_out", "report"])]
+    pub totals_only: bool,
+    /// With --recall, write each search's outcome to this file for
+    /// `plumb-tools judge`: whether an answer is held and where it was
+    /// listed. The file holds no search and no answer.
+    #[arg(long, value_name = "PATH", requires = "recall")]
+    pub outcomes_out: Option<PathBuf>,
     /// Measure only one half of the queries: `tune` to try ranking changes
     /// on, `held-out` to check them on afterwards. Which half a query is in
     /// depends on its words alone (see eval/README.md) [default: both].

@@ -1,5 +1,6 @@
-//! End-to-end tests of `plumb-tools index`, `search` and `eval` over the
-//! synthetic fixtures in `fixtures/`, ingested as `plumb ingest` does.
+//! End-to-end tests of `plumb-tools index`, `search`, `eval` and `judge`
+//! over the synthetic fixtures in `fixtures/`, ingested as `plumb ingest`
+//! does.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -212,4 +213,54 @@ fn eval_fails_below_min_top1_and_reports_misses() {
     assert!(stderr.contains("below --min-top1"), "{stderr}");
 
     plumb_ok(&eval_args("0.5"));
+}
+
+#[test]
+fn a_sealed_run_names_no_search_and_judges_as_identical() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = build_fixture_index(tmp.path());
+    let queries = tmp.path().join("sealed.tsv");
+    std::fs::write(
+        &queries,
+        "us bank\tusbank.com\nus bank\tchase.com\nmarie curie\tcurie.example\n",
+    )
+    .unwrap();
+    let sealed = |more: &[&dyn AsRef<OsStr>]| {
+        let mut items: Vec<&dyn AsRef<OsStr>> = vec![
+            &"eval",
+            &"--index",
+            &index,
+            &"--queries",
+            &queries,
+            &"--totals-only",
+        ];
+        items.extend(more);
+        plumb(&args(&items))
+    };
+    let names_no_search = |text: &str| {
+        for word in ["bank", "chase", "curie"] {
+            assert!(!text.contains(word), "{word:?} is in:\n{text}");
+        }
+    };
+
+    let base = tmp.path().join("base.outcomes");
+    let head = tmp.path().join("head.outcomes");
+    for out in [&base, &head] {
+        let run = sealed(&[&"--recall", &"--outcomes-out", out]);
+        assert!(run.status.success());
+        let totals = String::from_utf8_lossy(&run.stdout);
+        assert!(totals.contains("in the index or a page set"), "{totals}");
+        names_no_search(&totals);
+        names_no_search(&String::from_utf8_lossy(&run.stderr));
+        names_no_search(&std::fs::read_to_string(out).unwrap());
+    }
+    let totals = sealed(&[]);
+    assert!(totals.status.success());
+    names_no_search(&String::from_utf8_lossy(&totals.stdout));
+    // An option that writes searches out is refused.
+    assert!(!sealed(&[&"--show", &"3"]).status.success());
+
+    let judged = plumb_ok(&args(&[&"judge", &"--base", &base, &"--head", &head]));
+    assert!(judged.contains("== sealed (3 searches)"), "{judged}");
+    assert!(judged.contains("verdict: identical"), "{judged}");
 }

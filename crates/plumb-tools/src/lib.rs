@@ -1,6 +1,6 @@
 //! `plumb-tools`: the commands a node never runs. They make the project's
 //! page sets ([`fetch`], [`build`]) and map ([`map_fetch`]), measure and
-//! train ranking ([`eval`], [`eval_labels`], [`train_rank`]), do a node's
+//! train ranking ([`eval`], [`judge`], [`eval_labels`], [`train_rank`]), do a node's
 //! work by hand ([`crawl`], [`search`], [`embed`]), and look into records
 //! files and a node's data ([`link_rank`], [`top_sites`], [`fact_trust`],
 //! [`terms`], [`summaries`], [`grades`], [`storage`], [`dead_sites`]). [`set`] writes
@@ -25,6 +25,7 @@ pub mod fact_check;
 pub mod fact_trust;
 pub mod fetch;
 pub mod grades;
+pub mod judge;
 pub mod link_rank;
 pub mod map_fetch;
 pub mod page_items;
@@ -57,6 +58,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::FetchFacts(args) => fetch::run_facts(args),
         Command::FetchLeads(args) => fetch::run_leads(args),
         Command::Eval(args) => eval::run(args),
+        Command::Judge(args) => judge::run(&args),
         Command::CheckLabels(args) => eval_labels::run(args),
         Command::TrainRank(args) => train_rank::run(args),
         Command::FetchText(args) => terms::run_fetch_text(args),

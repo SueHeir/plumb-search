@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use plumb_core::registrable_domain;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use plumb_index::pages::{
@@ -241,6 +242,16 @@ struct Setup {
 }
 
 pub fn run(args: EvalArgs) -> Result<()> {
+    // An error can quote the search it stopped at, which a sealed file's
+    // run must not show.
+    let totals_only = args.totals_only;
+    measure(args).map_err(|err| match totals_only {
+        true => anyhow!("the run failed: run it on a file that may be read to see why"),
+        false => err,
+    })
+}
+
+fn measure(args: EvalArgs) -> Result<()> {
     if args.report.is_some() {
         return contracts::run(&args);
     }
@@ -266,6 +277,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
         return candidates::write(&args, &setup, &suites, &cfg, path);
     }
     if args.recall {
+        let mut outcomes = String::new();
         for suite in &suites {
             if suites.len() > 1 {
                 println!("== {}", suite.name);
@@ -273,6 +285,20 @@ pub fn run(args: EvalArgs) -> Result<()> {
             let ranks = evaluate(&args, &setup, &suite.queries, &cfg, false, None)?;
             let stages = recall(&args, &setup, &suite.queries, &cfg, &ranks)?;
             print!("{}", format_recall(&stages, args.limit));
+            let _ = write!(
+                outcomes,
+                "{}",
+                crate::judge::Outcomes {
+                    suite: suite.name.clone(),
+                    limit: args.limit,
+                    digest: digest(&suite.queries),
+                    searches: stages.iter().map(|s| (s.held(), s.rank)).collect(),
+                }
+            );
+        }
+        if let Some(path) = &args.outcomes_out {
+            std::fs::write(path, outcomes)
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         return Ok(());
     }
@@ -297,7 +323,15 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 suite.queries.len(),
                 setup.searcher.num_docs(),
             );
-            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, true, features.as_mut())?;
+            let verbose = !args.totals_only;
+            let ranks = evaluate(
+                &args,
+                &setup,
+                &suite.queries,
+                &cfg,
+                verbose,
+                features.as_mut(),
+            )?;
             for mut query in features.into_iter().flatten() {
                 if let serde_json::Value::Object(fields) = &mut query {
                     fields.insert("suite".into(), suite.name.clone().into());
@@ -407,6 +441,11 @@ struct Stage {
 }
 
 impl Stage {
+    /// Some answer is a site in the index or a page in a page set.
+    fn held(&self) -> bool {
+        self.site_indexed || self.page_indexed
+    }
+
     /// The answer is among the first `depth` sites by words or meaning,
     /// or pages found.
     fn within(&self, depth: usize) -> bool {
@@ -516,7 +555,7 @@ fn recall(
             let urls: Vec<&str> = hits.iter().map(|hit| hit.page.url.as_str()).collect();
             stage.page = rank_of(&urls, &pages);
         }
-        if let Some(loss) = stage.loss(args.limit) {
+        if let Some(loss) = stage.loss(args.limit).filter(|_| !args.totals_only) {
             let at = |at: Option<usize>| at.map_or("-".to_string(), |at| at.to_string());
             println!(
                 "{loss}\t{:?}\twords {}\tmeaning {}\tpage {}\t{}",
@@ -563,7 +602,7 @@ fn format_recall(stages: &[Stage], limit: usize) -> String {
     let _ = writeln!(
         out,
         "  in the index or a page set {}",
-        pct(count(&|s| s.site_indexed || s.page_indexed))
+        pct(count(&Stage::held))
     );
     let mut losses: Vec<(&str, usize)> = Vec::new();
     for loss in stages.iter().filter_map(|s| s.loss(limit)) {
@@ -578,6 +617,17 @@ fn format_recall(stages: &[Stage], limit: usize) -> String {
         let _ = writeln!(out, "    {loss:<38} {}", pct(count));
     }
     out
+}
+
+/// What `queries` and their answers hash to, so that `plumb-tools judge`
+/// compares only runs of the same searches.
+fn digest(queries: &[EvalQuery]) -> String {
+    let mut hash = Sha256::new();
+    for q in queries {
+        hash.update(format!("{}\t{}\n", q.query, q.expected.join(",")));
+    }
+    let hash = hash.finalize();
+    hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// The address of every page in the sets of `--pages`.

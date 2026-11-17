@@ -64,6 +64,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `spelling` | Show what an index's spelling model learned |
 | | `embed` | Make each site's vector for search by meaning (the model downloads on first use) |
 | Ranking | `eval` | Measure where the expected answers of test searches rank (see [eval/README.md](../../eval/README.md)) |
+| | `judge` | Whether a change made search better: compares two `eval --recall --outcomes-out` runs over the same sealed searches (see [eval/README.md](../../eval/README.md#judging-a-change)) |
 | | `check-labels` | Check that the pages a queries file expects are in the page sets |
 | | `train-rank` | Train the learned ranking on what `eval --features-out` wrote, and measure it |
 | Records and data | `storage` | Measure a node's storage and private-search bucket sizes, read-only |
@@ -178,9 +179,10 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [crawl.rs](src/crawl.rs) | `crawl` |
 | [search.rs](src/search.rs) | `index`, `search`, `spelling` |
 | [embed.rs](src/embed.rs) | `embed` |
-| [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training |
+| [eval.rs](src/eval.rs) | `eval`: suites, sweeps, recall, features for training, outcomes for `judge` |
 | [eval/contracts.rs](src/eval/contracts.rs) | `eval --report`: JSONL contracts and reproducible reports |
 | [eval/rerank.rs](src/eval/rerank.rs) | A cross-encoder second pass, for `eval --rerank-model` |
+| [judge.rs](src/judge.rs) | `judge`: the counts and the verdict of a change from two runs' outcomes |
 | [eval_labels.rs](src/eval_labels.rs) | `check-labels` |
 | [train_rank.rs](src/train_rank.rs), [train_rank/learn.rs](src/train_rank/learn.rs) | `train-rank`: LambdaMART trees, or a small neural ranker (`--learner net`) |
 | [storage.rs](src/storage.rs), [dead_sites.rs](src/dead_sites.rs), [top_sites.rs](src/top_sites.rs) | Read-only looks at a node's data and records |
@@ -220,7 +222,7 @@ cargo test -p plumb-tools
 
 | Test | What it checks |
 | --- | --- |
-| [tests/eval.rs](tests/eval.rs) | `index`, `search` and `eval` end to end over [fixtures/](../../fixtures/README.md), ingested as `plumb ingest` does |
+| [tests/eval.rs](tests/eval.rs) | `index`, `search`, `eval` and `judge` end to end over [fixtures/](../../fixtures/README.md), ingested as `plumb ingest` does. A `--totals-only` run names no search |
 | [tests/site_rules.rs](tests/site_rules.rs) | A node that takes a site rules set `set` wrote and signed works out sites by it |
 | [tests/conventions.rs](tests/conventions.rs) | The node code's conventions (below) |
 | `eval::tests::repository_query_files_are_valid` | Every `eval/*.tsv` suite and `fixtures/brand_queries.tsv` parses and is labeled the way results are keyed |

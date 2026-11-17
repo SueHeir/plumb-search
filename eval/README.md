@@ -7,6 +7,7 @@ The searches every ranking change is measured with, and the scripts around them.
 - [The suites](#the-suites)
 - [File format](#file-format)
 - [Tune and held-out halves](#tune-and-held-out-halves)
+- [Judging a change](#judging-a-change)
 - [Where the searches come from](#where-the-searches-come-from)
 - [Options that change what is measured](#options-that-change-what-is-measured)
 - [Sweeps](#sweeps)
@@ -89,6 +90,51 @@ plumb-tools eval --index DIR --queries eval/brand_queries.tsv --half held-out
 
 Without `--half`, both halves are measured.
 
+## Judging a change
+
+A change that can move results is judged on searches it was not written for. The suites here are worked on every day, so a fix written against them scores well on them whether or not it helps anyone else. The verdict comes from a sealed file of real searches: nobody reads it, nothing is tuned against it, and only its totals are reported.
+
+Run the sealed file twice, without the change and with it, on the same index, page sets and options, and compare the two runs:
+
+```sh
+plumb-tools eval --index DIR --pages ... --recall --totals-only \
+  --queries sealed_pages.tsv --outcomes-out base.outcomes     # the build without the change
+plumb-tools eval --index DIR --pages ... --recall --totals-only \
+  --queries sealed_pages.tsv --outcomes-out head.outcomes     # the build with it
+plumb-tools judge --base base.outcomes --head head.outcomes
+```
+
+`judge` prints, for each queries file (the numbers here are made up):
+
+```text
+== sealed_pages (1000 searches)
+                      base   head  gained  lost   net
+  held                 400    414      14     0   +14
+  in the first 10      240    262      29     7   +22
+  first                150    158      14     6    +8
+  score (MRR@10) 0.175 -> 0.187: 54 searches moved, 41 up and 13 down
+  verdict: better (a change that does nothing moves the score this far 0.1% of the time)
+```
+
+- **Three counts**, each with the searches gained and lost, so a trade shows as a trade. `held`: some answer is in the index or a page set at all. `in the first 10`: an answer was listed. `first`: it was listed first.
+- **One verdict**, from one score: the reciprocal rank, 1 for an answer listed first, 1/2 for second, 0 for one not listed. The verdict is `better` or `worse` when a change that does nothing would move that score as far less than one time in twenty (a sign-flip test over the searches that moved), `no different` otherwise, and `identical` when no search's outcome changed.
+
+What the verdicts mean for a change:
+
+| Verdict | What it means |
+| --- | --- |
+| `better` | It merges as a search fix |
+| `identical` | What a refactor of ranking code has to be |
+| `no different` | It does not merge as a search fix. It can merge for another reason: it removes rules or code, or something else needs it |
+| `worse` | It does not merge |
+
+A change may lose some searches and still be better: the gains have to outweigh the losses, and no single search is pinned. A change that moves two or three searches is no different, however good those two or three look, so a rule written for one search does not pass on it. The checks that guard people rather than quality (look-alike sites, the denylist) are not traded: they still have to pass.
+
+- `--totals-only` prints no line that names a search, and a run that fails says only that it failed; run the same command on a file that may be read to see why. Keep the other options that write searches out (`--show`, `--explain`, `--sweep`, `--features-out`) away from a sealed file: `--totals-only` refuses them.
+- An outcomes file holds, for each search, whether an answer is held and where it was listed, and nothing of the search itself, so it can be kept beside a change's results.
+- A sealed file has an open half made the same way, which may be read. Find out why a change gains or loses there, with any option, and decide the change before measuring it on the sealed file.
+- The sealed files are made from search logs that allow research use only, so they are kept outside this repository.
+
 ## Where the searches come from
 
 The suites are written by hand, not taken from search logs. They come from public lists of what people look for (the most read Wikipedia articles, the most visited sites, the most viewed Stack Overflow and Stack Exchange questions, the most cited papers, the most starred repositories and most used packages) and from the ways people and AI agents phrase searches: a name alone, a name and "login" or "docs", a description, a question.
@@ -123,6 +169,8 @@ It prints `ok` with each expected page's title (to see it is the page the search
 | `--profiles` | Count the profile or listing shown above the results ("mrbeast youtube") as the first result |
 | `--explain` | For each miss, show how the first result and the expected one scored |
 | `--recall` | Find where each missed answer was lost before ranking: not indexed, how far down the word or meaning candidates, or never looked at |
+| `--totals-only` | For a sealed file: print totals only, so no line names a search (see [Judging a change](#judging-a-change)) |
+| `--outcomes-out FILE` | With `--recall`, write each search's outcome (held or not, and its rank) for `plumb-tools judge` |
 | `--candidates-out FILE` | Write each query's deep site candidates as JSON lines, with the raw signals a first stage could score them by: which query words each field has, field lengths, how rare each word is per field, link score and closeness. `--candidates-depth N` (500) sets how far down today's first stage, the sites with every main word and the sites nearest in meaning it goes. Only queries that expect a site |
 | `--show N` | Print the first N results of every query |
 | `--half tune\|held-out` | Measure one half only |
