@@ -63,6 +63,8 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 ## Search quality
 
 - A change that can move results (ranking, defaults, page or site data, fetching) doesn't merge on its own green CI. It goes through the Batch evals, as the project instructions describe.
+- It is judged on sealed real searches it was not written for, with `plumb-tools judge` ([eval/README.md](eval/README.md#judging-a-change)). It merges as a search fix when the verdict is better, whatever it does to the suites it was written against.
+- A rule, word list or threshold added to make one search work moves too few searches to be better. Don't add one: find what the search shares with others and change that.
 - A refactor of ranking code has to leave the frozen eval results identical.
 - The node and the evals should run the same results pipeline. Where they don't yet, change both, or the evals measure something the node doesn't serve.
 
