@@ -470,6 +470,12 @@ fn field(text: &str) -> String {
     crate::collapse_whitespace(&text.replace(['\t', '\n', '\r', '|'], " "))
 }
 
+/// Whether `text` is written as an empty field: a title of only `|` and
+/// spaces would be, and an articles file with one does not read back.
+pub fn writes_empty(text: &str) -> bool {
+    field(text).is_empty()
+}
+
 /// Writes `article` as one line of an articles file.
 pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result<()> {
     let paper_extension = article
