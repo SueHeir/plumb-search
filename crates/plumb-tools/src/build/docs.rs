@@ -257,14 +257,16 @@ fn short(text: &str) -> Option<String> {
 }
 
 /// The article of `doc`, a page of `site`. `None` for a page with no title
-/// but the site's name, or not under the site's roots.
+/// but the site's name, or one written empty ("|"), or not under the
+/// site's roots.
 pub fn doc_article(site: &DocsSite, doc: &FetchedDoc) -> Option<Article> {
     article_of(site, doc, &Shared::default())
 }
 
 fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Article> {
     let depth = depth_under(site, &doc.url)?;
-    let title = page_title(site, doc.title.as_deref()?)?;
+    let title = page_title(site, doc.title.as_deref()?)
+        .filter(|title| !plumb_core::article::writes_empty(title))?;
     // A wiki's lists of pages, not pages: "Category:Electronic Frontier
     // Foundation".
     if WIKI_LISTS.iter().any(|list| title.starts_with(list))
@@ -507,6 +509,10 @@ mod tests {
         )
         .is_none());
         assert!(doc_article(python, &doc("https://python.org/x", "X", None)).is_none());
+        // "|" would be written as an empty title.
+        let blank = "https://docs.python.org/3/howto/blank.html";
+        let blank = doc(blank, "| | Python 3.14.0 documentation", None);
+        assert_eq!(doc_article(python, &blank), None);
         let git = site("git").unwrap();
         let rebase = doc_article(
             git,

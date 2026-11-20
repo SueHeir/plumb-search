@@ -130,8 +130,10 @@ pub fn site_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Article> 
 /// gone): `None`, unless they differ once the last ending dropped is put
 /// back. Mayo Clinic's "Asthma - Symptoms and causes - Mayo Clinic" is
 /// "Asthma - Symptoms and causes", as its other tabs on asthma are
-/// "Asthma" too without their tab. `pages` are the docs' addresses read by
-/// [`unlocalized`], so a page's copies in other countries count once.
+/// "Asthma" too without their tab. `None` too when what is left would be
+/// written empty ("| | Tutorialspoint" is "|"). `pages` are the docs'
+/// addresses read by [`unlocalized`], so a page's copies in other
+/// countries count once.
 fn page_titles(
     docs: &[FetchedDoc],
     pages: &[String],
@@ -162,6 +164,7 @@ fn page_titles(
             last(forms)
                 .filter(|title| unshared(title, &shared))
                 .or_else(|| before_last(forms).filter(|title| unshared(title, &shared_before)))
+                .filter(|title| !plumb_core::article::writes_empty(title))
                 .cloned()
         })
         .collect()
@@ -471,6 +474,34 @@ mod tests {
             .filter_map(|article| article.item)
             .collect();
         assert_eq!(urls, ["https://www.uscis.gov/i-9"]);
+    }
+
+    #[test]
+    fn a_title_of_separators_only_is_no_title() {
+        // "| | Tutorialspoint" without the site's name is "|", which is
+        // written as an empty title, and a set with one does not read back.
+        let site = crate::reference_sites::site("tutorialspoint.com").unwrap();
+        let docs: Vec<FetchedDoc> = ["Python Tutorial", "Java Tutorial", "SQL Tutorial", "|"]
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                doc(
+                    &format!("https://www.tutorialspoint.com/course/{i}.htm"),
+                    &format!("{title} | Tutorialspoint"),
+                    &format!("About {i}."),
+                )
+            })
+            .collect();
+        let articles = reference_articles(site, &docs);
+        let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Python Tutorial", "Java Tutorial", "SQL Tutorial"]);
+        let mut written = Vec::new();
+        for article in &articles {
+            plumb_core::article::write_article(&mut written, article).unwrap();
+        }
+        for line in String::from_utf8(written).unwrap().lines() {
+            plumb_core::article::parse_article(line).unwrap();
+        }
     }
 
     #[test]
