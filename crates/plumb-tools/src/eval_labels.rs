@@ -112,7 +112,7 @@ pub fn run(args: CheckLabelsArgs) -> Result<()> {
         let articles = plumb_core::article::read_articles(reader, usize::MAX)
             .with_context(|| format!("reading {}", file.display()))?;
         info!("{} pages in {}", articles.len(), file.display());
-        let set = set_of_file(name);
+        let set = set_of_file(name)?;
         all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
     }
     let pages = Pages::new(all);

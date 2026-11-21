@@ -648,7 +648,7 @@ fn set_pages(args: &EvalArgs) -> Result<impl Iterator<Item = Page>> {
     let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
     for file in &args.pages {
         let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let set = set_of_file(name);
+        let set = set_of_file(name)?;
         info!("reading the {set} pages of {}", file.display());
         let read = plumb_node::pages::read_set(&set, file, args.pages_top as u64)?;
         pages = Box::new(pages.chain(read));
@@ -1597,9 +1597,11 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 
 /// The page set a file is of, from its name, which starts with the set's:
 /// github.tsv.gz and github-new.tsv.gz are repositories,
-/// wikipedia-en-old.tsv.gz English Wikipedia; any other is English
-/// Wikipedia.
-pub(crate) fn set_of_file(name: &str) -> String {
+/// wikipedia-en-old.tsv.gz English Wikipedia, and so is articles.tsv.gz,
+/// its older name. An error for any other name: a file read as the wrong
+/// set has its pages listed by the wrong set's rules, and a run of
+/// "ref-whole.tsv.gz" read as Wikipedia measured nothing.
+pub(crate) fn set_of_file(name: &str) -> Result<String> {
     use plumb_index::pages::{
         BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET,
         PODCASTS_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, SUBPAGES_SET,
@@ -1625,14 +1627,23 @@ pub(crate) fn set_of_file(name: &str) -> String {
     .into_iter()
     .find(|set| stem.starts_with(set))
     {
-        return set.to_string();
+        return Ok(set.to_string());
     }
-    let lang = stem
-        .strip_prefix("wikipedia-")
+    if stem.starts_with("articles") {
+        return Ok("wikipedia-en".to_string());
+    }
+    let Some(rest) = stem.strip_prefix("wikipedia") else {
+        bail!(
+            "{name}: no page set's name starts it, so its set is not known; \
+             name it as fetch-pages does (reference.tsv.gz, reference-whole.tsv.gz)"
+        );
+    };
+    let lang = rest
+        .strip_prefix('-')
         .and_then(|rest| rest.split('-').next())
         .filter(|lang| !lang.is_empty())
         .unwrap_or("en");
-    format!("wikipedia-{lang}")
+    Ok(format!("wikipedia-{lang}"))
 }
 
 #[cfg(test)]
@@ -1670,16 +1681,23 @@ mod tests {
 
     #[test]
     fn sets_come_from_file_names() {
-        assert_eq!(set_of_file("github.tsv.gz"), "github");
-        assert_eq!(set_of_file("github-new.tsv.gz"), "github");
-        assert_eq!(set_of_file("stackoverflow.tsv.gz"), "stackoverflow");
-        assert_eq!(set_of_file("stackexchange.tsv.gz"), "stackexchange");
-        assert_eq!(set_of_file("books.tsv"), "books");
-        assert_eq!(set_of_file("packages.tsv.gz"), "packages");
-        assert_eq!(set_of_file("podcasts.tsv.gz"), "podcasts");
-        assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
-        assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
-        assert_eq!(set_of_file("articles.tsv.gz"), "wikipedia-en");
+        let set = |name| set_of_file(name).unwrap();
+        assert_eq!(set("github.tsv.gz"), "github");
+        assert_eq!(set("github-new.tsv.gz"), "github");
+        assert_eq!(set("stackoverflow.tsv.gz"), "stackoverflow");
+        assert_eq!(set("stackexchange.tsv.gz"), "stackexchange");
+        assert_eq!(set("books.tsv"), "books");
+        assert_eq!(set("packages.tsv.gz"), "packages");
+        assert_eq!(set("podcasts.tsv.gz"), "podcasts");
+        assert_eq!(set("reference-whole.tsv.gz"), "reference");
+        assert_eq!(set("wikipedia-de.tsv.gz"), "wikipedia-de");
+        assert_eq!(set("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
+        assert_eq!(set("wikipedia.tsv.gz"), "wikipedia-en");
+        assert_eq!(set("articles.tsv.gz"), "wikipedia-en");
+        // Read as Wikipedia, these measured nothing.
+        assert!(set_of_file("ref-whole.tsv.gz").is_err());
+        // A node no longer reads the old subpages set (CHANGELOG, 0.2.1).
+        assert!(set_of_file("subpages.tsv.gz").is_err());
     }
 
     #[test]
