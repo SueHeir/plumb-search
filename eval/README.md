@@ -59,7 +59,7 @@ plumb-tools eval --index DIR --queries eval/brand_queries.tsv
 | `lyrics_queries.tsv` | A song's lyrics ("jolene lyrics") | Its Genius page, shown above the results | `--pages music.tsv.gz --profiles` |
 | `subpage_queries.tsv` | One page deep inside a well-known site ("nist sp 811") | That page | `--pages subpages2.tsv.gz` |
 
-Page set files are what `plumb-tools fetch-pages` writes, and what a node keeps in `DATA/pages/sets/`. `eval` tells a file's set from the start of its name (`github-new.tsv.gz` is the GitHub set), and takes a name it does not know for English Wikipedia, so keep the names fetch-pages gives them. Each file's own comment lines say more about how its searches were picked.
+Page set files are what `plumb-tools fetch-pages` writes, and what a node keeps in `DATA/pages/sets/`. `eval` tells a file's set from the start of its name (`github-new.tsv.gz` is the GitHub set, `reference-whole.tsv.gz` the reference set), and stops at a name that starts with no set's, so keep the names fetch-pages gives them. Each file's own comment lines say more about how its searches were picked.
 
 ## File format
 
