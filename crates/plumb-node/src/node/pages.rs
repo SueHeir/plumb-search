@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use plumb_core::place::Place;
 use plumb_core::{adult_level, now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
-    operators_allow, options_allow, Listing, PageHit, PageSearcher, WANTED_SET,
+    operators_allow, options_allow, Listing, PageHit, PageSearcher, WANTED_SET, WEB_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1214,14 +1214,14 @@ pub(super) fn add_pages(
         inner.asked_pages.searcher(),
     ];
     let more: Vec<&PageSearcher> = wanted.iter().flatten().map(|wanted| &**wanted).collect();
-    // Pages found for this node's searches come from anywhere on the web,
-    // not from sites picked by hand: they are checked as sites are, and
-    // against the adult blocklist as it is now.
+    // Pages found for this node's searches, and the web index's, come
+    // from anywhere on the web, not from sites picked by hand: they are
+    // checked as sites are, and against the adult blocklist as it is now.
     let list = inner
         .adult_list()
         .filter(|_| options.safe != SafeSearch::Off);
     let keep = |hit: &PageHit| {
-        if hit.page.set != WANTED_SET {
+        if hit.page.set != WANTED_SET && hit.page.set != WEB_SET {
             return true;
         }
         let domain = registrable_domain(&hit.page.url).unwrap_or_default();
@@ -1232,6 +1232,7 @@ pub(super) fn add_pages(
             && !list.as_ref().is_some_and(|list| list.contains(&domain))
     };
     let town = |name: &str| super::places::locate(inner, name, None).filter(Place::is_town);
+    let meaning = inner.meaning.get();
     let listing = Listing {
         sites: index.backend().searcher(),
         pages: &searcher,
@@ -1240,6 +1241,7 @@ pub(super) fn add_pages(
         learned_order: true,
         keep: &keep,
         town: &town,
+        web: meaning.as_ref().and_then(|meaning| meaning.web_words()),
     };
     listing
         .add_pages(query, options, results)

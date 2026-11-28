@@ -21,8 +21,8 @@ use plumb_embed::{
     page_text, rows_header, signs, Embedder, RowVectors, MODEL_BASE_URL, ROWS_HEADER_LEN,
 };
 use plumb_index::web::{
-    create_web_words, fuse, WebWords, WEB_FIRST, WEB_READ_AGAIN, WEB_SIGNS_FILE, WEB_VECTORS_FILE,
-    WEB_WORDS_DIR,
+    create_web_words, fuse, page_key, WebWords, WEB_FIRST, WEB_READ_AGAIN, WEB_SIGNS_FILE,
+    WEB_VECTORS_FILE, WEB_WORDS_DIR,
 };
 use plumb_node::block_on;
 use plumb_node::cli::parse_positive;
@@ -177,6 +177,7 @@ fn build(pages: &Path, out: &Path, lead_words: usize, memory_mb: usize) -> Resul
             document.add_text(fields.title, title);
             document.add_text(fields.body, body);
             document.add_text(fields.lead, &lead);
+            document.add_text(fields.key, page_key(url).unwrap_or_default());
             writer.add_document(document)?;
             writeln!(texts, "{}\t{}", one_line(title), one_line(&lead))?;
             rows = rows

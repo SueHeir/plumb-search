@@ -238,6 +238,7 @@ impl SearchBackend for SongBackend {
             site_search: None,
             spelling: None,
             meant: Vec::new(),
+            web_meant: Vec::new(),
             sites_ordered: false,
         })
     }

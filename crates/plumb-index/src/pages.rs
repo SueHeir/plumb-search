@@ -247,7 +247,7 @@ const ASKING_WORDS: &[&str] = &[
 pub const QUESTION_TITLE_SHARE: f32 = 0.5;
 
 /// A single page that can be a result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
     /// Structured scholarly identity, dates and provider count meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +361,11 @@ pub const SUBPAGES_SET: &str = "subpages2";
 /// (`plumb_crawl::follow_links`), found and listed like subpages. They
 /// are never shared: each node holds its own.
 pub const WANTED_SET: &str = "wanted";
+
+/// Pages of popular sites from an open crawl, in the web index
+/// ([`crate::web`]) rather than a page set: listed after the other pages,
+/// by their own rules ([`crate::web::list_web_pages`]).
+pub const WEB_SET: &str = "web";
 
 /// The name [`SUBPAGES_SET`] had before v0.2.1, which a node's settings
 /// may still use.

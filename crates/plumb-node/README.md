@@ -57,7 +57,7 @@ flowchart LR
 | [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, which the journal's changes carry and the crawls shared with the network are signed from; dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |
-| [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding |
+| [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding, and the web index's vectors (`--web-pages`) |
 | [pages.rs](src/pages.rs), [places.rs](src/places.rs), [map/](src/map/mod.rs) | Page sets; places; the base map (PMTiles, vector tiles, SVG drawing) |
 | [news.rs](src/news.rs), [wanted_pages.rs](src/wanted_pages.rs) | Recent headlines; inner pages found for this node's searches, or that AI apps asked for |
 | [sources.rs](src/sources.rs), [websearch.rs](src/websearch.rs), [country.rs](src/country.rs), [assembly.rs](src/assembly.rs) | Sites for tool searches ("weather"); web search links and bangs; home country; rules shared by MCP and the web |

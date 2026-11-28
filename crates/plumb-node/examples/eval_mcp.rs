@@ -107,6 +107,7 @@ impl FrozenBackend {
             learned_order: true,
             keep: &|_| true,
             town: &town,
+            web: None,
         };
         let Some(spelling) = listing.add_pages(query, options, &mut results)? else {
             return Ok(results);
