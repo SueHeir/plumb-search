@@ -454,7 +454,8 @@ pub struct PageHit {
     pub unsure: bool,
 }
 
-/// Where the learned ranking listed a page on its own.
+/// Where the learned ranking listed a page on its own, or the web index's
+/// listing did ([`crate::web::list_web_pages`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LearnedPlace {

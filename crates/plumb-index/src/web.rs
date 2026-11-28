@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::{adult_level, registrable_domain};
+use plumb_core::{adult_level, host_of, registrable_domain};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
@@ -27,8 +27,8 @@ use tantivy::schema::{
 use tantivy::{DocAddress, Index, IndexReader, ReloadPolicy, Searcher, TantivyDocument, Term};
 
 use crate::analysis::{self, STEMMED_ANALYZER};
-use crate::pages::{options_allow, Page, PageHit, PlacedPage, WEB_SET};
-use crate::{RankConfig, SearchOptions, SearchResults};
+use crate::pages::{options_allow, LearnedPlace, Page, PageHit, PlacedPage, WEB_SET};
+use crate::{Hit, RankConfig, SearchOptions, SearchResults};
 
 /// The words index's folder in a web index's folder.
 pub const WEB_WORDS_DIR: &str = "words";
@@ -300,13 +300,18 @@ pub fn fuse(words: &[u32], meaning: &[u32]) -> Vec<u32> {
 /// - A listed site's own page goes under its result, when it is among the
 ///   first [`RankConfig::web_under`] of the fused order and the site
 ///   carries no inner page yet: the row then holds both, and no site moves.
+///   A page goes to the site that names its host most closely
+///   (docs.python.org before python.org).
 /// - Of the other pages, the first [`RankConfig::web_alone`] are listed on
 ///   their own after [`RankConfig::web_after`] sites, one a site, none of a
 ///   listed site (it belongs under that site or nowhere).
 ///
 /// A homepage is left to the sites' index, and so is a page already
-/// listed. Pages are kept as the search's options and safe search allow,
-/// and as `keep` says (a node's adult blocklist).
+/// listed. Pages are kept as the search's options, safe search and the
+/// health sources' rules allow, and as `keep` says (a node's adult
+/// blocklist). Each page found says where it goes ([`Page::site`] or
+/// [`PageHit::learned`]), so the results shown place it there again
+/// ([`place_web`]).
 pub(crate) fn list_web_pages(
     web: &WebWords,
     query: &str,
@@ -318,12 +323,15 @@ pub(crate) fn list_web_pages(
     if rank.web_under == 0 && rank.web_alone == 0 {
         return Ok(());
     }
-    let (sites, pages, meant) = (&results.hits, &mut results.pages, &results.web_meant);
+    let (sites, meant) = (&results.hits, &results.web_meant);
     let words = web.by_words(query, WEB_FIRST)?;
     let listed: HashSet<String> = sites
         .iter()
-        .map(|site| site.url.clone())
-        .chain(pages.iter().map(|placed| placed.hit.page.url.clone()))
+        .flat_map(|site| {
+            std::iter::once(&site.url).chain(site.key_pages.iter().map(|page| &page.url))
+        })
+        .chain(results.pages.iter().map(|placed| &placed.hit.page.url))
+        .filter_map(|url| page_key(url))
         .collect();
     let mut found = Vec::new();
     for (at, row) in fuse(&words, meant)
@@ -342,52 +350,85 @@ pub(crate) fn list_web_pages(
             .into_iter()
             .chain(hit.page.description.as_deref());
         if !is_homepage(&hit.page.url)
-            && !listed.contains(&hit.page.url)
+            && page_key(&hit.page.url).is_some_and(|key| !listed.contains(&key))
             && options_allow(options, &hit.page)
             && !options.safe.hides(adult_level(&domain, texts))
+            && crate::health::page_allowed(query, &hit.page)
             && keep(&hit)
         {
             let both = words.contains(&row) && meant.contains(&row);
             found.push((at, domain, both, hit));
         }
     }
-    let mut sites_taken = HashSet::new();
-    for (i, site) in sites.iter().enumerate() {
-        let Some(domain) = registrable_domain(&site.domain) else {
-            continue;
-        };
-        let carries_inner = pages.iter().any(|placed| {
-            placed.under.as_deref() == Some(site.domain.as_str())
-                && (placed.hit.page.is_site_page() || placed.hit.page.set == WEB_SET)
-        });
-        let own = found
-            .iter()
-            .position(|(at, of, _, _)| *of == domain && *at < rank.web_under);
-        if let (false, Some(own)) = (carries_inner || sites_taken.contains(&domain), own) {
-            let (_, _, _, hit) = found.remove(own);
-            pages.push(PlacedPage {
-                hit,
-                under: Some(site.domain.clone()),
-                at: i,
+    let mut placed = Vec::new();
+    let mut sites_taken: HashSet<String> = HashSet::new();
+    for (at, domain, both, mut hit) in found {
+        if let Some(site) = own_site(sites, &hit.page.url) {
+            let carries_inner = results.pages.iter().chain(&placed).any(|placed| {
+                placed.under.as_deref() == Some(site.domain.as_str())
+                    && placed.hit.page.is_site_page()
             });
+            if at < rank.web_under && !carries_inner {
+                hit.page.site = Some(site.domain.clone());
+                placed.extend(place_web(sites, vec![hit]));
+            }
+            continue;
         }
-        sites_taken.insert(domain);
+        let alone = placed.iter().filter(|p| p.under.is_none()).count();
+        if alone < rank.web_alone && (both || !rank.web_agree) && sites_taken.insert(domain) {
+            hit.learned = Some(match sites.get(rank.web_after) {
+                Some(site) => LearnedPlace::Before(site.domain.clone()),
+                None => LearnedPlace::Last,
+            });
+            placed.extend(place_web(sites, vec![hit]));
+        }
     }
-    let after = rank.web_after.min(sites.len());
-    let alone: Vec<PageHit> = found
-        .into_iter()
-        .filter(|(_, domain, both, _)| {
-            (*both || !rank.web_agree) && sites_taken.insert(domain.clone())
-        })
-        .take(rank.web_alone)
-        .map(|(_, _, _, hit)| hit)
-        .collect();
-    pages.extend(alone.into_iter().map(|hit| PlacedPage {
-        hit,
-        under: None,
-        at: after,
-    }));
+    results.pages.extend(placed);
     Ok(())
+}
+
+/// The listed site `url` is a page of: the one whose domain is its host,
+/// or the nearest domain above its host.
+fn own_site<'a>(sites: &'a [Hit], url: &str) -> Option<&'a Hit> {
+    let host = host_of(url)?;
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    sites
+        .iter()
+        .filter(|site| {
+            let domain = site.domain.strip_prefix("www.").unwrap_or(&site.domain);
+            host == domain || host.ends_with(&format!(".{domain}"))
+        })
+        .max_by_key(|site| site.domain.len())
+}
+
+/// Where the web index's pages `hits` go among `sites`, as
+/// [`list_web_pages`] said: under the site of [`Page::site`] (left out
+/// when it is not listed), or before the site of [`PageHit::learned`]
+/// (after the sites when it is not listed).
+pub(crate) fn place_web(sites: &[Hit], hits: Vec<PageHit>) -> Vec<PlacedPage> {
+    hits.into_iter()
+        .filter_map(|hit| {
+            if let Some(site) = &hit.page.site {
+                let at = sites.iter().position(|s| &s.domain == site)?;
+                return Some(PlacedPage {
+                    under: Some(site.clone()),
+                    at,
+                    hit,
+                });
+            }
+            let at = match &hit.learned {
+                Some(LearnedPlace::Before(domain)) => {
+                    sites.iter().position(|s| &s.domain == domain)
+                }
+                _ => None,
+            };
+            Some(PlacedPage {
+                at: at.unwrap_or(sites.len()),
+                under: None,
+                hit,
+            })
+        })
+        .collect()
 }
 
 /// `page` as a page found, placed by where the fused order puts it rather
@@ -526,6 +567,12 @@ mod tests {
         };
         let options = SearchOptions::default();
         list_web_pages(web, query, rank, &options, &|_| true, &mut results)?;
+        // The results shown place them again from their hits, as listed.
+        let hits = results.pages.iter().map(|p| p.hit.clone()).collect();
+        assert_eq!(
+            crate::pages::place_shown(query, &results.hits, hits),
+            results.pages
+        );
         Ok(results
             .pages
             .into_iter()
@@ -544,18 +591,27 @@ mod tests {
         assert_eq!(
             listed(&web, "open csv files", &[], &rank, &sites)?,
             vec![
+                ("https://www.lifewire.com/csv-file-2622708".into(), None, 3),
                 (
                     "https://example.com/files".into(),
                     Some("example.com".into()),
                     1
                 ),
-                ("https://www.lifewire.com/csv-file-2622708".into(), None, 3),
             ]
         );
         // The page is found by meaning too: "cats" finds none by words.
         let found = listed(&web, "kittens", &[2], &rank, &sites)?;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].1.as_deref(), Some("example.com"));
+        // A page goes under the site that names its host most closely.
+        let under = listed(
+            &web,
+            "cats",
+            &[],
+            &rank,
+            &["example.com", "www.example.com"],
+        )?;
+        assert_eq!(under[0].1.as_deref(), Some("www.example.com"));
         // With few sites, the page comes after them all.
         let alone = listed(&web, "open csv files", &[], &rank, &["a.com"])?;
         assert_eq!(

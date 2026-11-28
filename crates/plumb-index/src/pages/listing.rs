@@ -135,13 +135,14 @@ impl Listing<'_> {
                 &mut results.pages,
             );
             self.after_learned_order(pages, query, options, results)?;
+            // Last, as nothing above knows the web index's pages: the
+            // learned order was trained without them, and rows written to
+            // train it leave them out.
+            if let Some(web) = self.web {
+                list_web_pages(web, query, self.rank, options, self.keep, results)?;
+            }
         }
-        // Last, as nothing above knows the web index's pages: the learned
-        // order was trained without them.
-        match self.web {
-            Some(web) => list_web_pages(web, query, self.rank, options, self.keep, results),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// Checks `results`' spelling of `query` against the pages `found` for

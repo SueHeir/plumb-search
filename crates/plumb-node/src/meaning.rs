@@ -225,6 +225,8 @@ impl MeaningIndex {
                 None
             }
         };
+        // A search with operators lists none of the web index's pages.
+        let operators = plumb_core::Operators::parse(query).any();
         let instruction = if self.embedder.takes_query_instruction() {
             self.instruction
         } else {
@@ -240,7 +242,10 @@ impl MeaningIndex {
         // Before taking the sites' vectors, which the embedding job may be
         // waiting to add to.
         let pages = nearest_pages(&self.pages, &query[0]);
-        let web = self.web.as_ref().map(|(_, vectors)| vectors);
+        let web = match &self.web {
+            Some((_, vectors)) if !operators => nearest_web(vectors, &query[0]),
+            _ => Vec::new(),
+        };
         Some(QueryMeaning::new(
             self.read(),
             query,
@@ -286,8 +291,8 @@ pub struct QueryMeaning<'a> {
     nearest: Vec<String>,
     /// The pages nearest the query ([`nearest_pages`]), with their vectors.
     pages: Vec<(MeantPage, &'a [i8])>,
-    /// The web index's vectors, read when a search lists its pages.
-    web: Option<&'a RowVectors>,
+    /// The rows of the web index's pages nearest the query ([`nearest_web`]).
+    web: Vec<u32>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -321,7 +326,7 @@ impl<'a> QueryMeaning<'a> {
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
         pages: Vec<(MeantPage, &'a [i8])>,
-        web: Option<&'a RowVectors>,
+        web: Vec<u32>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -383,21 +388,8 @@ impl Meaning for QueryMeaning<'_> {
             .collect()
     }
 
-    /// By the first of the query's vectors, as the nearest pages are; on
-    /// half the CPUs, up to [`WEB_THREADS`]. 29 million pages' signs take
-    /// about 0.36 s on one core of this project's cloud machine and 0.13 s
-    /// on four.
     fn nearest_web(&self) -> Vec<u32> {
-        let (Some(web), Some(query)) = (self.web, self.spreads.first()) else {
-            return Vec::new();
-        };
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get() / 2)
-            .clamp(1, WEB_THREADS);
-        web.nearest(&query.vector, WEB_FIRST, WEB_READ_AGAIN, threads)
-            .into_iter()
-            .map(|(row, _)| row)
-            .collect()
+        self.web.clone()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -465,6 +457,20 @@ fn nearest_page<'a>(pages: &'a Vectors, query: &[i8]) -> Option<(MeantPage, &'a 
         }
         _ => None,
     }
+}
+
+/// The rows of the [`WEB_FIRST`] pages of the web index `web` nearest
+/// `query`, the first of a query's vectors as the nearest pages are, on
+/// half the CPUs, up to [`WEB_THREADS`]. 29 million pages' signs take about
+/// 0.36 s on one core of this project's cloud machine and 0.13 s on four.
+fn nearest_web(web: &RowVectors, query: &[i8]) -> Vec<u32> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get() / 2)
+        .clamp(1, WEB_THREADS);
+    web.nearest(query, WEB_FIRST, WEB_READ_AGAIN, threads)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
 }
 
 /// The page vectors files `path` names: itself, or the `.bin` files in it
@@ -979,7 +985,7 @@ mod tests {
             vec![vec![127, 0]],
             QueryInstruction::Off,
             vec![(page, &vector[..])],
-            None,
+            Vec::new(),
         );
         let near = |listed: &[&str]| meaning.nearest_pages(listed)[0].sites;
         let both = near(&["far.example", "near.example"]).unwrap();

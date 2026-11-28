@@ -6,7 +6,7 @@ use plumb_core::article::{article_url, Article, SearchContent};
 use super::{
     Page, BOOKS_SET, DOCS_SET, ENGLISH_WIKIPEDIA, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
     PAPERS_SET, PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET,
-    STACKOVERFLOW_SET, SUBPAGES_SET, WANTED_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    STACKOVERFLOW_SET, SUBPAGES_SET, WANTED_SET, WEB_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
 
 /// Where a description stops saying what its page is and goes on to who
@@ -858,9 +858,13 @@ impl Page {
 }
 
 /// Whether `set` holds inner pages of sites, of the reference, subpages
-/// or wanted sets ([`Page::is_site_page`]).
+/// or wanted sets or the web index ([`Page::is_site_page`]).
 pub(crate) fn is_site_page_set(set: &str) -> bool {
-    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET || set == WANTED_SET
+    set == REFERENCE_SET
+        || set == REFERENCE2_SET
+        || set == SUBPAGES_SET
+        || set == WANTED_SET
+        || set == WEB_SET
 }
 
 /// What the brackets `lead` opens with hold, before it says what its
