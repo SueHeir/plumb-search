@@ -51,19 +51,18 @@ pub fn signs(vector: &[i8]) -> Vec<u8> {
 /// How many signs differ between two rows of signs.
 #[inline(always)]
 fn differ(a: &[u8], b: &[u8]) -> u32 {
-    let (words, others) = (a.chunks_exact(8), b.chunks_exact(8));
-    let tail: u32 = words
-        .remainder()
+    let ((words, tail), (others, other_tail)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let ends: u32 = tail
         .iter()
-        .zip(others.remainder())
+        .zip(other_tail)
         .map(|(x, y)| (x ^ y).count_ones())
         .sum();
-    let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
     words
+        .iter()
         .zip(others)
-        .map(|(x, y)| (word(x) ^ word(y)).count_ones())
+        .map(|(x, y)| (u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y)).count_ones())
         .sum::<u32>()
-        + tail
+        + ends
 }
 
 /// The vectors of a page set by row, with their signs ([`rows_header`]).
