@@ -94,6 +94,7 @@ pub mod spell_model;
 mod states;
 mod storage;
 mod topics;
+pub mod web;
 
 use std::collections::HashSet;
 

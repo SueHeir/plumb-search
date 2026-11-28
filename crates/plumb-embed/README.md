@@ -29,6 +29,7 @@ flowchart LR
 | [gemma.rs](src/gemma.rs) | EmbeddingGemma 2 run from its GGUF file, the way llama.cpp runs it |
 | [server.rs](src/server.rs) | A model run by an outside embedding server, for trying models out |
 | [vectors.rs](src/vectors.rs) | `Vectors`: every site's vector in one file, read in place; `nearest`, `cosine` |
+| [rows.rs](src/rows.rs) | `RowVectors`: the vectors of a page set too big to read whole for each search (the web index), by row, with the signs of their values; `nearest` reads every page's signs and only the nearest by them in full |
 
 ## How it works
 

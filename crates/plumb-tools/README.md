@@ -78,6 +78,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | Experiments | `fetch-text`, `terms` | Fetch homepages' visible text once, then try ways of picking each site's search terms |
 | | `relations`, `relate` | Learn kinds of Wikidata facts as maps between article vectors, then follow or check a relation |
 | | `embed-pages`, `page-meaning` | Make a vector for each page of a set that has a snippet (or every page, with `--without-snippet`), then measure which pages searches find by meaning in each file; a node or `eval` takes the vectors, a file or a directory of them, with `--page-vectors` |
+| | `web-pages build`, `embed`, `search` | Build the web index's words from crawl pages of popular sites (`part-NNNNN.tsv.gz` files of id, address, title and first words, one page a line), make their vectors (going on where a stopped run left off), and list a query's pages by words and meaning fused |
 | Sets | `set new-key` | Make a set-signing key and print its public key |
 | | `set from-pages` | Write a page set file as a set of items |
 | | `set page-sets` | Write every page set a node holds as `plumb/<id>` sets |
@@ -195,6 +196,7 @@ Each command is a module with a `run` function; [lib.rs](src/lib.rs) dispatches 
 | [site_rules.rs](src/site_rules.rs) | Site rules beyond the built-in lists, and the hosts a rules set would move |
 | [relations.rs](src/relations.rs), [relations/maps.rs](src/relations/maps.rs) | `relations`, `relate` |
 | [embed_pages.rs](src/embed_pages.rs) | `embed-pages`, `page-meaning`: page vectors keyed by URL, and how often the page a search wants is among the nearest |
+| [web_pages.rs](src/web_pages.rs) | `web-pages`: the web index built from crawl pages, embedded by row, and searched |
 | [pir/](src/pir/mod.rs) | The table a private information retrieval server would answer from |
 
 Commands that only look leave their inputs as they are: `link-rank`, `top-sites` and `fact-trust` read a records file and its journal from a copy, and write anything they change to a new file. `fetch-pages --data DIR` writes into `DIR/pages/sets/`, where a running node picks the file up.

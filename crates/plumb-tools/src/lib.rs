@@ -43,6 +43,7 @@ pub mod terms;
 mod test_sites;
 pub mod top_sites;
 pub mod train_rank;
+pub mod web_pages;
 
 use cli::{Cli, Command};
 
@@ -77,6 +78,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Embed(args) => embed::run(args),
         Command::EmbedPages(args) => embed_pages::run_embed_pages(args),
         Command::PageMeaning(args) => embed_pages::run_page_meaning(args),
+        Command::WebPages(args) => web_pages::run(args),
         Command::DeadSites(args) => dead_sites::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::Relate(args) => relations::run_relate(&args),
