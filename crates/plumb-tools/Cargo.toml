@@ -44,6 +44,7 @@ serde_json = "1.0.151"
 sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["bzip2", "ppmd"] }
 sha2 = "0.10.9"
 tar = "0.4.46"
+tantivy = "0.26.2"
 tempfile = "3.27.0"
 tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 tokio = { version = "1.53.1", features = ["full"] }

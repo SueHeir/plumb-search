@@ -46,7 +46,7 @@ pub fn cosine(a: &[i8], b: &[i8]) -> f32 {
     }
 }
 
-fn dot(a: &[i8], b: &[i8]) -> i32 {
+pub(crate) fn dot(a: &[i8], b: &[i8]) -> i32 {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the CPU has AVX2.
@@ -145,7 +145,7 @@ fn row_hash_values(row: &[u8]) -> (&TextHash, &[i8]) {
 }
 
 /// A row's values: each byte is one.
-fn as_values(bytes: &[u8]) -> &[i8] {
+pub(crate) fn as_values(bytes: &[u8]) -> &[i8] {
     // SAFETY: i8 has the size and alignment of u8, and any byte is an i8.
     unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) }
 }
@@ -375,7 +375,7 @@ impl Vectors {
     /// Reads vectors saved by [`Vectors::save`].
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        FileBytes::read(&file)
+        FileBytes::read(&file, true)
             .and_then(Self::read)
             .with_context(|| format!("reading vectors from {}", path.display()))
     }
@@ -467,7 +467,7 @@ impl Vectors {
         };
         #[cfg(unix)]
         {
-            let file = FileBytes::read(&written)
+            let file = FileBytes::read(&written, true)
                 .with_context(|| format!("reading vectors from {}", path.display()))?;
             let mut held = vectors.write_locked();
             if held.version == version && held.rows.len() == rows.len() {
@@ -632,7 +632,7 @@ impl PartialEq for Scored<'_> {
 impl Eq for Scored<'_> {}
 
 /// The bytes of a vectors file.
-enum FileBytes {
+pub(crate) enum FileBytes {
     /// The file mapped into memory, on Unix, where a file can be replaced
     /// while mapped.
     #[cfg(unix)]
@@ -657,13 +657,18 @@ impl FileBytes {
         drop(incoming);
         false
     }
+    /// `file` mapped, read now when `populate` (as a copy would be, not
+    /// while the first search waits), or else read as searches touch it.
     #[cfg(unix)]
-    fn read(file: &File) -> Result<Self> {
+    pub(crate) fn read(file: &File, populate: bool) -> Result<Self> {
+        let mut options = memmap2::MmapOptions::new();
+        if populate {
+            options.populate();
+        }
         // SAFETY: vectors files are replaced whole, by renaming a new file
         // over them, and never changed in place, so the mapped bytes stay
-        // as they were read. Populated: read now, as a copy would be, not
-        // while the first search waits.
-        let map = unsafe { memmap2::MmapOptions::new().populate().map(file)? };
+        // as they were read.
+        let map = unsafe { options.map(file)? };
         Ok(FileBytes::Mapped {
             map,
             lease: Mutex::new(None),
@@ -671,7 +676,7 @@ impl FileBytes {
     }
 
     #[cfg(not(unix))]
-    fn read(mut file: &File) -> Result<Self> {
+    pub(crate) fn read(mut file: &File, _populate: bool) -> Result<Self> {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(FileBytes::Held(bytes))

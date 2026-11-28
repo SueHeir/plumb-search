@@ -18,6 +18,7 @@
 
 mod gemma;
 mod model;
+mod rows;
 mod server;
 mod text;
 mod vectors;
@@ -30,6 +31,7 @@ pub use model::{
     model_id, quantize, tiny_config_and_tokenizer, write_test_model, Embedder, ModelId, MAX_TOKENS,
     MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
+pub use rows::{rows_header, signs, RowVectors, ROWS_HEADER_LEN};
 pub use server::SERVER_FILE;
 pub use text::{
     page_text, site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS,

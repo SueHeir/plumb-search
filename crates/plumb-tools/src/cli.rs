@@ -91,6 +91,9 @@ pub enum Command {
     /// description and snippet (an article's lead), keyed by its URL (an
     /// experiment: nodes find pages by their words only).
     EmbedPages(crate::embed_pages::EmbedPagesArgs),
+    /// The web index: pages of popular sites from an open crawl, found by
+    /// words and meaning. Build it, embed its pages, or search it.
+    WebPages(crate::web_pages::WebPagesArgs),
     /// Which pages searches find by meaning alone, with the vectors
     /// `embed-pages` made: where each search's wanted article comes among
     /// the nearest pages.
