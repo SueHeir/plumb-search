@@ -182,6 +182,10 @@ pub struct MeaningArgs {
     /// given more than once. For trying out.
     #[arg(long, value_name = "PATH", requires = "model", hide = true)]
     pub page_vectors: Vec<PathBuf>,
+    /// A web index built and embedded by `plumb-tools web-pages` with the
+    /// same model, whose pages are listed with the sites. For trying out.
+    #[arg(long, value_name = "DIR", requires = "model", hide = true)]
+    pub web_pages: Option<PathBuf>,
 }
 
 /// How a search is embedded: as it is, or after the instruction the model
@@ -367,6 +371,11 @@ pub struct RunArgs {
     /// after the first sites. Can be given more than once. For trying out.
     #[arg(long, value_name = "PATH", hide = true)]
     pub page_vectors: Vec<PathBuf>,
+    /// A web index built and embedded by `plumb-tools web-pages` with the
+    /// model search by meaning runs: while it is on, the index's pages are
+    /// listed with the sites. For trying out.
+    #[arg(long, value_name = "DIR", hide = true)]
+    pub web_pages: Option<PathBuf>,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly

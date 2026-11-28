@@ -78,7 +78,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | Experiments | `fetch-text`, `terms` | Fetch homepages' visible text once, then try ways of picking each site's search terms |
 | | `relations`, `relate` | Learn kinds of Wikidata facts as maps between article vectors, then follow or check a relation |
 | | `embed-pages`, `page-meaning` | Make a vector for each page of a set that has a snippet (or every page, with `--without-snippet`), then measure which pages searches find by meaning in each file; a node or `eval` takes the vectors, a file or a directory of them, with `--page-vectors` |
-| | `web-pages build`, `embed`, `search` | Build the web index's words from crawl pages of popular sites (`part-NNNNN.tsv.gz` files of id, address, title and first words, one page a line), make their vectors (going on where a stopped run left off), and list a query's pages by words and meaning fused |
+| | `web-pages build`, `embed`, `search` | Build the web index's words from crawl pages of popular sites (`part-NNNNN.tsv.gz` files of id, address, title and first words, one page a line), make their vectors (going on where a stopped run left off), and list a query's pages by words and meaning fused; a node or `eval` lists them with the sites given `--web-pages DIR` |
 | Sets | `set new-key` | Make a set-signing key and print its public key |
 | | `set from-pages` | Write a page set file as a set of items |
 | | `set page-sets` | Write every page set a node holds as `plumb/<id>` sets |

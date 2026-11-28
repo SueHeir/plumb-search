@@ -14,7 +14,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, SUBPAGES_SET, WEB_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -263,8 +263,12 @@ fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
 ///
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
-/// docs page found by its words never comes before the best site.
+/// docs page found by its words never comes before the best site. The web
+/// index's pages go where its listing put them, after all of these
+/// ([`crate::web::place_web`]).
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let (web, pages): (Vec<PageHit>, Vec<PageHit>) =
+        pages.into_iter().partition(|hit| hit.page.set == WEB_SET);
     let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
     // The site of what the query names, when it is listed.
     let home = pages
@@ -308,6 +312,7 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         at: 0,
     }));
     keep_page_rules(query, sites, &mut placed);
+    placed.extend(crate::web::place_web(sites, web));
     placed
 }
 

@@ -1173,7 +1173,7 @@ fn is_pill_shop(domain: &str, link_score: f32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn hit(domain: &str, named: bool, link_score: f32) -> Hit {

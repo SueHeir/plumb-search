@@ -222,6 +222,9 @@ pub struct NodeConfig {
     /// Page vectors searches take the page nearest them in meaning from,
     /// files or directories of them ([`crate::meaning::MeaningIndex::load_pages`]).
     pub page_vectors: Vec<std::path::PathBuf>,
+    /// The web index searches list pages of with the sites
+    /// ([`crate::meaning::MeaningIndex::load_web`]).
+    pub web_pages: Option<std::path::PathBuf>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
     /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
@@ -370,6 +373,7 @@ impl NodeConfig {
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             page_vectors: Vec::new(),
+            web_pages: None,
             seed_from_network: true,
             set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),

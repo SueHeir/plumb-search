@@ -257,6 +257,7 @@ impl Searcher {
                 .map(|hit| hit.domain.as_str())
                 .collect();
             results.meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_pages(&sites));
+            results.web_meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_web());
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

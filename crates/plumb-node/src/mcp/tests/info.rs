@@ -70,6 +70,7 @@ impl SearchBackend for Australia {
             site_search: None,
             spelling: None,
             meant: Vec::new(),
+            web_meant: Vec::new(),
             sites_ordered: false,
         })
     }
@@ -272,6 +273,7 @@ impl SearchBackend for EntityIndex {
             spelling: None,
             site_search: None,
             meant: Vec::new(),
+            web_meant: Vec::new(),
             sites_ordered: false,
         })
     }
@@ -564,6 +566,7 @@ impl SearchBackend for LyricsWithEntity {
             spelling: None,
             site_search: None,
             meant: Vec::new(),
+            web_meant: Vec::new(),
             sites_ordered: false,
         })
     }

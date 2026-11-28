@@ -13,9 +13,10 @@ use anyhow::{bail, Context, Result};
 use plumb_core::site;
 use plumb_core::sites::Sites;
 use plumb_embed::{
-    site_text_words, text_hash, Embedder, ModelId, Vectors, MODEL_FILES, MODEL_NAME,
+    site_text_words, text_hash, Embedder, ModelId, RowVectors, Vectors, MODEL_FILES, MODEL_NAME,
 };
 use plumb_format::Item;
+use plumb_index::web::{WebWords, WEB_FIRST, WEB_READ_AGAIN, WEB_SIGNS_FILE, WEB_VECTORS_FILE};
 use plumb_index::{Meaning, MeantPage};
 use tracing::{info, warn};
 
@@ -43,6 +44,9 @@ const NEAREST_PAGES: usize = 10;
 /// 93% of the nearest articles that were the one wanted, 57% of those
 /// that were not, and 77% of those for searches that want no article.
 const LEAST_PAGE_GAP: f32 = 0.05;
+/// Most threads a search reads the web index's signs on
+/// ([`QueryMeaning::nearest_web`]).
+const WEB_THREADS: usize = 8;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub const SAVE_EVERY: usize = 10_000;
@@ -65,6 +69,9 @@ pub struct MeaningIndex {
     /// Vectors of pages by address (`plumb-tools embed-pages`), a set of
     /// pages to each, when given.
     pages: Vec<Vectors>,
+    /// The web index (`plumb-tools web-pages`), when given: its words, and
+    /// the vectors of its pages by row.
+    web: Option<(WebWords, RowVectors)>,
     instruction: QueryInstruction,
 }
 
@@ -92,6 +99,7 @@ impl MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
             pages: Vec::new(),
+            web: None,
             instruction: QueryInstruction::default(),
         }
     }
@@ -106,7 +114,39 @@ impl MeaningIndex {
         for pages in &args.page_vectors {
             meaning.load_pages(pages)?;
         }
+        if let Some(web) = &args.web_pages {
+            meaning.load_web(web)?;
+        }
         Ok(Some(meaning))
+    }
+
+    /// Takes the web index in `dir` too, which `plumb-tools web-pages`
+    /// built and embedded with this model, so searches list its pages
+    /// ([`plumb_index::web`]). The signs of its vectors are read into
+    /// memory now, 48 bytes a page (1.4 GB for 29 million pages); the
+    /// words index and the vectors are read as searches need them.
+    pub fn load_web(&mut self, dir: &Path) -> Result<()> {
+        let words = WebWords::open(dir)?;
+        let vectors = RowVectors::open(&dir.join(WEB_VECTORS_FILE), &dir.join(WEB_SIGNS_FILE))?;
+        if vectors.model() != self.embedder.id() || vectors.dim() != self.embedder.dim() {
+            bail!(
+                "the web index in {} was embedded by another model; run plumb-tools web-pages embed again",
+                dir.display()
+            );
+        }
+        info!(
+            "loaded the web index in {}: {} pages, {} with vectors",
+            dir.display(),
+            words.len(),
+            vectors.len()
+        );
+        self.web = Some((words, vectors));
+        Ok(())
+    }
+
+    /// The web index's words, when it has one ([`MeaningIndex::load_web`]).
+    pub fn web_words(&self) -> Option<&WebWords> {
+        self.web.as_ref().map(|(words, _)| words)
     }
 
     /// Takes the page vectors in `path` too, a file or a directory of
@@ -185,6 +225,8 @@ impl MeaningIndex {
                 None
             }
         };
+        // A search with operators lists none of the web index's pages.
+        let operators = plumb_core::Operators::parse(query).any();
         let instruction = if self.embedder.takes_query_instruction() {
             self.instruction
         } else {
@@ -200,7 +242,17 @@ impl MeaningIndex {
         // Before taking the sites' vectors, which the embedding job may be
         // waiting to add to.
         let pages = nearest_pages(&self.pages, &query[0]);
-        Some(QueryMeaning::new(self.read(), query, instruction, pages))
+        let web = match &self.web {
+            Some((_, vectors)) if !operators => nearest_web(vectors, &query[0]),
+            _ => Vec::new(),
+        };
+        Some(QueryMeaning::new(
+            self.read(),
+            query,
+            instruction,
+            pages,
+            web,
+        ))
     }
 }
 
@@ -239,6 +291,8 @@ pub struct QueryMeaning<'a> {
     nearest: Vec<String>,
     /// The pages nearest the query ([`nearest_pages`]), with their vectors.
     pages: Vec<(MeantPage, &'a [i8])>,
+    /// The rows of the web index's pages nearest the query ([`nearest_web`]).
+    web: Vec<u32>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -272,6 +326,7 @@ impl<'a> QueryMeaning<'a> {
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
         pages: Vec<(MeantPage, &'a [i8])>,
+        web: Vec<u32>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -301,6 +356,7 @@ impl<'a> QueryMeaning<'a> {
             vectors,
             nearest: nearest.unwrap_or_default(),
             pages,
+            web,
             spreads,
             combine,
         }
@@ -330,6 +386,10 @@ impl Meaning for QueryMeaning<'_> {
                 ..page.clone()
             })
             .collect()
+    }
+
+    fn nearest_web(&self) -> Vec<u32> {
+        self.web.clone()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -397,6 +457,20 @@ fn nearest_page<'a>(pages: &'a Vectors, query: &[i8]) -> Option<(MeantPage, &'a 
         }
         _ => None,
     }
+}
+
+/// The rows of the [`WEB_FIRST`] pages of the web index `web` nearest
+/// `query`, the first of a query's vectors as the nearest pages are, on
+/// half the CPUs, up to [`WEB_THREADS`]. 29 million pages' signs take about
+/// 0.36 s on one core of this project's cloud machine and 0.13 s on four.
+fn nearest_web(web: &RowVectors, query: &[i8]) -> Vec<u32> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get() / 2)
+        .clamp(1, WEB_THREADS);
+    web.nearest(query, WEB_FIRST, WEB_READ_AGAIN, threads)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
 }
 
 /// The page vectors files `path` names: itself, or the `.bin` files in it
@@ -911,6 +985,7 @@ mod tests {
             vec![vec![127, 0]],
             QueryInstruction::Off,
             vec![(page, &vector[..])],
+            Vec::new(),
         );
         let near = |listed: &[&str]| meaning.nearest_pages(listed)[0].sites;
         let both = near(&["far.example", "near.example"]).unwrap();

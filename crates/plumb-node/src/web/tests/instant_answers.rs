@@ -425,6 +425,7 @@ fn an_article_the_query_names_gets_an_info_box() {
         site_search: None,
         spelling: None,
         meant: Vec::new(),
+        web_meant: Vec::new(),
         sites_ordered: false,
     };
     let page = render_results(

@@ -146,6 +146,18 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                     );
                 }
             }
+            if let Some(web) = &inner.config.web_pages {
+                // Not as one big job, which would wait for the network
+                // join: its signs (1.4 GB for 29 million pages) are mapped
+                // from their file, as the page vectors are, so the system
+                // can drop them and read them again.
+                if let Err(err) = meaning.load_web(web) {
+                    warn!(
+                        "search by meaning: no web index from {}: {err:#}",
+                        web.display()
+                    );
+                }
+            }
             let meaning = Arc::new(meaning);
             inner.meaning.set(Arc::clone(&meaning));
             inner.set_meaning_work(None);

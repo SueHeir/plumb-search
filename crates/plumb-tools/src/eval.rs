@@ -24,6 +24,7 @@ use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
     place_shown, Listing, Page, PageSearcher, PlacedPage,
 };
+use plumb_index::web::page_key;
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -121,11 +122,14 @@ fn normalize_domain(domain: &str) -> String {
 
 /// Whether a result keyed `key` (a domain or a page's address) is the
 /// expected answer `expected`, which takes any address it starts when it
-/// ends in `*`.
+/// ends in `*`. A page is the same give or take `http`, `www.` and a
+/// trailing slash, which a click and a crawl write either way.
 pub fn is_expected(expected: &str, key: &str) -> bool {
     match expected.strip_suffix('*') {
         Some(start) => key.starts_with(start),
-        None => expected == key,
+        None => {
+            expected == key || page_key(expected).is_some_and(|page| page_key(key) == Some(page))
+        }
     }
 }
 
@@ -522,12 +526,19 @@ fn recall(
             .as_ref()
             .and_then(|meaning| meaning.query(&searched));
         let meaning = query_meaning.as_ref().map(|m| m as &dyn Meaning);
+        let web = setup
+            .meaning
+            .as_ref()
+            .and_then(|meaning| meaning.web_words());
         let mut stage = Stage {
             rank,
             site_indexed: sites.iter().any(|d| setup.searcher.has_domain(d)),
             page_indexed: pages.iter().any(|e| match e.strip_suffix('*') {
                 Some(start) => setup.page_urls.iter().any(|url| url.starts_with(start)),
-                None => setup.page_urls.contains(e),
+                None => {
+                    setup.page_urls.contains(e)
+                        || web.is_some_and(|web| web.holds(e).unwrap_or(false))
+                }
             }),
             ..Stage::default()
         };
@@ -913,6 +924,7 @@ fn evaluate(
                 learned_order,
                 keep: &|_| true,
                 town: &|_| None,
+                web: meaning.as_ref().and_then(|meaning| meaning.web_words()),
             };
             let sure = listing.add_pages(query, options, &mut results)?;
             Ok((results, query_meaning, sure))
@@ -1714,6 +1726,23 @@ mod tests {
         assert_eq!(rank_of(&rows, expected), Some(3));
         assert!(is_expected("usbank.com", "usbank.com"));
         assert!(!is_expected("usbank.com", "usbank.com.evil"));
+    }
+
+    #[test]
+    fn a_page_is_the_same_give_or_take_http_www_and_a_slash() {
+        let page = "http://www.Lifewire.com/csv-file/";
+        assert!(is_expected(page, "https://lifewire.com/csv-file"));
+        assert!(is_expected(page, "https://www.lifewire.com/csv-file#open"));
+        assert!(!is_expected(page, "https://www.lifewire.com/csv-file/2"));
+        assert!(!is_expected(
+            page,
+            "https://www.lifewire.com/csv-file?page=2"
+        ));
+        assert!(is_expected(
+            "https://a.com/find/?q=1",
+            "http://a.com/find?q=1"
+        ));
+        assert!(!is_expected("https://a.com/x", "a.com"));
     }
 
     #[test]

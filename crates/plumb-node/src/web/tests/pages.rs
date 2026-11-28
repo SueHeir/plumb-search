@@ -500,6 +500,7 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         site_search: None,
         spelling: None,
         meant: Vec::new(),
+        web_meant: Vec::new(),
         sites_ordered: false,
     };
     let shown = shown_results(&results, 10);

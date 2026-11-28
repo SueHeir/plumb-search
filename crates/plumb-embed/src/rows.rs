@@ -12,6 +12,7 @@
 
 use std::collections::BinaryHeap;
 use std::fs::File;
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -48,20 +49,20 @@ pub fn signs(vector: &[i8]) -> Vec<u8> {
 }
 
 /// How many signs differ between two rows of signs.
+#[inline(always)]
 fn differ(a: &[u8], b: &[u8]) -> u32 {
-    let (words, others) = (a.chunks_exact(8), b.chunks_exact(8));
-    let tail: u32 = words
-        .remainder()
+    let ((words, tail), (others, other_tail)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let ends: u32 = tail
         .iter()
-        .zip(others.remainder())
+        .zip(other_tail)
         .map(|(x, y)| (x ^ y).count_ones())
         .sum();
-    let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
     words
+        .iter()
         .zip(others)
-        .map(|(x, y)| (word(x) ^ word(y)).count_ones())
+        .map(|(x, y)| (u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y)).count_ones())
         .sum::<u32>()
-        + tail
+        + ends
 }
 
 /// The vectors of a page set by row, with their signs ([`rows_header`]).
@@ -163,26 +164,16 @@ impl RowVectors {
             return Vec::new();
         }
         let wanted = signs(query);
-        let width = wanted.len();
         let all = &self.signs[ROWS_HEADER_LEN..];
         let read_again = read_again.max(k);
         let part = self.rows.div_ceil(threads.max(1));
         let nearest_in = |start: usize| {
-            // The nearest so far, the farthest of them on top.
-            let mut near: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(read_again + 1);
-            for row in start..(start + part).min(self.rows) {
-                let found = (
-                    differ(&all[row * width..(row + 1) * width], &wanted),
-                    row as u32,
-                );
-                if near.len() < read_again {
-                    near.push(found);
-                } else if near.peek().is_some_and(|farthest| found < *farthest) {
-                    near.pop();
-                    near.push(found);
-                }
-            }
-            near.into_vec()
+            nearest_by_sign(
+                all,
+                &wanted,
+                start..(start + part).min(self.rows),
+                read_again,
+            )
         };
         let starts: Vec<usize> = (0..self.rows).step_by(part.max(1)).collect();
         let mut by_sign: Vec<(u32, u32)> = match starts.as_slice() {
@@ -208,6 +199,63 @@ impl RowVectors {
         found.truncate(k);
         found
     }
+}
+
+/// The `read_again` of `rows` whose signs in `all` differ least from
+/// `wanted`, as how many differ and the row, in no order. Ties go to the
+/// lower row.
+fn nearest_by_sign(
+    all: &[u8],
+    wanted: &[u8],
+    rows: Range<usize>,
+    read_again: usize,
+) -> Vec<(u32, u32)> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("popcnt") {
+        // SAFETY: the CPU has POPCNT.
+        return unsafe { nearest_by_sign_popcnt(all, wanted, rows, read_again) };
+    }
+    nearest_by_sign_any(all, wanted, rows, read_again)
+}
+
+/// [`nearest_by_sign`] counting a word's bits in one instruction, which
+/// x86-64 CPUs before 2008 lack: half the time of a search.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+fn nearest_by_sign_popcnt(
+    all: &[u8],
+    wanted: &[u8],
+    rows: Range<usize>,
+    read_again: usize,
+) -> Vec<(u32, u32)> {
+    nearest_by_sign_any(all, wanted, rows, read_again)
+}
+
+#[inline(always)]
+fn nearest_by_sign_any(
+    all: &[u8],
+    wanted: &[u8],
+    rows: Range<usize>,
+    read_again: usize,
+) -> Vec<(u32, u32)> {
+    let width = wanted.len();
+    // The nearest so far, the farthest of them on top, and how far that
+    // is once there are enough.
+    let mut near: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(read_again + 1);
+    let mut farthest = u32::MAX;
+    for row in rows {
+        let differing = differ(&all[row * width..(row + 1) * width], wanted);
+        if differing < farthest {
+            near.push((differing, row as u32));
+            if near.len() > read_again {
+                near.pop();
+            }
+            if near.len() == read_again {
+                farthest = near.peek().map_or(u32::MAX, |found| found.0);
+            }
+        }
+    }
+    near.into_vec()
 }
 
 #[cfg(test)]

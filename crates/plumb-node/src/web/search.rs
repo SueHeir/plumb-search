@@ -866,10 +866,12 @@ async fn page_search(
         .iter()
         .map(|p| p.hit.page.url.clone())
         .collect();
-    let new_pages = deeper
-        .pages
-        .into_iter()
-        .filter(|p| !seen.contains(&p.hit.page.url));
+    // The web index's pages are the first search's only: the deeper one
+    // places them for other sites, and both together would break their
+    // rules of one a site and how many on their own.
+    let new_pages = deeper.pages.into_iter().filter(|p| {
+        p.hit.page.set != plumb_index::pages::WEB_SET && !seen.contains(&p.hit.page.url)
+    });
     results.pages.extend(new_pages);
     Ok(results)
 }

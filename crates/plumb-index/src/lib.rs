@@ -337,6 +337,16 @@ pub struct RankConfig {
     /// ([`topics::asks_only_for_news`]): nytimes.com and reuters.com, not
     /// news.cn and news.by.
     pub news_sites: bool,
+    /// Pages of the web index ([`web`]) looked through, best first, for a
+    /// listed site's own page, shown under its result; 0 shows none.
+    pub web_under: usize,
+    /// Most other pages of the web index listed on their own.
+    pub web_alone: usize,
+    /// Sites listed before those pages.
+    pub web_after: usize,
+    /// Whether a page listed on their own must be among the first both by
+    /// its words and by its meaning ([`web::WEB_FIRST`]).
+    pub web_agree: bool,
 }
 
 impl Default for RankConfig {
@@ -375,6 +385,10 @@ impl Default for RankConfig {
             link_name_bonus: 0.4,
             health_authorities: true,
             news_sites: true,
+            web_under: 10,
+            web_alone: 1,
+            web_after: pages::PARTIAL_AFTER,
+            web_agree: false,
         }
     }
 }
@@ -401,6 +415,12 @@ pub trait Meaning {
     /// next nearest ([`pages::PageSearcher::add_meant`]), each with how
     /// near it is to the nearest of `sites`, the domains listed first.
     fn nearest_pages(&self, _sites: &[&str]) -> Vec<MeantPage> {
+        Vec::new()
+    }
+    /// The rows of the web index's pages nearest the query in meaning,
+    /// nearest first, the first [`web::WEB_FIRST`] of them; none without a
+    /// web index.
+    fn nearest_web(&self) -> Vec<u32> {
         Vec::new()
     }
 }
@@ -602,6 +622,11 @@ pub struct SearchResults {
     /// for the page search to add one of. Not sent: a node finds its own.
     #[serde(skip)]
     pub meant: Vec<MeantPage>,
+    /// The web index's pages nearest the query in meaning
+    /// ([`Meaning::nearest_web`]), for the listing to fuse with those its
+    /// words find. Not sent.
+    #[serde(skip)]
+    pub web_meant: Vec<u32>,
     /// Whether the site model put `hits` in order ([`learned::reorder_sites`]),
     /// so the row model only places pages among them. Not sent.
     #[serde(skip)]

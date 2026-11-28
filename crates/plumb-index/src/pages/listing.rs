@@ -11,6 +11,7 @@ use super::{
     place_operator_pages, place_pages, site_pages_after_named_article, PageHit, PageSearcher,
     OPERATOR_PAGES,
 };
+use crate::web::{list_web_pages, WebWords};
 use crate::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, Spelling};
 
 /// Pages looked at per search, before [`place_pages`] picks.
@@ -38,6 +39,9 @@ pub struct Listing<'a> {
     pub keep: &'a dyn Fn(&PageHit) -> bool,
     /// The town a name is, to list the sites of its namesakes last.
     pub town: &'a dyn Fn(&str) -> Option<Place>,
+    /// The web index, whose pages are listed after all else
+    /// ([`crate::web::list_web_pages`]).
+    pub web: Option<&'a WebWords>,
 }
 
 impl Listing<'_> {
@@ -121,18 +125,24 @@ impl Listing<'_> {
         pages.note_demand(&mut results.hits)?;
         self.spell(pages, query, options, &found, applied.is_some(), results)?;
         results.pages = place_pages(query, &results.hits, found);
-        if !self.learned_order {
-            return Ok(());
+        if self.learned_order {
+            crate::learned::reorder_results(
+                self.rank,
+                query,
+                results.sites_ordered,
+                meant.as_deref(),
+                &mut results.hits,
+                &mut results.pages,
+            );
+            self.after_learned_order(pages, query, options, results)?;
+            // Last, as nothing above knows the web index's pages: the
+            // learned order was trained without them, and rows written to
+            // train it leave them out.
+            if let Some(web) = self.web {
+                list_web_pages(web, query, self.rank, options, self.keep, results)?;
+            }
         }
-        crate::learned::reorder_results(
-            self.rank,
-            query,
-            results.sites_ordered,
-            meant.as_deref(),
-            &mut results.hits,
-            &mut results.pages,
-        );
-        self.after_learned_order(pages, query, options, results)
+        Ok(())
     }
 
     /// Checks `results`' spelling of `query` against the pages `found` for

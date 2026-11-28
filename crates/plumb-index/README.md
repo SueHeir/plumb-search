@@ -86,7 +86,7 @@ About 43,000 lines, tests included.
 | [items.rs](src/items.rs) | data format items read back as pages |
 | [page_items.rs](src/page_items.rs) | pages written as items (`page_item`), for `plumb-tools set from-pages` and the page index |
 | [places.rs](src/places.rs) | the places index: `parse_place_query`, `PlaceSearcher`, `build_place_index` |
-| [web.rs](src/web.rs) | the web index's words: crawl pages of popular sites by title and first words (`WebWords`), looked up by row, and `fuse`, which puts the pages found by words and by meaning in one order; `plumb-tools web-pages` builds it (no node uses it yet) |
+| [web.rs](src/web.rs) | the web index's words: crawl pages of popular sites by title and first words (`WebWords`), looked up by row, `fuse`, which puts the pages found by words and by meaning in one order, and `list_web_pages`, which lists them last in a search's results (a listed site's own page under it, the best of the others after 3 sites; `RankConfig::web_*`); `plumb-tools web-pages` builds it, and a node or eval given `--web-pages` lists it |
 | [learned.rs](src/learned.rs), [learned/net.rs](src/learned/net.rs) | the learned ranking: features, trees or a small net, `reorder` and `reorder_sites` |
 | [learned_model.json](src/learned_model.json) | the built-in model nodes use |
 | [learned_sites_model.json](src/learned_sites_model.json) | the built-in model for the first 100 sites, before pages are placed, trained on 100 site rows per test search and the graded sites of other searches |
